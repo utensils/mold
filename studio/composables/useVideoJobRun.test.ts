@@ -304,3 +304,85 @@ it("retires an earlier lost Stop intent before explicit Resume so refresh cannot
     api.mutate.mock.calls.filter((call) => call[2] === "resume"),
   ).toHaveLength(1);
 });
+
+it("retires an acknowledged missing job but preserves an unanswered attempt", async () => {
+  const accepted = createVideoJobRun(() => true);
+  await accepted.recover(owner, admission, { acknowledged: true });
+  expect(accepted.removed.value).toBe(true);
+  expect(accepted.admission.value).toBeNull();
+  const unanswered = createVideoJobRun(() => true);
+  await unanswered.recover(owner, admission);
+  expect(unanswered.removed.value).toBe(false);
+  expect(unanswered.uncertain.value).toBe(true);
+});
+
+it("does not resurrect a deleted accepted job from a delayed earlier read", async () => {
+  const state = createVideoJobRun(() => true);
+  api.get.mockResolvedValue({
+    ...job,
+    state: "completed",
+    can_cancel: false,
+    can_delete: true,
+  });
+  await state.recover(owner, admission);
+  let finish!: (value: unknown) => void;
+  api.get.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const oldRead = state.refresh();
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  await state.remove();
+  finish({ ...job, state: "completed" });
+  await oldRead;
+  expect(state.removed.value).toBe(true);
+  expect(state.detail.value).toBeNull();
+});
+
+it("keeps accepted recovery data visible after an offline delete failure", async () => {
+  const state = createVideoJobRun(() => true);
+  api.get.mockResolvedValue({
+    ...job,
+    state: "completed",
+    can_cancel: false,
+    can_delete: true,
+  });
+  await state.recover(owner, admission);
+  api.mutate.mockRejectedValue(new Error("offline"));
+  await expect(state.remove()).rejects.toThrow("offline");
+  expect(state.detail.value?.id).toBe("known");
+  expect(state.removed.value).toBe(false);
+});
+
+it("lets the creating owner forget only its matching acknowledged removed result", async () => {
+  const state = createVideoJobRun(() => true);
+  api.get.mockResolvedValue({ ...job, state: "completed", can_delete: true });
+  await state.recover(owner, admission);
+  state.forgetRemoved("another");
+  expect(state.detail.value?.id).toBe("known");
+  state.forgetRemoved("known");
+  expect(state.detail.value).toBeNull();
+  expect(state.removed.value).toBe(true);
+});
+
+it("keeps acknowledged recovery visible when persisting local retirement fails", async () => {
+  const state = createVideoJobRun(() => true);
+  api.get.mockResolvedValue({ ...job, state: "paused", can_resume: true });
+  await state.recover(owner, admission);
+  saveVideoJobOperation(admission);
+  state.admission.value = admission;
+  const saved = readVideoJobOperations();
+  const write = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+    throw new Error("device storage unavailable");
+  });
+  api.get.mockResolvedValue(null);
+  await state.refresh();
+  expect(state.removed.value).toBe(false);
+  expect(state.detail.value?.id).toBe("known");
+  expect(state.error.value).toContain("device storage unavailable");
+  write.mockRestore();
+  expect(readVideoJobOperations()).toEqual(saved);
+  await state.refresh();
+  expect(state.removed.value).toBe(true);
+});

@@ -4,11 +4,8 @@ import { computed, inject, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
 import { createVideoJobRun } from "../composables/useVideoJobRun";
-import {
-  mutateVideoJob,
-  type VideoJobAdmission,
-  type VideoJobOwner,
-} from "../api/videoJobs";
+import { type VideoJobAdmission, type VideoJobOwner } from "../api/videoJobs";
+import { videoLibraryOutputExists } from "../api/videoLibraryOutput";
 import { VIDEO_LIBRARY_NAVIGATION } from "../lib/videoLibraryNavigation";
 import { formatRequestedVideoDuration } from "../lib/videoRequestedDuration";
 const props = defineProps<{
@@ -21,12 +18,21 @@ const props = defineProps<{
   autoOpen?: boolean;
   hideTrigger?: boolean;
 }>();
-const emit = defineEmits<{ (event: "changed"): void }>();
+const emit = defineEmits<{
+  (event: "changed"): void;
+  (event: "removed", id: string): void;
+}>();
 const fleet = useHeldQueueTransfer(),
   openLibrary = inject(VIDEO_LIBRARY_NAVIGATION, null);
 const open = ref(false),
   busy = ref(false),
   deleting = ref(false);
+const outputState = ref<"unknown" | "checking" | "available" | "missing">(
+    "unknown",
+  ),
+  outputError = ref("");
+let outputRevision = 0,
+  removedEmitted = false;
 const captured = shallowRef<VideoJobOwner | null>(null);
 let revision = 0,
   timer: ReturnType<typeof setTimeout> | undefined;
@@ -62,6 +68,43 @@ function current(owner: VideoJobOwner): boolean {
 }
 const run = createVideoJobRun((owner) => open.value && current(owner));
 const { detail, error, cancelledBeforeAdmission, admission } = run;
+function finishRemoval() {
+  if (!run.removed.value || removedEmitted || !props.jobId) return false;
+  removedEmitted = true;
+  emit("removed", props.jobId);
+  emit("changed");
+  close();
+  return true;
+}
+async function checkOutput(): Promise<boolean> {
+  const owner = captured.value,
+    filename = detail.value?.output_filename,
+    id = detail.value?.id;
+  if (!owner || !filename || !openLibrary) return false;
+  const attempt = revision,
+    token = ++outputRevision;
+  const fresh = () =>
+    attempt === revision &&
+    token === outputRevision &&
+    open.value &&
+    current(owner) &&
+    detail.value?.id === id &&
+    detail.value?.output_filename === filename;
+  outputState.value = "checking";
+  outputError.value = "";
+  try {
+    const exists = await videoLibraryOutputExists(owner, filename, fresh);
+    if (!fresh()) return false;
+    outputState.value = exists ? "available" : "missing";
+    return exists;
+  } catch (cause) {
+    if (fresh()) {
+      outputState.value = "unknown";
+      outputError.value = `Could not check the saved video: ${cause instanceof Error ? cause.message : String(cause)}`;
+    }
+    return false;
+  }
+}
 const settled = computed(
   () =>
     cancelledBeforeAdmission.value ||
@@ -79,12 +122,16 @@ async function refresh(attempt = revision) {
   }
   await run.refresh();
   if (attempt !== revision || !open.value || !current(owner)) return;
+  if (finishRemoval()) return;
+  await checkOutput();
+  if (attempt !== revision || !open.value || !current(owner)) return;
   if (!settled.value && !error.value && document.visibilityState !== "hidden")
     timer = setTimeout(() => void refresh(attempt), 2000);
 }
 function close() {
   open.value = false;
   revision += 1;
+  outputRevision += 1;
   if (timer) clearTimeout(timer);
 }
 async function show() {
@@ -94,6 +141,9 @@ async function show() {
   if (timer) clearTimeout(timer);
   captured.value = { ...owner, target: { ...owner.target } };
   deleting.value = false;
+  removedEmitted = false;
+  outputState.value = "unknown";
+  outputError.value = "";
   open.value = true;
   const attempt = ++revision;
   await run.recover(
@@ -109,7 +159,11 @@ async function show() {
         : {}),
       createdAt: Date.now(),
     },
+    { acknowledged: !props.operation },
   );
+  if (attempt !== revision || !open.value || !current(owner)) return;
+  if (finishRemoval()) return;
+  await checkOutput();
   if (attempt === revision && open.value && !settled.value && !error.value)
     timer = setTimeout(() => void refresh(attempt), 2000);
 }
@@ -123,17 +177,11 @@ async function action(kind: "cancel" | "resume" | "delete") {
   try {
     if (kind === "cancel") await run.cancel();
     else if (kind === "resume") await run.resume();
-    else
-      await mutateVideoJob(
-        owner,
-        id,
-        kind,
-        () => attempt === revision && current(owner),
-      );
+    else await run.remove();
     if (attempt !== revision || !current(owner)) return;
+    if (finishRemoval()) return;
     emit("changed");
-    if (kind === "delete") close();
-    else await refresh(attempt);
+    await refresh(attempt);
   } catch (cause) {
     if (attempt === revision)
       error.value = cause instanceof Error ? cause.message : String(cause);
@@ -142,8 +190,10 @@ async function action(kind: "cancel" | "resume" | "delete") {
     deleting.value = false;
   }
 }
-function showSaved() {
+async function showSaved() {
   if (
+    !busy.value &&
+    (await checkOutput()) &&
     captured.value &&
     detail.value?.output_filename &&
     current(captured.value)
@@ -181,7 +231,7 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <button
-    v-if="!hideTrigger"
+    v-if="!hideTrigger && !run.removed.value"
     type="button"
     :disabled="!jobId || !available"
     class="video-job-control"
@@ -207,7 +257,9 @@ onBeforeUnmount(() => {
             {{
               detail.state === "completed"
                 ? detail.output_filename
-                  ? "Saved to Library"
+                  ? outputState === "available"
+                    ? "Saved to Library"
+                    : "Completed"
                   : "Completed, but no saved Library video was reported."
                 : `${detail.state.charAt(0).toUpperCase()}${detail.state.slice(1)}`
             }}
@@ -220,6 +272,14 @@ onBeforeUnmount(() => {
           <p v-if="detail.error_detail || detail.error">
             {{ detail.error_detail ?? detail.error }}
           </p>
+          <p v-if="outputState === 'missing'" role="status">
+            This video is no longer in this machine's Library. Its recovery data
+            can still be removed.
+          </p>
+          <p v-if="outputState === 'checking'" role="status">
+            Checking the saved video…
+          </p>
+          <p v-if="outputError" role="alert">{{ outputError }}</p>
           <div class="video-job-actions">
             <ParentVideoRestart
               v-if="
@@ -232,7 +292,13 @@ onBeforeUnmount(() => {
               :job-id="detail.id"
             />
             <button
-              v-if="detail.output_filename && captured && openLibrary"
+              v-if="
+                detail.output_filename &&
+                captured &&
+                openLibrary &&
+                outputState === 'available'
+              "
+              :disabled="busy"
               type="button"
               @click="showSaved"
             >

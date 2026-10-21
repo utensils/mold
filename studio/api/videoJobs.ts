@@ -222,6 +222,13 @@ export async function admitVideoJob<Generation extends object>(
     }),
   });
 }
+function videoJobNotFound(cause: unknown): boolean {
+  return (
+    cause instanceof ApiError &&
+    cause.status === 404 &&
+    (cause.body as { code?: unknown } | null)?.code === "VIDEO_JOB_NOT_FOUND"
+  );
+}
 export async function getVideoJob(
   owner: VideoJobOwner,
   id: string,
@@ -238,7 +245,7 @@ export async function getVideoJob(
       );
     return job;
   } catch (cause) {
-    if (cause instanceof ApiError && cause.status === 404) return null;
+    if (videoJobNotFound(cause)) return null;
     throw cause;
   }
 }
@@ -253,19 +260,39 @@ export async function mutateVideoJob(
     throw new Error("The video or machine changed before this action.");
   if (action !== "cancel") {
     const job = await getVideoJob(owner, id);
+    if (!isCurrent())
+      throw new Error("The video or machine changed before this action.");
+    if (!job && action === "delete") return;
     if (!job || !(action === "resume" ? job.can_resume : job.can_delete))
       throw new Error("This video changed. Refresh its Queue controls.");
     if (!isCurrent())
       throw new Error("The video or machine changed before this action.");
   }
-  const response = await apiFetchTo(
-    owner.target,
-    `/api/video-jobs/${encodeURIComponent(id)}${action === "delete" ? "" : `/${action}`}`,
-    {
-      method: action === "delete" ? "DELETE" : "POST",
-      headers: { "x-mold-destination-instance": owner.instanceId! },
-    },
-  );
+  let response: Response;
+  try {
+    response = await apiFetchTo(
+      owner.target,
+      `/api/video-jobs/${encodeURIComponent(id)}${action === "delete" ? "" : `/${action}`}`,
+      {
+        method: action === "delete" ? "DELETE" : "POST",
+        headers: { "x-mold-destination-instance": owner.instanceId! },
+      },
+    );
+  } catch (cause) {
+    if (action !== "delete" || !isCurrent()) throw cause;
+    if (videoJobNotFound(cause)) return;
+    // Reconcile ambiguous Delete replies with one read, never another mutation.
+    if (cause instanceof ApiError && cause.status < 500 && cause.status !== 408)
+      throw cause;
+    await assertVideoJobOwner(owner);
+    if (!isCurrent())
+      throw new Error("The video or machine changed before this action.");
+    const remaining = await getVideoJob(owner, id);
+    if (!isCurrent())
+      throw new Error("The video or machine changed before this action.");
+    if (!remaining) return;
+    throw cause;
+  }
   if (action === "cancel") {
     let receipt: unknown;
     try {

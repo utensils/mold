@@ -277,3 +277,46 @@ it("validates full-u64 restored seeds as exact decimal strings without changing 
     }),
   ).rejects.toThrow("seed");
 });
+
+it("distinguishes an exact removed job from an unavailable route", async () => {
+  const { ApiError } = await import("./client");
+  json.mockRejectedValueOnce(
+    new ApiError("missing", 404, { code: "VIDEO_JOB_NOT_FOUND" }),
+  );
+  expect(await getVideoJob(owner, "known")).toBeNull();
+  json.mockRejectedValueOnce(
+    new ApiError("route missing", 404, { code: "NOT_FOUND" }),
+  );
+  await expect(getVideoJob(owner, "known")).rejects.toThrow("route missing");
+});
+
+it("reconciles a lost successful Delete reply without sending Delete twice", async () => {
+  const { ApiError } = await import("./client");
+  let reads = 0;
+  json.mockImplementation(async (_, path) => {
+    if (path === "/api/status") return { instance_id: "installation" };
+    if (path === "/api/capabilities")
+      return { video_jobs: { supported: true, literal_prompts: true } };
+    if (++reads === 1) return { id: "known", can_delete: true };
+    throw new ApiError("removed", 404, { code: "VIDEO_JOB_NOT_FOUND" });
+  });
+  fetch.mockRejectedValueOnce(new Error("lost Delete reply"));
+  await expect(
+    mutateVideoJob(owner, "known", "delete"),
+  ).resolves.toBeUndefined();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("treats exact already-removed recovery data as deleted without a second mutation", async () => {
+  const { ApiError } = await import("./client");
+  json.mockImplementation(async (_, path) => {
+    if (path === "/api/status") return { instance_id: "installation" };
+    if (path === "/api/capabilities")
+      return { video_jobs: { supported: true, literal_prompts: true } };
+    throw new ApiError("removed", 404, { code: "VIDEO_JOB_NOT_FOUND" });
+  });
+  await expect(
+    mutateVideoJob(owner, "known", "delete"),
+  ).resolves.toBeUndefined();
+  expect(fetch).not.toHaveBeenCalled();
+});
