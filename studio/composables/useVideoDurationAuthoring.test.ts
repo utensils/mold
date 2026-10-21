@@ -200,3 +200,33 @@ it("an explicit new draft or Use these settings clears a stored prefix even befo
   expect(state.draft.value?.durationMs).toBe("4458");
   expect(inspect).not.toHaveBeenCalled();
 });
+it("Use settings restores literal scenes and added duration through a cold Create mount", async () => {
+  requestVideoDurationReset({
+    video_job: {
+      source_frames: "240",
+      authoring: {
+        duration_ms: "6000",
+        boundary_frames: 124,
+        seed: "18446744073709551615",
+        scenes: [
+          { prompt: " A\\n\r\n", duration_ms: "2000" },
+          { prompt: " B ", duration_ms: "4000" },
+        ],
+      },
+    },
+  });
+  const { state } = setup();
+  await nextTick();
+  expect(state.draft.value).toMatchObject({
+    durationMs: "6000",
+    scenesEnabled: true,
+    scenes: [
+      { prompt: " A\\n\r\n", durationMs: "2000" },
+      { prompt: " B ", durationMs: "4000" },
+    ],
+  });
+  expect(state.draft.value?.extension).toBeUndefined();
+  expect(state.draft.value?.reuseNotice).toContain(
+    "original video is not attached",
+  );
+});

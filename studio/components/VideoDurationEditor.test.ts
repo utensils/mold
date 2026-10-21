@@ -59,3 +59,18 @@ it("sums scene times exactly and supports ordered editing without hiding an inva
   expect(invalid.scenes).toHaveLength(2);
   expect(invalid.scenes[0]?.prompt).toBe("");
 });
+it("discloses that reusing an extended movie makes fresh footage", () => {
+  const w = mount(VideoDurationEditor, {
+    props: {
+      modelValue: {
+        ...initial,
+        reuseNotice:
+          "These settings make new footage. The original video is not attached.",
+      },
+      prompt: "new footage",
+    },
+  });
+  expect(w.get('[role="status"]').text()).toContain(
+    "original video is not attached",
+  );
+});

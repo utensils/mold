@@ -16,7 +16,7 @@ export interface DurableGenerationChildSummary {
   height: number;
   steps: number;
   guidance: number;
-  seed: number | null;
+  seed: number | string | null;
   format: OutputFormat;
 }
 

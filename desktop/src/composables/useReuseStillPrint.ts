@@ -1,3 +1,4 @@
+import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import {
   retainedSourceMediaDisclosable,
   retainedSourceMediaDisclosure,
@@ -21,6 +22,12 @@ export function useReuseStillPrint() {
   const toasts = useToastStore();
 
   return function reuseStillPrint(entry: MergedPrint) {
+    try {
+      videoSettingsForReuse(entry.item.metadata);
+    } catch (error) {
+      toasts.push(error instanceof Error ? error.message : String(error), "error");
+      return false;
+    }
     // The bucket's authority may be unresolved (this device before its engine
     // answers); the recipe still restores, and the canvas says the media
     // cannot load rather than the whole reuse refusing.
@@ -107,5 +114,6 @@ export function useReuseStillPrint() {
           : null;
       if (disclosure) toasts.push(disclosure, "error");
     })();
+    return true;
   };
 }

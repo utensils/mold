@@ -5,7 +5,7 @@ import { randomSeed } from "../stores/generation";
 
 const props = withDefaults(
   defineProps<{
-    lastSeed?: number | null;
+    lastSeed?: number | string | null;
     disabled?: boolean;
   }>(),
   { lastSeed: null, disabled: false },

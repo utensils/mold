@@ -108,6 +108,9 @@ function onePrompt() {
       </div>
       <slot name="source" />
     </div>
+    <p v-if="modelValue.reuseNotice" role="status">
+      {{ modelValue.reuseNotice }}
+    </p>
     <template v-if="scenesActive">
       <p>
         {{ sourceTitle ? "Add duration" : "Duration" }}:

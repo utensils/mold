@@ -2068,7 +2068,7 @@ describe("submitBatch connection cap", () => {
       height: req.height,
       steps: req.steps,
       guidance: 1,
-      seed: (req.seed ?? 0) + index - 1,
+      seed: Number(req.seed ?? 0) + index - 1,
       format: "png" as const,
     });
     storage.set(

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import VideoJobHistory from "@studio/components/VideoJobHistory.vue";
 import { takeVideoLibraryExtension } from "@studio/lib/videoLibraryExtensionHandoff";
@@ -8939,6 +8940,12 @@ async function loadMoreGalleryPage(): Promise<void> {
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
   if (reusingPrint.value || print.metadata_synthetic) return;
+  try {
+    videoSettingsForReuse(print.metadata);
+  } catch (error) {
+    reusePrintError.value = error instanceof Error ? error.message : String(error);
+    return;
+  }
   const retainedVersion = retainedSourceAuthority.begin();
   clearSelectedQueueRender();
   const epoch = ++reusePrintEpoch;
@@ -8996,7 +9003,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     }
     authoritativeReuseApply = true;
     const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
-    requestVideoDurationReset();
+    requestVideoDurationReset(print.metadata);
     await nextTick();
     authoritativeReuseApply = false;
     // The print's own saved title comes back with its settings; the Library

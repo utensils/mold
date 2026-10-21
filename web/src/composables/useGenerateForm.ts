@@ -1,3 +1,4 @@
+import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import { ref, watch, type Ref, type WatchStopHandle } from "vue";
 import type {
   GenerateFormState,
@@ -688,6 +689,7 @@ export function applyMetadataToForm(
   metadata: OutputMetadata,
   options: ApplyMetadataOptions = {},
 ): GenerateFormState {
+  const videoReuse = videoSettingsForReuse(metadata);
   const model = options.models?.find((m) => m.name === metadata.model);
   const next = model
     ? modelDefaultsPatch(current, model)
@@ -768,7 +770,7 @@ export function applyMetadataToForm(
     steps: metadata.steps || next.steps,
     guidance: metadata.guidance ?? next.guidance,
     seedMode: metadata.seed == null ? "random" : "static",
-    seed: metadata.seed ?? null,
+    seed: videoReuse?.seed ?? metadata.seed ?? null,
     scheduler: metadata.scheduler ?? null,
     cfgPlus: metadata.cfg_plus ?? false,
     strength:
@@ -804,7 +806,7 @@ export function applyMetadataToForm(
     temporalUpscale: metadata.temporal_upscale ?? null,
     guidanceOverrides: guidanceOverridesFromWire(metadata.guidance_overrides),
     wanRecipe: wanRecipeFromWire(metadata),
-    frames: metadata.frames ?? null,
+    frames: videoReuse?.frames ?? metadata.frames ?? null,
     predictDuration: metadata.duration_prediction_requested === true,
     fps: metadata.fps ?? null,
     outputFormat:

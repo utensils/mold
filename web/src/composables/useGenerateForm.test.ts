@@ -3602,3 +3602,31 @@ describe("toRequest — Qwen Image 2.1 transparency and references", () => {
     ).toBe(false);
   });
 });
+it("reuses exact parent seed and authored input frames without rounding", () => {
+  const f = useGenerateForm();
+  const m = {
+    model: "minimax-h3-fl2va",
+    prompt: " literal\\n\r\n ",
+    seed: 18446744073709552000,
+    frames: 480,
+    fps: 24,
+    steps: 9,
+    guidance: 0,
+    width: 768,
+    height: 768,
+    version: "test",
+    video_job: {
+      source_frames: "240",
+      authoring: {
+        duration_ms: "10000",
+        boundary_frames: 124,
+        input_frames: 107,
+        seed: "18446744073709551615",
+      },
+    },
+  } as OutputMetadata;
+  const next = applyMetadataToForm(f.state.value, m);
+  expect(next.seed).toBe("18446744073709551615");
+  expect(next.frames).toBe(107);
+  expect(next.prompt).toBe(" literal\\n\r\n ");
+});

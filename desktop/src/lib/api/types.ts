@@ -303,7 +303,7 @@ export interface GenerateRequest {
   height: number;
   steps: number;
   guidance?: number;
-  seed?: number;
+  seed?: number | string;
   batch_size?: number;
   output_format?: OutputFormat;
   /** 3-D controls; refused at admission on a recipe with no `mesh` block. */
@@ -437,7 +437,7 @@ export interface CompleteEvent {
   original_image?: string | null;
   original_width?: number | null;
   original_height?: number | null;
-  seed_used: number;
+  seed_used: number | string;
   generation_time_ms: number;
   model: string;
   video_frames?: number | null;

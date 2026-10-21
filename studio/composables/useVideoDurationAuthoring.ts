@@ -15,7 +15,10 @@ import {
 } from "../lib/videoDurationAuthoring";
 import { readVideoJobOperations } from "../lib/videoJobRecovery";
 import { inspectVideoLibraryExtension } from "../api/videoLibraryExtension";
-import { videoDurationResetPending } from "../lib/videoLibraryExtensionHandoff";
+import {
+  videoDurationResetPending,
+  videoDurationReusePending,
+} from "../lib/videoLibraryExtensionHandoff";
 import type { VideoLibraryExtensionSelection } from "../lib/videoLibraryExtensionHandoff";
 import { sameChainOwner } from "../api/chainJobs";
 import { prepareDurationVideo } from "../api/prepareDurationVideo";
@@ -51,6 +54,8 @@ export function createVideoDurationAuthoring(options: {
   try {
     if (videoDurationResetPending.value) {
       localStorage.removeItem(options.key);
+      draft.value = videoDurationReusePending.value;
+      videoDurationReusePending.value = null;
       videoDurationResetPending.value = false;
     }
     const raw = localStorage.getItem(options.key);
@@ -62,6 +67,9 @@ export function createVideoDurationAuthoring(options: {
         !Array.isArray(value.scenes) ||
         value.scenes.length > 4096 ||
         typeof value.scenesEnabled !== "boolean" ||
+        (value.reuseNotice != null &&
+          (typeof value.reuseNotice !== "string" ||
+            value.reuseNotice.length > 512)) ||
         (value.durationMs !== null && typeof value.durationMs !== "string") ||
         value.scenes.some(
           (scene) =>
@@ -76,9 +84,13 @@ export function createVideoDurationAuthoring(options: {
       if (
         Object.keys(value).some(
           (key) =>
-            !["durationMs", "scenesEnabled", "scenes", "extension"].includes(
-              key,
-            ),
+            ![
+              "durationMs",
+              "scenesEnabled",
+              "scenes",
+              "extension",
+              "reuseNotice",
+            ].includes(key),
         )
       )
         throw new Error(
@@ -398,7 +410,9 @@ export function createVideoDurationAuthoring(options: {
   }
   watch(videoDurationResetPending, (pending) => {
     if (pending) {
-      reset();
+      draft.value = videoDurationReusePending.value;
+      videoDurationReusePending.value = null;
+      if (!draft.value) reset();
       videoDurationResetPending.value = false;
     }
   });

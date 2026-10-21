@@ -77,7 +77,7 @@ const props = withDefaults(
     /** Recent prints, newest first, for the Recent tab. */
     recent?: MergedPrint[];
     /** Seed of the most recent finished print — powers "lock last seed". */
-    lastSeed?: number | null;
+    lastSeed?: number | string | null;
     /** Why the canvas holds its current size — the shape resolver's authority. */
     canvasIntent?: CanvasIntent;
     /** Authored video jobs choose their final filename on the server. */

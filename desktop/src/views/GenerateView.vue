@@ -4453,7 +4453,7 @@ function applyPrefill() {
     );
   }
   applyPrefillToForm(form, prefill, installedModels.value);
-  requestVideoDurationReset();
+  requestVideoDurationReset("metadata" in prefill ? prefill.metadata : undefined);
   inspectSelectedQueueRender("metadata" in prefill ? prefill.queueSelection : undefined);
   if ("metadata" in prefill && prefill.print) showRestoredPrint(prefill.print);
   discloseMissingRestoredModel();

@@ -831,7 +831,7 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 function reuseSettings(entry: MergedPrint) {
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  reuseStillPrint(entry);
+  if (!reuseStillPrint(entry)) return;
   lightboxOpen.value = false;
   void router.push("/create");
 }

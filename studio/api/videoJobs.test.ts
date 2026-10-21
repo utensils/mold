@@ -254,3 +254,26 @@ it("fences parent reads with the captured installation header", async () => {
     owner.instanceId,
   );
 });
+it("validates full-u64 restored seeds as exact decimal strings without changing literal prompts", async () => {
+  const exact = {
+    ...request,
+    generation: {
+      ...request.generation,
+      seed: "18446744073709551615",
+      negative_prompt: "  literal\\n\r\n ",
+    },
+  };
+  await validateVideoJob(owner, exact);
+  const call = json.mock.calls.find(
+    ([, path]) => path === "/api/video-jobs/validate",
+  );
+  expect(JSON.parse(call?.[2]?.body as string).generation).toEqual(
+    exact.generation,
+  );
+  await expect(
+    validateVideoJob(owner, {
+      ...exact,
+      generation: { ...exact.generation, seed: "18446744073709551616" },
+    }),
+  ).rejects.toThrow("seed");
+});

@@ -35,7 +35,7 @@ const props = withDefaults(
     model?: ModelEntry | null;
     /** Timing metadata without changing legacy resolution projection behavior. */
     durationModel?: ModelEntry | null;
-    lastSeed: number | null;
+    lastSeed: number | string | null;
     disabled?: boolean;
     stepsError?: string | null;
     guidanceError?: string | null;

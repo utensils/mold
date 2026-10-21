@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import { LibraryVisit } from "@studio/lib/libraryUnreadLedger";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
@@ -2409,6 +2410,12 @@ async function restoreLibraryIdentity(
 }
 
 async function onReuse(item: GalleryImage) {
+  try {
+    videoSettingsForReuse(item.metadata);
+  } catch (error) {
+    toast("error", error instanceof Error ? error.message : String(error));
+    return;
+  }
   const epoch = ++reuseEpoch;
   const retainedVersion = beginRetainedSourceReuseIntent();
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
@@ -2423,7 +2430,7 @@ async function onReuse(item: GalleryImage) {
     height: form.state.value.height,
     sourceFit: JSON.stringify(form.state.value.sourceFitPolicy),
   };
-  requestVideoDurationReset();
+  requestVideoDurationReset(item.metadata);
   closeLightbox();
   await router.push({ name: "create" });
   if (epoch !== reuseEpoch) return;

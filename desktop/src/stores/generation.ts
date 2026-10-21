@@ -1,3 +1,4 @@
+import { exactSeed, incrementExactSeed } from "@studio/lib/videoSettingsReuse";
 import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
 import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { reactive } from "vue";
@@ -134,7 +135,7 @@ export interface JobRoute {
 /** Filesystem-safe local filename for a saved output. */
 export function suggestOutputFilename(
   model: string,
-  seed: number,
+  seed: number | string,
   format: string,
   nowMs: number = Date.now(),
   role?: "original" | "upscaled",
@@ -182,8 +183,11 @@ export function needsHostRoute(opts: {
  * otherwise a fresh random base is drawn so the run is reproducible from the
  * first sibling. Pure given `rng`.
  */
-export function resolveBaseSeed(seed: number | undefined, rng: () => number = randomSeed): number {
-  return seed !== undefined && Number.isFinite(seed) ? seed : rng();
+export function resolveBaseSeed(
+  seed: number | string | undefined,
+  rng: () => number = randomSeed,
+): number | string {
+  return seed !== undefined && exactSeed(seed) ? seed : rng();
 }
 
 export interface BatchRequestOptions {
@@ -212,7 +216,7 @@ export interface BatchRequestOptions {
 export function planBatchRequests(
   req: GenerateRequest,
   batchSize: number,
-  baseSeed: number,
+  baseSeed: number | string,
   options: BatchRequestOptions = {},
 ): GenerateRequest[] {
   const size = Math.max(1, Math.floor(batchSize));
@@ -244,7 +248,7 @@ export function planBatchRequests(
     ...(options.batchId !== undefined
       ? { batch_id: options.batchId, batch_index: i + 1, batch_count: size }
       : {}),
-    seed: baseSeed + i,
+    seed: incrementExactSeed(baseSeed, i),
     batch_size: 1,
   }));
 }
@@ -560,7 +564,7 @@ export const useGenerationStore = defineStore("generation", {
       return state.jobs.filter((j) => j.status !== "complete" && j.status !== "error");
     },
     /** Seed of the most recent finished print — powers "lock last seed". */
-    lastSeedUsed(state): number | null {
+    lastSeedUsed(state): number | string | null {
       for (let i = state.jobs.length - 1; i >= 0; i--) {
         const result = state.jobs[i]!.result;
         if (result) return result.seed_used;

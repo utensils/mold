@@ -1,3 +1,4 @@
+import { exactSeed, videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 /**
  * Reactive form state for the Generate workspace and the pure builder that
  * turns it into a wire `GenerateRequest`. The capability matrix
@@ -1089,7 +1090,13 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
     form.sourceImageCapability,
     form.recipeCapabilities,
   );
-  const parsedSeed = form.seed.trim() === "" ? undefined : Number(form.seed);
+  const seedText = form.seed.trim();
+  const parsedSeed =
+    seedText === ""
+      ? undefined
+      : exactSeed(seedText) && BigInt(seedText) > BigInt(Number.MAX_SAFE_INTEGER)
+        ? seedText
+        : Number(seedText);
   let loras: LoraWeight[] = form.loras.map((l) => ({ path: l.path, scale: l.scale }));
 
   // Camera motion rides the ordinary loras[] stack (mirrors the CLI's
@@ -1149,7 +1156,7 @@ export function buildRequest(form: GenerateForm): GenerateRequest {
   );
   if (namedViews.length) req.references = namedViews;
 
-  if (parsedSeed !== undefined && Number.isFinite(parsedSeed)) req.seed = parsedSeed;
+  if (parsedSeed !== undefined && exactSeed(parsedSeed)) req.seed = parsedSeed;
   if (req.prompt && form.originalPrompt && form.originalPrompt !== req.prompt) {
     req.original_prompt = form.originalPrompt;
   }
@@ -1482,6 +1489,7 @@ export function applyMetadataToForm(
   metadata: OutputMetadata,
   models: ModelEntry[] = [],
 ): void {
+  const videoReuse = videoSettingsForReuse(metadata);
   form.cameraControl = null;
   const model = findInstalledModel(models, metadata.model);
   if (model) {
@@ -1526,7 +1534,7 @@ export function applyMetadataToForm(
   form.height = metadata.generation_height || metadata.height || form.height;
   form.steps = metadata.steps || form.steps;
   form.guidance = metadata.guidance ?? form.guidance;
-  form.seed = metadata.seed == null ? "" : String(metadata.seed);
+  form.seed = videoReuse?.seed ?? (metadata.seed == null ? "" : String(metadata.seed));
   form.scheduler = normalizeMetadataScheduler(metadata.scheduler);
   form.cfgPlus = metadata.cfg_plus ?? false;
   if (metadata.strength != null) form.strength = metadata.strength;
@@ -1565,7 +1573,7 @@ export function applyMetadataToForm(
   }
 
   // Video params (`video_frames`/`video_fps` are legacy desktop aliases).
-  const frames = metadata.frames ?? metadata.video_frames;
+  const frames = videoReuse?.frames ?? metadata.frames ?? metadata.video_frames;
   if (frames != null) form.frames = frames;
   // Preserve authored provenance even when Library reuse happens before the
   // inventory row arrives. Request building remains fail-closed against

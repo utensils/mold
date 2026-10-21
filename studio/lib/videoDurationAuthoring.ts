@@ -17,6 +17,7 @@ export interface VideoDurationExtension {
   references: { name: string; role: string }[];
 }
 export interface VideoDurationAuthoring {
+  reuseNotice?: string;
   extension?: VideoDurationExtension;
   durationMs: string | null;
   scenesEnabled: boolean;

@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import {
+  videoSettingsForReuse,
+  incrementExactSeed,
+} from "@studio/lib/videoSettingsReuse";
 import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import { durationVideoCopies } from "@studio/lib/videoDurationAuthoring";
 import {
@@ -1051,7 +1055,7 @@ const selectedIndex = ref<number>(-1);
 // the rail ~1.5 s after landing and the persistence watcher then writes the
 // shortened list, so the job rail alone forgets the seed across reloads.
 // `completedSeedToLock` filters chain completions that fabricate seed_used=0.
-const lastSeedUsed = ref<number | null>(loadLastSeed());
+const lastSeedUsed = ref<number | string | null>(loadLastSeed());
 const stream = useGenerateStream(
   (job) => {
     const seed = completedSeedToLock(job);
@@ -2121,7 +2125,7 @@ function applyGenerationHandoff() {
   form.state.value = applyMetadataToForm(form.state.value, metadata, {
     models: models.value,
   });
-  requestVideoDurationReset();
+  requestVideoDurationReset(metadata);
   inspectSelectedQueueRender(handoff.queueSelection);
   void restoreReusedIdentityPhoto(metadata);
   fileUnder.restoreFromMetadata(metadata);
@@ -3839,7 +3843,7 @@ async function submitRequestCopies(
               batch_id: batchId,
               batch_index: index + 1,
               batch_count: copies,
-              seed: baseSeed + index,
+              seed: incrementExactSeed(baseSeed, index),
             }));
       durationVideoCopies(form.state.value.batchSize, plans.length);
       const owner = {
@@ -3895,7 +3899,7 @@ async function submitRequestCopies(
     batch_id: batchId,
     batch_index: index + 1,
     batch_count: copies,
-    seed: baseSeed + index,
+    seed: incrementExactSeed(baseSeed, index),
   }));
   return submitOrRefuse(() =>
     stream.submitBatch(
@@ -4502,7 +4506,10 @@ async function onSubmitInner(
       form.state.value.seedMode === "increment" &&
       form.state.value.seed !== null
     ) {
-      form.state.value.seed += Math.max(1, form.state.value.batchSize);
+      form.state.value.seed = incrementExactSeed(
+        form.state.value.seed,
+        Math.max(1, form.state.value.batchSize),
+      );
     }
   } catch (error) {
     if (!preparingFreshVideo) throw error;
@@ -5327,12 +5334,19 @@ function openItem(item: GalleryImage) {
 }
 
 function recreateFromGallery(item: GalleryImage) {
+  try {
+    videoSettingsForReuse(item.metadata);
+  } catch (error) {
+    composerError.value =
+      error instanceof Error ? error.message : String(error);
+    return;
+  }
   clearSelectedQueueRender();
   form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
     format: item.format,
     models: models.value,
   });
-  requestVideoDurationReset();
+  requestVideoDurationReset(item.metadata);
   void restoreReusedIdentityPhoto(item.metadata);
   fileUnder.restoreFromMetadata(item.metadata);
   noticeFirstLastFrameRestore(item.metadata);

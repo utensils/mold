@@ -63,7 +63,7 @@ const props = withDefaults(
     mobile?: boolean;
     /** Seed of the most recent finished print — powers "lock last seed"
      * (desktop InspectorPanel parity). */
-    lastSeed?: number | null;
+    lastSeed?: number | string | null;
     routingRequest?: Partial<GenerateRoutingRequest> | null | undefined;
   }>(),
   {

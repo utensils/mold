@@ -86,7 +86,7 @@ export interface OutputMetadata {
    * as a refusal. It is the only answer a client has for a print whose model
    * is not installed anywhere. */
   family?: string | null;
-  seed: number;
+  seed: number | string;
   steps: number;
   guidance: number;
   width: number;

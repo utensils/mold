@@ -1,3 +1,4 @@
+import { exactSeed } from "../lib/videoSettingsReuse";
 import { ApiError, apiFetchTo, apiJsonTo } from "./client";
 import {
   assertChainOwner,
@@ -72,12 +73,7 @@ function validateRequest(request: VideoJobRequest<object>): void {
     seed?: unknown;
     batch_size?: unknown;
   };
-  if (
-    generation.seed != null &&
-    (typeof generation.seed !== "number" ||
-      !Number.isSafeInteger(generation.seed) ||
-      generation.seed < 0)
-  )
+  if (generation.seed != null && !exactSeed(generation.seed))
     throw new Error(
       "This seed cannot be represented exactly. Enter a seed within the supported browser range.",
     );

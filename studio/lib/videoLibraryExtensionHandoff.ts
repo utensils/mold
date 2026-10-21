@@ -1,3 +1,5 @@
+import { videoSettingsForReuse } from "./videoSettingsReuse";
+import type { VideoDurationAuthoring } from "./videoDurationAuthoring";
 import { shallowRef, ref, type InjectionKey } from "vue";
 import type { VideoJobOwner } from "../api/videoJobs";
 import type { VideoJobSource } from "./api/videoJobTypes";
@@ -27,6 +29,11 @@ export function takeVideoLibraryExtension() {
 
 /** Reuse/new-draft is explicit permission to stop extending the prior movie. */
 export const videoDurationResetPending = ref(false);
-export function requestVideoDurationReset() {
+export const videoDurationReusePending =
+  shallowRef<VideoDurationAuthoring | null>(null);
+export function requestVideoDurationReset(metadata?: object) {
+  videoDurationReusePending.value = metadata
+    ? (videoSettingsForReuse(metadata)?.draft ?? null)
+    : null;
   videoDurationResetPending.value = true;
 }

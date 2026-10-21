@@ -351,3 +351,18 @@ describe("mobile durable generation recovery", () => {
     });
   });
 });
+it("retains the exact full-u64 seed through cold durable presentation recovery", () => {
+  let item: string | null = null;
+  const storage = {
+    getItem: () => item,
+    setItem: (_key: string, value: string) => {
+      item = value;
+    },
+  };
+  const row = recovery("exact", [{ ...request(), seed: "18446744073709551615" }]);
+  expect(row.presentations[0]?.seed).toBe("18446744073709551615");
+  saveMobileDurableGenerationRecoveries(storage, [row]);
+  expect(loadMobileDurableGenerationRecoveries(storage)[0]?.presentations[0]?.seed).toBe(
+    "18446744073709551615",
+  );
+});

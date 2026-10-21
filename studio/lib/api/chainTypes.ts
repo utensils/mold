@@ -33,7 +33,7 @@ export interface ChainStageWire {
   generation_references?: GenerationReference[] | null;
   keyframes?: KeyframeConditionWire[] | null;
   negative_prompt?: string | null;
-  seed_offset?: number | null;
+  seed_offset?: number | string | null;
   transition?: ChainTransition;
   fade_frames?: number | null;
   loras?: Array<{ path: string; scale: number; name?: string | null }>;
@@ -57,7 +57,7 @@ export interface ChainRequestWire {
   width: number;
   height: number;
   fps?: number;
-  seed?: number | null;
+  seed?: number | string | null;
   steps: number;
   guidance: number;
   strength?: number;

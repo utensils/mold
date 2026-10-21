@@ -1,0 +1,3 @@
+### Fixed
+
+- Restore a saved duration video's requested length, optional scene prompts, exact seed and original input positions through Use settings in web, desktop and mobile. Reusing an extended video starts fresh footage with a clear notice; older videos without saved authoring settings explain recovery options instead of guessing.

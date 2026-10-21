@@ -3845,3 +3845,50 @@ describe("retained recipe scalars", () => {
     expect(form.extendOverlapFrames).toBe(17);
   });
 });
+it("reuses a duration movie's exact seed and original input boundary, not published total frames", () => {
+  const f = newGenerateForm();
+  const metadata = {
+    model: "minimax-h3-fl2va",
+    prompt: " literal\\n\r\n ",
+    seed: 18446744073709552000,
+    frames: 480,
+    fps: 24,
+    steps: 9,
+    guidance: 0,
+    width: 768,
+    height: 768,
+    version: "test",
+    video_job: {
+      source_frames: "240",
+      authoring: {
+        duration_ms: "10000",
+        boundary_frames: 124,
+        input_frames: 107,
+        seed: "18446744073709551615",
+      },
+    },
+  } as OutputMetadata;
+  applyMetadataToForm(f, metadata);
+  expect(f.seed).toBe("18446744073709551615");
+  expect(f.frames).toBe(107);
+  expect(f.prompt).toBe(" literal\\n\r\n ");
+  expect(buildRequest(f).seed).toBe("18446744073709551615");
+});
+it("refuses incomplete duration provenance before changing the existing form", () => {
+  const f = newGenerateForm();
+  f.prompt = "keep my draft";
+  const before = JSON.stringify(f);
+  expect(() =>
+    applyMetadataToForm(f, {
+      model: "other",
+      prompt: "old",
+      seed: 1,
+      width: 1,
+      height: 1,
+      steps: 1,
+      guidance: 1,
+      video_job: { id: "old" },
+    } as OutputMetadata),
+  ).toThrow(/older video/);
+  expect(JSON.stringify(f)).toBe(before);
+});

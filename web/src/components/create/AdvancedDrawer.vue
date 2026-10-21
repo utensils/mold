@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { seedFromInput } from "@studio/lib/videoSettingsReuse";
 /*
  * Advanced controls (Mold Studio Create) — capability-gated, always-open
  * icon sections. Each section maps onto EXISTING form fields; sections a
@@ -863,7 +864,7 @@ function resetAdvanced() {
           :value="modelValue.seed ?? ''"
           @input="
             patch({
-              seed: Number(($event.target as HTMLInputElement).value) || null,
+              seed: seedFromInput(($event.target as HTMLInputElement).value),
             })
           "
         />

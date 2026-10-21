@@ -44,7 +44,7 @@ export interface QueueDetailMetadata {
   tags?: readonly string[] | null;
   collection?: string | null;
   model?: string | null;
-  seed?: number | null;
+  seed?: number | string | null;
   steps?: number | null;
   guidance?: number | null;
   width?: number | null;
@@ -256,10 +256,13 @@ function seedField(
   entry: QueueEntry,
   metadata: QueueDetailMetadata,
 ): QueueDetailField | null {
-  const seed = finite(metadata.seed);
+  const seed =
+    typeof metadata.seed === "string" && /^(0|[1-9]\d*)$/.test(metadata.seed)
+      ? metadata.seed
+      : finite(metadata.seed);
   if (seed === null) return null;
   // Seed 0 on the wire means "not pinned" on hosts that predate `seed_pinned`.
-  const pinned = entry.seed_pinned ?? seed !== 0;
+  const pinned = entry.seed_pinned ?? (seed !== 0 && seed !== "0");
   return { label: "Seed", value: pinned ? String(seed) : "Random", mono: true };
 }
 
