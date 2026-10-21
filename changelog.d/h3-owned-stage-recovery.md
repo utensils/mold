@@ -1,1 +1,0 @@
-- **Recover internal H3 clips with their parent.** Keep internal H3 video clips attached to their durable video parent across server restarts, preventing interrupted or cancelled videos from running an orphaned clip before explicit recovery.
