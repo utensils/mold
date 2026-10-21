@@ -1210,6 +1210,7 @@ pub async fn run(
     no_expand: bool,
     expand_backend: Option<String>,
     expand_model: Option<String>,
+    dry_run: bool,
 ) -> Result<()> {
     let mut config = Config::load_or_default();
 
@@ -1224,6 +1225,36 @@ pub async fn run(
     let (model, prompt) = resolve_run_args(model_or_prompt.as_deref(), &prompt_rest, &mut config)?;
     let family = resolve_family(&model, &config);
     let is_h3 = mold_core::minimax_h3::is_family(&family);
+    let (duration, frames, fps) = if let Some(seconds) = duration.filter(|_| !is_h3) {
+        anyhow::ensure!(
+            frames.is_none() && !predict_duration,
+            "--duration conflicts with --frames and --predict-duration"
+        );
+        let fps = fps
+            .or_else(|| config.resolved_model_config(&model).effective_fps())
+            .unwrap_or(24);
+        anyhow::ensure!(
+            mold_core::validation::max_frames_for_family_at_fps(&family, fps).is_some(),
+            "--duration requires a video model"
+        );
+        let requested = seconds * f64::from(fps);
+        anyhow::ensure!(
+            seconds.is_finite()
+                && seconds > 0.0
+                && fps > 0
+                && requested <= f64::from(u32::MAX - 32),
+            "--duration must be positive, finite and within the supported frame range"
+        );
+        let step = mold_core::validation::frame_step_for_family(&family).unwrap_or(1);
+        let offset = mold_core::validation::frame_offset_for_family(&family).unwrap_or(0);
+        let minimum = mold_core::validation::min_frames_for_family(&family).unwrap_or(1);
+        let frames = (requested.ceil() as u32).max(minimum);
+        let frames = frames + (step + offset - frames % step) % step;
+        (None, Some(frames), Some(fps))
+    } else {
+        (duration, frames, fps)
+    };
+
     if predict_duration && !mold_core::ltx25_manifest::is_contract_manifest(&model) {
         anyhow::bail!("--predict-duration is available only for LTX-2.5 checkpoints");
     }
@@ -1236,6 +1267,9 @@ pub async fn run(
         no_audio,
         negative_prompt: negative_prompt.as_deref(),
         scheduler_set: scheduler.is_some(),
+        has_wan_sampling_fields: wan_flags.sample_solver.is_some()
+            || wan_flags.sample_shift.is_some()
+            || wan_flags.distill_strength.is_some(),
         cfg_plus,
         has_lora: !lora.is_empty(),
         has_mask: mask.is_some(),
@@ -1655,7 +1689,7 @@ pub async fn run(
             family
         );
     }
-    let should_expand = decision == ExpansionDecision::Expand;
+    let should_expand = !dry_run && decision == ExpansionDecision::Expand;
     if should_expand {
         mold_core::expand::validate_expansion_variation_count(batch.max(1) as usize)?;
     }
@@ -2108,6 +2142,7 @@ pub async fn run(
         effective_lora,
         server_expand,
         identity,
+        dry_run,
     )
     .await
 }

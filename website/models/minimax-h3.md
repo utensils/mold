@@ -579,6 +579,17 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 \
   --first-frame pavilion.png --duration 5
 ```
 
+For one prompt across a longer FL2VA video, use `--duration 45 --host HOST`.
+The CLI automatically continues supported clips on the paired server and saves
+one stitched MP4 with audio. Add `--dry-run` first to inspect clip lengths and
+delivered duration; the frame grid and seam trims can make it slightly longer
+than requested. With no endpoints FL2VA is text-to-video. A first or last frame
+belongs to the outer boundary of the whole video. Ref2VA sequences remain
+explicit authored scripts because their clips do not carry temporal context.
+Inspect the selected host with `mold list --json --host HOST` and
+`mold chain limits MODEL --json --host HOST`; raw HTTP cannot access a paired
+Secure host.
+
 ### Canvas and duration
 
 The checkpoint accepts any 32-aligned canvas between 1:4 and 4:1, and clip

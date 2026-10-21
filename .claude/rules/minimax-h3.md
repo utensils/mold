@@ -140,3 +140,13 @@ The upload-v2 writer pool remains available while the smaller conversion pool
 works. Both input/output bytes and immutable existing-path validation copies
 share quota accounting, held until owned workers/children finish cleanup even
 if the request disconnects. Unsupported hosts retain the old canonical path.
+
+
+**CLI long one-shots.** `--duration` above the single-clip range, or `--frames`
+above 345, routes sequence-capable FL2VA to the existing durable chain API.
+Keep per-clip 17n+5 bounds, one-frame carry trims, synchronized audio and outer
+endpoint placement; rebalance earlier clips in whole grid steps when the final
+107-frame floor would add unnecessary duration. Show delivered duration before
+submission. Ref2VA does not gain automatic temporal continuity. `--dry-run`
+submits neither generation nor expansion, and paired-host inspection uses
+`mold chain limits MODEL --host HOST --json`, never a raw proxy HTTP request.

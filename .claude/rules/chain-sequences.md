@@ -23,7 +23,8 @@ In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prom
 Keep the existing output switch and route. Do not restore the old timeline, `Simple | Scenes` strip, or second output mode. Web, Tauri desktop/mobile, and native macOS/iOS share the durable API contracts. Discord exposes a compact `/video` group alongside ordinary `/generate`.
 
 - `mold run --script shot.toml` — canonical TOML, schema `mold.chain.v1`. Per-stage `prompt` / `frames` / `transition`.
-- `mold chain validate shot.toml` or `mold run --script ... --dry-run` to inspect without submitting. `mold chain` has exactly one subcommand; listing is `mold jobs list`.
+- `mold chain validate shot.toml` or `mold run --script ... --dry-run` to inspect without submitting. `mold chain limits MODEL --json --host HOST` reads live bounds over the paired client; listing is `mold jobs list`.
+- One-prompt duration: `mold run MODEL "prompt" --duration 45 --dry-run --host HOST` previews delivered duration; omit `--dry-run` to submit. H3 FL2VA long one-shots use durable server chains, rebalance whole 17-frame steps to respect the 107-frame minimum without unnecessary overshoot, and preserve outer endpoints and request organization. Ref2VA independent clips require an authored script. Paired-host inspection uses CLI commands, never raw curl at a proxy URL.
 - Sugar: `mold run <model> --prompt "..." --prompt "..." --frames-per-clip 97` (uniform smooth only).
 - Transitions: `smooth` (default, model-specific continuation), `cut` (fresh clip), `fade` (cut + RGB crossfade). LTX-2 carries latent motion; image-conditioned Wan and H3 FL2VA carry the final RGB frame (one-frame trim). Text-only Wan, legacy LTX-Video and H3 Ref2VA concatenate independent clips with zero tail.
 - H3 sequences require the server route: each stage receives fresh preparation/admission and a single-use owned attempt. Never execute them through the generic engine cache; forced-local H3 chains remain refused.

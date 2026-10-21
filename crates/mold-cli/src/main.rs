@@ -765,6 +765,17 @@ built with the `mdns` feature; disable both per-server with
 
 #[derive(Subcommand)]
 enum ChainSub {
+    /// Inspect the selected server's video chain limits over its paired connection.
+    Limits {
+        /// Model or recipe name.
+        model: String,
+        /// Frame rate used to resolve duration-dependent limits.
+        #[arg(long)]
+        fps: Option<u32>,
+        /// Emit the complete machine-readable capability response.
+        #[arg(long)]
+        json: bool,
+    },
     /// Parse and normalise a TOML script without submitting.
     #[command(after_long_help = "\
 Examples:
@@ -1926,9 +1937,10 @@ Examples:
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
-        /// MiniMax H3 duration in seconds (4 through 15). Resolves to the
-        /// nearest exact 17n+5 frame count on H3's fixed 24 FPS clock.
-        #[arg(long, conflicts_with = "frames", help_heading = "Video")]
+        /// Requested video duration in seconds. Uses the model's FPS and frame
+        /// grid; continuation-capable models automatically chain longer video.
+        /// H3 uses fixed 24 FPS, with clips on its 17n+5 grid (4–15 seconds each).
+        #[arg(long, conflicts_with_all = ["frames", "predict_duration"], help_heading = "Video")]
         duration: Option<f64>,
 
         /// Per-clip frame cap for chained video. When --frames exceeds this,
@@ -2171,8 +2183,8 @@ Examples:
         )]
         continue_from: Option<String>,
 
-        /// Parse and normalise the script without submitting. Prints the
-        /// canonical stage list and estimated total frames to stdout.
+        /// Preview the request without generation or prompt expansion. For a
+        /// chain, prints the stage list and delivered frame count and duration.
         #[arg(long, help_heading = "Server")]
         dry_run: bool,
 
@@ -2496,7 +2508,7 @@ Examples:
         action: ServerAction,
     },
 
-    /// Script-mode chain authoring tools
+    /// Inspect video chain limits or validate a script
     #[command(after_long_help = "\
 Examples:
   mold chain validate shot.toml    Parse and normalise a TOML chain script")]
@@ -3307,7 +3319,12 @@ fn local_only_command(command: &Commands) -> Option<&'static str> {
         Commands::Skill(args) if args.takes_host() => return None,
         Commands::Skill(_) => "skill",
         Commands::Serve { .. } => "serve",
-        Commands::Chain { .. } => "chain",
+        Commands::Chain {
+            action: ChainSub::Limits { .. },
+        } => return None,
+        Commands::Chain {
+            action: ChainSub::Validate { .. },
+        } => "chain validate",
         Commands::Quantize { .. } => "quantize",
         Commands::Rm { .. } => "rm",
         Commands::Stats { .. } => "stats",
@@ -3884,6 +3901,7 @@ async fn run(
                 no_expand,
                 expand_backend,
                 expand_model,
+                dry_run,
             )
             .await?;
         }
@@ -4041,6 +4059,15 @@ async fn run(
         },
         Commands::Chain { action } => match action {
             ChainSub::Validate { path } => commands::chain_validate::run(&path).await?,
+            ChainSub::Limits {
+                model,
+                fps,
+                json: _,
+            } => {
+                let client = control::client_for_host(host.as_deref())?;
+                let limits = client.chain_limits(&model, fps).await?;
+                println!("{}", serde_json::to_string_pretty(&limits)?);
+            }
         },
         Commands::Jobs { action } => {
             let config = mold_core::Config::load_or_default();

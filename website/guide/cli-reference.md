@@ -78,7 +78,7 @@ prompt expansion for that run.
 | `--continue-from <JOB_ID>`                                                                   | With `--script`, create a new durable part using the completed predecessor's owned tail on the same server; requires linked-part support and refuses `--local`.                                                                                     |
 | `--dry-run`                                                                                  | Parse/normalise repeated prompts or scripts without generating                                                                                                                                                                                      |
 | `--frames <N>`, `--fps <N>`                                                                  | Video frame count and output FPS                                                                                                                                                                                                                    |
-| `--duration <SECONDS>`                                                                       | MiniMax H3 duration from 4–15 seconds; resolves to its exact `17n+5` frame grid at 24 fps                                                                                                                                                           |
+| `--duration <SECONDS>`                                                                       | Video duration in seconds; resolves using the model FPS/grid and automatically chains supported long videos. H3 uses fixed 24 fps and `17n+5` clips                                                                                                 |
 | `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                                                                                                                                                |
 | `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                                                                                                                                              |
 | `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                                                                                                                                         |
@@ -286,6 +286,7 @@ paths, while Ref2VA stages carry ordered typed generation references.
 
 ```bash
 mold chain validate shot.toml
+mold chain limits minimax-h3-fl2va:fasth3-v2-int8 --json --host workstation
 mold run --script shot.toml --dry-run
 ```
 
@@ -1161,6 +1162,24 @@ An unreachable non-loopback `MOLD_HOST` remains an error for host-administration
 commands. In particular, `gpu`, `ps`, and `unload` do not answer with this
 machine's state when the user selected a remote machine.
 
+For a long video with one prompt, use seconds directly:
+
+```bash
+mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a garden" --duration 45 --dry-run --host workstation
+mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a garden" --duration 45 --host workstation --output garden.mp4
+```
+
+H3 FL2VA automatically continues clips on the paired server and publishes one
+stitched MP4 with audio. The preview reports delivered duration and clip lengths;
+frame grids and overlap trims can make the result slightly longer than requested.
+H3 without endpoints is text-to-video. Ref2VA needs authored independent clips
+with `--script`. LTX-2 and continuation-capable Wan also accept `--duration`;
+text-only Wan retains its automatic-continuation refusal. Use
+`mold chain limits MODEL --json --host HOST` for the server's current bounds.
+Paired hosts require the CLI's Secure transport; API paths in documentation do
+not imply that a raw curl request will work. Dry-run creates no generation or
+prompt-expansion work.
+
 ## `mold skill`
 
 Install the embedded Mold Agent Skill for AI coding agents:
@@ -1168,6 +1187,8 @@ Install the embedded Mold Agent Skill for AI coding agents:
 ```bash
 mold skill list
 mold skill install codex
+mold skill install omp
+mold skill install omp --project
 mold skill install --detected
 mold skill install --all
 mold skill install claude codex --project
@@ -1181,7 +1202,7 @@ mold skill install claude-desktop
 mold skill install claude-desktop --host workstation --no-open
 ```
 
-Supported targets match nxv: `claude`, `codex`, `pi`, `openclaw`, `copilot`,
+Supported targets: `claude`, `codex`, `pi`, `omp`, `openclaw`, `copilot`,
 `cursor`, `gemini`, `amp`, `goose`, and generic `agents`. User-wide is the
 default. `--project` uses the current directory, while `--dir` selects another
 project root. Install requires explicit names, `--detected`, or `--all`.
@@ -1196,6 +1217,18 @@ rules (see [Prompting Guides](/guide/prompting)). All agent renderers install
 the same canonical prompting files byte-for-byte. A hashed
 `.mold-skill.json` inventory lets later versions remove stale managed files
 while preserving user-added files; uninstall follows that same inventory.
+
+`omp` installs for [Oh My Pi](https://github.com/can1357/oh-my-pi) in its native
+user directory, `~/.omp/agent/skills/mold`, or `.omp/skills/mold` with
+`--project` / `--dir`. It uses the portable Agent Skills format with the same
+complete prompting corpus and CLI references. `--all` includes OMP;
+`--detected` selects it when `~/.omp` exists. These user paths target OMP's
+default profile; for named profiles or a custom agent directory, use a project
+installation in the workspace OMP will run in. Restart OMP after installation;
+`/skill:mold` invokes the skill when skill commands are enabled. OMP can also
+load other agents' skills, but those sources depend on its provider settings;
+the native target avoids that dependency. See
+[OMP skill discovery](https://github.com/can1357/oh-my-pi/blob/main/docs/skills.md).
 
 `claude-desktop` is different, because Claude Desktop keeps skills on the
 claude.ai account and not in a folder. It writes `~/Downloads/mold-skill.zip`

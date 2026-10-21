@@ -196,9 +196,7 @@ pub(crate) fn prepare_authoring_candidates(
             // router resolves it against the recipe's `reference_images`
             // block before authoring is prepared, and hands this function an
             // empty slice on every non-H3 model.
-            anyhow::bail!(
-                "--duration, --first-frame, and --last-frame are MiniMax H3-only options"
-            );
+            anyhow::bail!("--first-frame and --last-frame are MiniMax H3-only options");
         }
         return Ok(PreparedAuthoring::default());
     }
@@ -231,6 +229,12 @@ pub(crate) fn prepare_authoring_candidates(
                 minimax_h3::FIXED_FPS,
             );
         }
+    } else if frames > minimax_h3::MAX_FRAMES {
+        anyhow::ensure!(
+            task == minimax_h3::Task::Fl2va
+                && mold_core::chain::model_supports_sequence(model, family),
+            "long H3 video requires a sequence-capable FL2VA recipe; use --script for independent clips"
+        );
     } else if !minimax_h3::valid_frame_count(frames) {
         anyhow::bail!(
             "MiniMax H3 --frames must be {}n+{} from {} through {}; received {} (nearest valid value: {})",
@@ -349,6 +353,7 @@ pub(crate) struct FlagValidation<'a> {
     pub no_audio: bool,
     pub negative_prompt: Option<&'a str>,
     pub scheduler_set: bool,
+    pub has_wan_sampling_fields: bool,
     pub cfg_plus: bool,
     pub has_lora: bool,
     pub has_mask: bool,
@@ -364,6 +369,11 @@ pub(crate) struct FlagValidation<'a> {
 pub(crate) fn validate_h3_flags(flags: FlagValidation<'_>) -> Result<()> {
     if !minimax_h3::is_family(flags.family) {
         return Ok(());
+    }
+    if flags.has_wan_sampling_fields {
+        anyhow::bail!(
+            "--sample-solver, --sample-shift and --distill-strength are Wan-only controls"
+        );
     }
     if flags.format.is_some_and(|value| value != OutputFormat::Mp4) {
         anyhow::bail!("MiniMax H3 requires --format mp4 for synchronized audio-video output");
@@ -419,16 +429,17 @@ fn frames_for_duration(seconds: f64) -> Result<u32> {
     if !seconds.is_finite() {
         anyhow::bail!("MiniMax H3 --duration must be a finite number of seconds");
     }
-    if seconds < f64::from(minimax_h3::MIN_DURATION_SECONDS)
-        || seconds > f64::from(minimax_h3::MAX_DURATION_SECONDS)
-    {
+    if seconds < f64::from(minimax_h3::MIN_DURATION_SECONDS) {
         anyhow::bail!(
-            "MiniMax H3 --duration must be between {} and {} seconds",
-            minimax_h3::MIN_DURATION_SECONDS,
-            minimax_h3::MAX_DURATION_SECONDS
+            "MiniMax H3 --duration must be at least {} seconds",
+            minimax_h3::MIN_DURATION_SECONDS
         );
     }
     let requested = seconds * f64::from(minimax_h3::FIXED_FPS);
+    anyhow::ensure!(requested <= f64::from(u32::MAX), "--duration is too large");
+    if seconds > f64::from(minimax_h3::MAX_DURATION_SECONDS) {
+        return Ok(requested.ceil() as u32);
+    }
     let offset = f64::from(minimax_h3::FRAME_OFFSET);
     let step = f64::from(minimax_h3::FRAME_STEP);
     let lower = minimax_h3::FRAME_OFFSET
@@ -1023,7 +1034,8 @@ mod tests {
         assert_eq!(frames_for_duration(15.0).unwrap(), 345);
         assert_eq!(frames_for_duration(200.5 / 24.0).unwrap(), 192);
         assert!(frames_for_duration(3.99).is_err());
-        assert!(frames_for_duration(15.01).is_err());
+        assert_eq!(frames_for_duration(45.0).unwrap(), 1080);
+        assert!(frames_for_duration(f64::MAX).is_err());
         assert!(frames_for_duration(f64::NAN).is_err());
     }
 
@@ -1218,6 +1230,7 @@ mod tests {
             no_audio: false,
             negative_prompt: None,
             scheduler_set: false,
+            has_wan_sampling_fields: false,
             cfg_plus: false,
             has_lora: false,
             has_mask: false,
