@@ -823,6 +823,11 @@ other jobs may need.
 
 Reuse settings restores retained opening and closing frames into editable wells, preserving keyframe indices and ordered image references. Audio, source/continuation video, identity photos and control images restore with their saved settings where the selected recipe supports them. Continuation overlap and authored reference strength (including zero) are preserved. Older prints without recorded reference strength keep the server default. The original machine must retain the inputs; missing, damaged or oversized inputs are disclosed before generation. A new attachment or explicit removal wins over a late download, and restored wells never have a hidden archive fallback that can revive removed media.
 
+Use Settings on a completed Duration video restores its original single prompt, requested duration or optional scenes, literal text, exact seed and supported recipe settings. On an extended video it restores the added-footage settings into a fresh movie; the original video is not attached, and a notice distinguishes this from Extend Video. Original endpoints and ordered references are restored only from the authenticated clicked copy's retained archive.
+
+Older authored videos reopen all recorded clips, lengths, joins, effective seeds, adapters and per-clip inputs. Clip options show saved overrides and offer **Use global inputs and controls** before replacing them. Historical per-clip negative prompts were not recorded; only the recorded first value can be restored, and the editor explains this limitation. Explicit older automatic one-shot videos restore one prompt and saved-length duration only when their recorded recipe proves a uniform automatic split; the editor states that current joins may differ. Incomplete or unrepresentable automatic recipes, linked incoming carry, and unsupported conditioning controls are refused before changing the current draft. Private per-clip media is not stored in preferences: after a cold launch, reopen Use Settings on the original video to restore those inputs before generating.
+
+
 Library machine filters apply to collection, favourite and Trash counts and to
 all media actions, including filing a dragged print. Collection badges distinguish
 an empty shelf from one absent on the selected machine and an unavailable

@@ -5,6 +5,33 @@ import Testing
 
 @MainActor
 struct SavedReuseTests {
+
+    @Test func videoSettingsRestoresLiteralScenesAndAddedDurationWithoutAttachingOldMovie() async throws {
+        let (_, generate, _, host) = try fixture()
+        var root = URL(fileURLWithPath: #filePath)
+        while !FileManager.default.fileExists(atPath: root.appending(path: "docs/generated").path), root.pathComponents.count > 1 { root.deleteLastPathComponent() }
+        let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "docs/generated/generation-profiles-v1.json"))) as! [String: Any]
+        let rows = doc["profiles"] as! [[String: Any]]
+        let row = try #require(rows.first { String(describing: $0["models"] ?? "").contains("minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step") })
+        let modelBody: [String:Any] = ["name":"minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step", "family":"minimax-h3", "description":"Fixture", "generation_profile":row["profile"]!]
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"prompt":"literal\\nplus\r\nline","model":"minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step","seed":18446744073709551615,"width":1344,"height":768,"steps":2,"guidance":1,"fps":24,"frames":720,"enable_audio":true,"video_job":{"id":"published","source_frames":"107","total_frames":"827","authoring":{"duration_ms":"30000","boundary_frames":107,"input_frames":97,"seed":"18446744073709551615","scenes":[{"prompt":"one\\n","duration_ms":"10000"},{"prompt":"two\r\n","duration_ms":"20000"}]}}}"#.utf8))
+        let restored = try VideoSettingsReuse(metadata: metadata)
+        let model = try MoldJSON.decoder.decode(Model.self, from: JSONSerialization.data(withJSONObject: modelBody))
+        let recipe = try NativeVideoSettingsRecipe.resolve(metadata: metadata, model: model)
+        generate.sequence.begin(prompt: "old clips", frames: 107)
+        generate.videoDuration = .init(draft: .init(seconds: "9", source: .init(filename: "old.mp4")))
+        generate.applyVideoSettings(restored, legacy: nil, model: model, recipe: recipe, on: host.id)
+        #expect(generate.sequence.draft == nil)
+        #expect(generate.videoDuration?.draft.seconds == "30")
+        #expect(generate.videoDuration?.draft.scenes.map(\.prompt) == ["one\\n", "two\r\n"])
+        #expect(generate.videoDuration?.draft.source == nil)
+        #expect(generate.durationSource == nil)
+        #expect(generate.videoDuration?.reuseNotice?.contains("not attached") == true)
+        #expect(generate.draft.frames == 97)
+        #expect(generate.draft.seed == UInt64.max && generate.draft.locksSeed)
+        #expect(generate.draft.prompt == "literal\\nplus\r\nline")
+        #expect(generate.draft.enableAudio)
+    }
     @Test func locatorStoresNoBytesOrSessionAndRestartsFailClosed() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

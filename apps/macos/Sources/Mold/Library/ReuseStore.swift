@@ -89,6 +89,17 @@ final class ReuseStore {
         return version
     }
 
+    /// The SDK inspected this exact physical archive before settings changed.
+    /// Retain its original member IDs and roles for ordinary input sessions.
+    func acceptInspectedArchive(_ archive: VideoSettingsArchive) -> Bool {
+        guard hosts.host(archive.owner.host.id) == archive.owner.host,
+              hosts.instanceID(of: archive.owner.host.id) == archive.owner.instanceId else { return false }
+        authority = archive.inventory.availability == .available
+            ? Authority(filename: archive.filename, origin: archive.owner.host.id,
+                members: archive.inventory.members, instance: archive.owner.instanceId, route: archive.owner.host) : nil
+        return true
+    }
+
     /// Whether the answer in hand is still about the print on screen.
     func isCurrent(_ fence: Int) -> Bool { fence == version }
     /// The fence a step started AFTER the probe must still be current against.

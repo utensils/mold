@@ -329,7 +329,7 @@ extension GenerateController {
         let request = RenderRequest.one(draft, model: modelName,
             maxIdentityPhotos: target.flatMap { hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0)
         return Set(RetainedSourceMedia.members(authority.members, forHydrating: request).compactMap {
-            RetainedSourceMedia.fieldForRole[$0.role]
+            RetainedSourceMedia.field(forRole: $0.role)
         })
     }
 }
