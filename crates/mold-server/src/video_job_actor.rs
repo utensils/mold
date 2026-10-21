@@ -122,6 +122,18 @@ mod runtime {
         }
         Ok(())
     }
+    fn failure_state(error: &anyhow::Error, shutdown: &CancellationToken) -> VideoJobState {
+        if error.downcast_ref::<VideoStopped>().is_some() {
+            if shutdown.is_cancelled() {
+                VideoJobState::Interrupted
+            } else {
+                VideoJobState::Paused
+            }
+        } else {
+            VideoJobState::Failed
+        }
+    }
+
     pub(crate) fn verify_recipe(
         config: &mold_core::Config,
         manifest: &VideoJobManifest,
@@ -148,7 +160,7 @@ mod runtime {
         part: Option<&db::StoredVideoJobPart>,
     ) -> Result<bool> {
         row.job.updated_at_ms = crate::video_jobs::now_ms();
-        row.job.can_cancel = row.job.state.can_cancel();
+        row.job.can_cancel = row.job.state.can_cancel() && !row.cancel_requested;
         row.job.can_resume = row.job.state.can_resume();
         row.job.can_delete = !matches!(
             row.job.state,
@@ -173,6 +185,11 @@ mod runtime {
                 row.job.state,
                 VideoJobState::Queued | VideoJobState::Running
             ) {
+                return Ok(());
+            }
+            if (status == VideoJobState::Paused || (row.cancel_requested && status.can_resume()))
+                && !stopped_children_settled(state, &row)?
+            {
                 return Ok(());
             }
             row.job.state = status;
@@ -298,14 +315,7 @@ mod runtime {
                     }
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => {
-                        let stopped = error.downcast_ref::<VideoStopped>().is_some();
-                        let status = if stopped && handle.shutdown.is_cancelled() {
-                            VideoJobState::Interrupted
-                        } else if stopped {
-                            VideoJobState::Cancelled
-                        } else {
-                            VideoJobState::Failed
-                        };
+                        let status = failure_state(&error, &handle.shutdown);
                         if let Err(storage) =
                             settle(&state, &id, status, Some(format!("{error:#}")))
                         {
@@ -324,6 +334,34 @@ mod runtime {
             }
         }
     }
+    // A terminal child row precedes the actor's durable lease-release barrier.
+    // Never expose Resume while that actor or an exactly owned H3 row can write.
+    fn stopped_children_settled(state: &AppState, row: &db::StoredVideoJob) -> Result<bool> {
+        let database = database(state)?;
+        if let Some(id) = &row.job.active_child_id {
+            let runner = state
+                .chain_jobs
+                .as_ref()
+                .context("chain runner unavailable")?;
+            let _guard = runner.blocking_lock_job(id);
+            if let Some(child) = chain_jobs::get_job(database, id)? {
+                if matches!(child.state, ChainJobState::Queued | ChainJobState::Running) {
+                    return Ok(false);
+                }
+                match crate::chain_execution::ChainExecutionAuthority::read_for_parent(
+                    &child.job_dir,
+                    &child.id,
+                ) {
+                    Ok(authority)
+                        if authority.state
+                            == crate::chain_execution::ChainExecutionState::Settled => {}
+                    _ => return Ok(false),
+                }
+            }
+        }
+        Ok(!db::has_retained_stage_generations(database, &row.job.id)?)
+    }
+
     fn prune_previous_child(state: &AppState, row: &db::StoredVideoJob) -> Result<bool> {
         if row.job.completed_clips == 0 {
             return Ok(true);
@@ -401,21 +439,38 @@ mod runtime {
         if row.cancel_requested {
             if let Some(child) = &row.job.active_child_id {
                 runner.request_cancel(child);
-                let _ = chain_jobs::try_transition(
+                let _guard = runner.blocking_lock_job(child);
+                if chain_jobs::try_transition(
                     database,
                     child,
                     &[ChainJobState::Queued],
                     ChainJobState::Cancelled,
                     None,
                     crate::video_jobs::now_ms(),
-                )?;
-                if chain_jobs::get_job(database, child)?.is_some_and(|child| {
-                    matches!(child.state, ChainJobState::Queued | ChainJobState::Running)
-                }) {
-                    return Ok(output);
+                )? {
+                    if let Some(child) = chain_jobs::get_job(database, child)? {
+                        if let Ok(mut authority) =
+                            crate::chain_execution::ChainExecutionAuthority::read_for_parent(
+                                &child.job_dir,
+                                &child.id,
+                            )
+                        {
+                            if authority.state
+                                == crate::chain_execution::ChainExecutionState::Dormant
+                            {
+                                authority.transition(
+                                    crate::chain_execution::ChainExecutionState::Settled,
+                                )?;
+                                authority.persist_atomic(&child.job_dir)?;
+                            }
+                        }
+                    }
                 }
             }
-            row.job.state = VideoJobState::Cancelled;
+            if !stopped_children_settled(state, &row)? {
+                return Ok(output);
+            }
+            row.job.state = VideoJobState::Paused;
             save(database, &mut row, None)?;
             return Ok(None);
         }
@@ -659,6 +714,272 @@ mod runtime {
                     )
                 }
             }
+        }
+    }
+    #[cfg(test)]
+    mod stop_tests {
+        use super::*;
+
+        fn stopped_parent() -> (AppState, tempfile::TempDir, db::StoredVideoJob) {
+            let home = tempfile::tempdir().unwrap();
+            let mut state = AppState::for_tests();
+            state.metadata_db = Arc::new(Some(
+                mold_db::MetadataDb::open(&home.path().join("mold.db")).unwrap(),
+            ));
+            state.chain_jobs = Some(Arc::new(
+                crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+            ));
+            let mut row = crate::video_job_manifest::tests::fixture();
+            row.job.state = VideoJobState::Running;
+            row.job.completed_clips = 1;
+            row.job.can_cancel = false;
+            row.job.can_resume = false;
+            row.cancel_requested = true;
+            db::insert(database(&state).unwrap(), &row).unwrap();
+            (state, home, row)
+        }
+
+        fn attach_child(
+            state: &AppState,
+            home: &tempfile::TempDir,
+            row: &mut db::StoredVideoJob,
+            child_state: ChainJobState,
+            execution: crate::chain_execution::ChainExecutionState,
+        ) -> std::path::PathBuf {
+            let child = "stopped-child";
+            row.job.active_child_id = Some(child.into());
+            let part = db::StoredVideoJobPart {
+                parent_id: row.job.id.clone(),
+                index: 1,
+                child_id: child.into(),
+                first_clip: 1,
+                clip_count: 1,
+                keep_frames: 97,
+                output_sha256: None,
+                receipt_sha256: None,
+            };
+            db::checkpoint(database(state).unwrap(), row, Some(&part)).unwrap();
+            let directory = home.path().join("jobs").join(child);
+            std::fs::create_dir_all(&directory).unwrap();
+            chain_jobs::insert_job(
+                database(state).unwrap(),
+                &chain_jobs::ChainJobRow {
+                    id: child.into(),
+                    state: child_state,
+                    model: "test".into(),
+                    request_json: "{}".into(),
+                    job_dir: directory.clone(),
+                    stage_count: 1,
+                    current_stage: 0,
+                    error: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    finalized_at_ms: None,
+                },
+            )
+            .unwrap();
+            let mut authority = crate::chain_execution::ChainExecutionAuthority::dormant(child);
+            if execution != crate::chain_execution::ChainExecutionState::Dormant {
+                authority.transition(execution).unwrap();
+            }
+            authority.persist_atomic(&directory).unwrap();
+            directory
+        }
+
+        #[test]
+        fn stop_failure_pauses_but_shutdown_interrupts() {
+            let shutdown = CancellationToken::new();
+            assert_eq!(
+                failure_state(&VideoStopped.into(), &shutdown),
+                VideoJobState::Paused
+            );
+            shutdown.cancel();
+            assert_eq!(
+                failure_state(&VideoStopped.into(), &shutdown),
+                VideoJobState::Interrupted
+            );
+            assert_eq!(
+                failure_state(&anyhow::anyhow!("failure"), &shutdown),
+                VideoJobState::Failed
+            );
+        }
+
+        #[test]
+        fn stop_turn_retains_completed_clips_and_offers_explicit_resume() {
+            let (state, _home, row) = stopped_parent();
+            assert!(turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new()
+            )
+            .unwrap()
+            .is_none());
+            let paused = db::get(database(&state).unwrap(), &row.job.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(paused.job.state, VideoJobState::Paused);
+            assert_eq!(paused.job.completed_clips, 1);
+            assert!(paused.cancel_requested);
+            assert!(paused.job.can_resume && !paused.job.can_cancel && paused.job.can_delete);
+        }
+
+        #[test]
+        fn stop_waits_for_terminal_child_execution_authority_to_settle() {
+            let (state, home, mut row) = stopped_parent();
+            let directory = attach_child(
+                &state,
+                &home,
+                &mut row,
+                ChainJobState::Cancelled,
+                crate::chain_execution::ChainExecutionState::Ready,
+            );
+            let mut authority = crate::chain_execution::ChainExecutionAuthority::read_for_parent(
+                &directory,
+                "stopped-child",
+            )
+            .unwrap();
+            settle(
+                &state,
+                &row.job.id,
+                VideoJobState::Paused,
+                Some("stopped during output acceptance".into()),
+            )
+            .unwrap();
+            assert_eq!(
+                db::get(database(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap()
+                    .job
+                    .state,
+                VideoJobState::Running
+            );
+            turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            let waiting = db::get(database(&state).unwrap(), &row.job.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(waiting.job.state, VideoJobState::Running);
+            assert!(!waiting.job.can_resume);
+            authority
+                .transition(crate::chain_execution::ChainExecutionState::Settled)
+                .unwrap();
+            authority.persist_atomic(&directory).unwrap();
+            turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                db::get(database(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap()
+                    .job
+                    .state,
+                VideoJobState::Paused
+            );
+        }
+        #[test]
+        fn stop_cancels_never_started_dormant_child_without_waiting_forever() {
+            let (state, home, mut row) = stopped_parent();
+            let directory = attach_child(
+                &state,
+                &home,
+                &mut row,
+                ChainJobState::Queued,
+                crate::chain_execution::ChainExecutionState::Dormant,
+            );
+            turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                db::get(database(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap()
+                    .job
+                    .state,
+                VideoJobState::Paused
+            );
+            assert_eq!(
+                crate::chain_execution::ChainExecutionAuthority::read_for_parent(
+                    &directory,
+                    "stopped-child"
+                )
+                .unwrap()
+                .state,
+                crate::chain_execution::ChainExecutionState::Settled
+            );
+        }
+
+        #[test]
+        fn stop_waits_for_exact_retained_h3_generation_even_after_chain_settled() {
+            let (state, home, mut row) = stopped_parent();
+            attach_child(
+                &state,
+                &home,
+                &mut row,
+                ChainJobState::Cancelled,
+                crate::chain_execution::ChainExecutionState::Settled,
+            );
+            database(&state).unwrap().with_conn(|conn| {
+                conn.execute_batch("INSERT INTO generation_batches(id,client_batch_id,owner_uuid,request_sha256,created_at_ms) VALUES('h3-batch','h3-client','owner','sha',1); INSERT INTO generation_batch_children(batch_id,job_id,batch_index,state,updated_at_ms) VALUES('h3-batch','h3-generation',0,'running',1); INSERT INTO generation_queue(id,owner_uuid,state,model,request_json,output_dir,completion_payload,created_at,updated_at) VALUES('h3-generation','owner','running','test','{}','/unused','metadata',1,1);")?;
+                conn.execute("INSERT INTO chain_stage_generations(generation_id,chain_id,stage_index,video_parent_id) VALUES('h3-generation','stopped-child',0,?1)",[&row.job.id])?;
+                Ok(())
+            }).unwrap();
+            turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                db::get(database(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap()
+                    .job
+                    .state,
+                VideoJobState::Running
+            );
+            database(&state)
+                .unwrap()
+                .with_conn(|conn| {
+                    conn.execute("DELETE FROM generation_queue WHERE id='h3-generation'", [])?;
+                    Ok(())
+                })
+                .unwrap();
+            turn(
+                &state,
+                &row.job.id,
+                None,
+                &mold_core::Config::default(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                db::get(database(&state).unwrap(), &row.job.id)
+                    .unwrap()
+                    .unwrap()
+                    .job
+                    .state,
+                VideoJobState::Paused
+            );
         }
     }
 }

@@ -496,18 +496,19 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                         id: job.id,
                         kind: "video_job".into(),
                         execution: Some("video_job".into()),
-                        phase: if job.can_cancel {
-                            match job.state {
-                                mold_core::video_job::VideoJobState::Queued => "queued",
-                                mold_core::video_job::VideoJobState::Paused => "paused",
-                                _ => "running",
+                        phase: match job.state {
+                            mold_core::video_job::VideoJobState::Paused => "paused",
+                            mold_core::video_job::VideoJobState::Cancelled => "cancelled",
+                            mold_core::video_job::VideoJobState::Failed => "failed",
+                            mold_core::video_job::VideoJobState::Interrupted => "interrupted",
+                            mold_core::video_job::VideoJobState::Completed => "completed",
+                            mold_core::video_job::VideoJobState::Queued if job.can_cancel => {
+                                "queued"
                             }
-                        } else {
-                            match job.state {
-                                mold_core::video_job::VideoJobState::Failed => "failed",
-                                mold_core::video_job::VideoJobState::Interrupted => "interrupted",
-                                _ => "cancelling",
+                            mold_core::video_job::VideoJobState::Running if job.can_cancel => {
+                                "running"
                             }
+                            _ => "cancelling",
                         }
                         .into(),
                         model: Some(job.plan.model),
@@ -584,6 +585,32 @@ mod tests {
         assert_eq!(parent.kind, "video_job");
         assert_eq!(parent.phase, "failed");
         assert!(!parent.can_cancel);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn stopped_video_recovery_phases_never_claim_rendering_or_cancelling() {
+        for (phase, status) in [
+            ("paused", mold_core::video_job::VideoJobState::Paused),
+            ("cancelled", mold_core::video_job::VideoJobState::Cancelled),
+        ] {
+            let mut state = AppState::for_tests();
+            state.metadata_db =
+                std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+            let mut row = crate::video_job_manifest::tests::fixture();
+            row.job.state = status;
+            row.job.can_cancel = false;
+            mold_db::video_jobs::insert(state.metadata_db.as_ref().as_ref().unwrap(), &row)
+                .unwrap();
+            let Json(snapshot) = list_active_work(State(state)).await;
+            let parent = snapshot
+                .items
+                .iter()
+                .find(|item| item.id == row.job.id)
+                .expect("stopped work stays discoverable");
+            assert_eq!(parent.phase, phase);
+            assert!(!parent.can_cancel);
+        }
     }
 
     #[tokio::test]

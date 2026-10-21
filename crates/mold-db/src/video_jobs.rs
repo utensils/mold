@@ -153,7 +153,7 @@ pub fn list_page(
         "video page limit must be between 1 and 256"
     );
     let filter = if recoverable_only {
-        "state IN ('queued','running','paused','failed','interrupted')"
+        "state IN ('queued','running','paused','failed','interrupted','cancelled')"
     } else {
         "1"
     };
@@ -271,31 +271,45 @@ pub fn delete_settled(db: &MetadataDb, id: &str, revision: u64, now_ms: i64) -> 
 /// state remains owned until the child worker acknowledges its safe point.
 pub fn request_cancel(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
     db.transact_immediate(|conn| {
-        let current:Option<String>=conn.query_row("SELECT job_json FROM video_jobs WHERE id=?1",[id],|row|row.get(0)).optional()?;
-        let Some(json)=current else {
+        let current: Option<(String, bool)> = conn.query_row(
+            "SELECT job_json,cancel_requested FROM video_jobs WHERE id=?1", [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((json, requested)) = current else {
             conn.execute("INSERT INTO video_job_aborts(id,created_at_ms) VALUES(?1,?2) ON CONFLICT(id) DO NOTHING",params![id,now_ms])?;
             return Ok(true);
         };
-        let mut job:VideoJob=serde_json::from_str(&json)?;
+        let mut job: VideoJob = serde_json::from_str(&json)?;
         if job.state.is_terminal() { return Ok(false); }
+        // Repeated Stop acknowledges the same intent without changing its
+        // revision or making an already paused checkpoint unresumable.
+        if requested || job.state == VideoJobState::Paused { return Ok(true); }
         job.can_cancel=false;job.can_resume=false;job.updated_at_ms=now_ms;
         conn.execute("UPDATE video_jobs SET cancel_requested=1,job_json=?2,revision=revision+1,updated_at_ms=?3 WHERE id=?1",params![id,serde_json::to_string(&job)?,now_ms])?;
         Ok(true)
     })
 }
 
-/// Cancelling a DB-only or paused parent cannot wait behind a long active movie.
-/// The persisted cancel flag already prevents every new owned-child claim.
+/// Exact retained stage rows must settle before the parent exposes Resume.
+pub fn has_retained_stage_generations(db: &MetadataDb, id: &str) -> Result<bool> {
+    db.with_conn(|conn| Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chain_stage_generations owner JOIN generation_queue child ON child.id=owner.generation_id WHERE owner.video_parent_id=?1)",
+        [id], |row| row.get(0),
+    )?))
+}
+
+/// A queued parent without an active clip can pause without an assembly slot.
+/// Active clips use the actor's durable execution-authority settlement gate.
 pub fn settle_cancel_if_idle(db: &MetadataDb, id: &str, now_ms: i64) -> Result<bool> {
     db.transact_immediate(|conn| {
-        let json:Option<String>=conn.query_row("SELECT job_json FROM video_jobs WHERE id=?1 AND cancel_requested=1 AND state IN ('queued','paused')",[id],|row|row.get(0)).optional()?;
+        let json:Option<String>=conn.query_row("SELECT job_json FROM video_jobs WHERE id=?1 AND cancel_requested=1 AND state='queued'",[id],|row|row.get(0)).optional()?;
         let Some(json)=json else {return Ok(false);};
+        let mut job:VideoJob=serde_json::from_str(&json)?;
+        if job.active_child_id.is_some() { return Ok(false); }
         let active:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM video_job_child_owners owner JOIN chain_jobs child ON child.id=owner.child_id WHERE owner.parent_id=?1 AND child.state='running') OR EXISTS(SELECT 1 FROM chain_stage_generations owner JOIN generation_queue child ON child.id=owner.generation_id WHERE owner.video_parent_id=?1 AND child.state='running')",[id],|row|row.get(0))?;
         if active {return Ok(false);}
-        conn.execute("UPDATE chain_jobs SET state='cancelled',updated_at=?2 WHERE id IN (SELECT child_id FROM video_job_child_owners WHERE parent_id=?1) AND state IN ('queued','paused')",params![id,now_ms])?;
-        let mut job:VideoJob=serde_json::from_str(&json)?;
-        job.state=VideoJobState::Cancelled;job.can_cancel=false;job.can_resume=false;job.can_delete=true;job.updated_at_ms=now_ms;
-        Ok(conn.execute("UPDATE video_jobs SET state='cancelled',job_json=?2,updated_at_ms=?3,revision=revision+1 WHERE id=?1 AND cancel_requested=1 AND state IN ('queued','paused')",params![id,serde_json::to_string(&job)?,now_ms])?==1)
+        job.state=VideoJobState::Paused;job.can_cancel=false;job.can_resume=true;job.can_delete=true;job.updated_at_ms=now_ms;
+        Ok(conn.execute("UPDATE video_jobs SET state='paused',job_json=?2,updated_at_ms=?3,revision=revision+1 WHERE id=?1 AND cancel_requested=1 AND state='queued'",params![id,serde_json::to_string(&job)?,now_ms])?==1)
     })
 }
 
@@ -625,18 +639,83 @@ mod tests {
 
     #[test]
     fn cancelled_db_only_and_paused_parents_settle_without_writer_slots() {
+        for initial in [VideoJobState::Queued, VideoJobState::Paused] {
+            let db = MetadataDb::open_in_memory().unwrap();
+            let mut row = stored();
+            row.job.state = initial;
+            row.job.completed_clips = 1;
+            row.job.can_resume = initial == VideoJobState::Paused;
+            row.job.can_cancel = initial == VideoJobState::Queued;
+            insert(&db, &row).unwrap();
+            assert!(request_cancel(&db, "parent", 5).unwrap());
+            assert_eq!(
+                settle_cancel_if_idle(&db, "parent", 6).unwrap(),
+                initial == VideoJobState::Queued
+            );
+            let paused = get(&db, "parent").unwrap().unwrap();
+            assert_eq!(paused.job.state, VideoJobState::Paused);
+            assert_eq!(paused.job.completed_clips, 1);
+            assert!(paused.job.can_resume && !paused.job.can_cancel && paused.job.can_delete);
+            assert!(!is_aborted(&db, "parent").unwrap());
+            assert!(request_cancel(&db, "parent", 7).unwrap());
+            assert!(!settle_cancel_if_idle(&db, "parent", 7).unwrap());
+            assert_eq!(
+                get(&db, "parent").unwrap().unwrap().revision,
+                paused.revision
+            );
+            assert!(resume(&db, "parent", paused.revision, 8).unwrap());
+            let resumed = get(&db, "parent").unwrap().unwrap();
+            assert_eq!(resumed.job.state, VideoJobState::Queued);
+            assert_eq!(resumed.job.completed_clips, 1);
+            assert!(!resumed.cancel_requested);
+        }
+    }
+
+    #[test]
+    fn stopped_active_children_require_actor_settlement_before_resume() {
         let db = MetadataDb::open_in_memory().unwrap();
         let mut row = stored();
-        row.job.state = VideoJobState::Paused;
+        row.job.active_child_id = Some("captured-child".into());
         insert(&db, &row).unwrap();
-        assert!(!settle_cancel_if_idle(&db, "parent", 5).unwrap());
         request_cancel(&db, "parent", 5).unwrap();
-        assert!(settle_cancel_if_idle(&db, "parent", 6).unwrap());
-        assert_eq!(
-            get(&db, "parent").unwrap().unwrap().job.state,
-            VideoJobState::Cancelled
+        assert!(!settle_cancel_if_idle(&db, "parent", 6).unwrap());
+        let waiting = get(&db, "parent").unwrap().unwrap();
+        assert_eq!(waiting.job.state, VideoJobState::Queued);
+        assert!(!waiting.job.can_resume);
+    }
+
+    #[test]
+    fn historical_cancelled_parents_remain_discoverable_after_new_completions() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut original = stored();
+        original.job.state = VideoJobState::Cancelled;
+        original.job.completed_clips = 1;
+        insert(&db, &original).unwrap();
+        for index in 0..60 {
+            let mut newer = stored();
+            newer.job.id = format!("completed-{index}");
+            newer.job.created_at_ms = 100 + index;
+            newer.job.state = VideoJobState::Completed;
+            insert(&db, &newer).unwrap();
+        }
+        let page = list_page(&db, 50, true, None).unwrap();
+        assert_eq!(page.jobs.len(), 1);
+        assert_eq!(page.jobs[0].id, original.job.id);
+        assert_eq!(page.jobs[0].state, VideoJobState::Cancelled);
+        let index: String = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='video_jobs_recoverable'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(
+            index.contains("'cancelled'"),
+            "recovery pagination needs its partial index for stopped history"
         );
-        assert!(!settle_cancel_if_idle(&db, "parent", 7).unwrap());
+        assert_eq!(get(&db, "parent").unwrap().unwrap().revision, 0);
     }
 
     #[test]

@@ -145,7 +145,7 @@ impl VideoJobState {
         )
     }
     pub fn can_cancel(self) -> bool {
-        matches!(self, Self::Queued | Self::Running | Self::Paused)
+        matches!(self, Self::Queued | Self::Running)
     }
     pub fn can_resume(self) -> bool {
         matches!(self, Self::Paused | Self::Interrupted | Self::Failed)
@@ -360,6 +360,14 @@ mod tests {
             "generation": {"width":512,"height":512,"steps":4,"model":"ltx-2-19b-distilled:fp8", "prompt":r"a sign \new"},
             "duration_ms":duration
         })).unwrap()
+    }
+
+    #[test]
+    fn paused_video_offers_resume_without_another_stop() {
+        assert!(VideoJobState::Paused.can_resume());
+        assert!(!VideoJobState::Paused.can_cancel());
+        assert!(!VideoJobState::Paused.is_terminal());
+        assert!(!VideoJobState::Cancelled.can_resume());
     }
 
     #[test]

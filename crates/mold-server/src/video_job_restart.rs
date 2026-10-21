@@ -23,9 +23,12 @@ pub(crate) fn options_for(instance: &str, row: &StoredVideoJob) -> Result<VideoR
     let manifest = read_manifest(row)?;
     let reason = (!matches!(
         row.job.state,
-        VideoJobState::Failed | VideoJobState::Paused | VideoJobState::Interrupted
+        VideoJobState::Failed
+            | VideoJobState::Paused
+            | VideoJobState::Interrupted
+            | VideoJobState::Cancelled
     ))
-    .then_some("Only a failed or paused video can start a new attempt.");
+    .then_some("Only a failed, interrupted, paused, or stopped video can start a new attempt.");
     let availability = RestartAvailability {
         supported: reason.is_none(),
         reason: reason.map(str::to_owned),
@@ -309,6 +312,31 @@ pub(crate) fn source_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn historical_cancelled_videos_offer_new_attempts_without_rewriting_source() {
+        let mut row = crate::video_job_manifest::tests::fixture();
+        row.job.state = VideoJobState::Cancelled;
+        row.job.completed_clips = 1;
+        let before = (
+            row.job.state,
+            row.job.completed_clips,
+            row.revision,
+            row.manifest_sha256.clone(),
+        );
+        let options = options_for("source", &row).unwrap();
+        assert!(options.restart.supported && options.send.supported);
+        assert!(!options.source_revision.is_empty());
+        assert_eq!(
+            (
+                row.job.state,
+                row.job.completed_clips,
+                row.revision,
+                row.manifest_sha256
+            ),
+            before
+        );
+    }
+
     #[test]
     fn restart_revision_binds_instance_manifest_request_and_lifecycle() {
         let mut row = crate::video_job_manifest::tests::fixture();
