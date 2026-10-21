@@ -19,6 +19,7 @@ public extension RetainedSourceMedia {
     ) throws -> GenerateRequest {
         var relayed = request
         var grouped: [Field: [Data]] = [:]
+        var keyframePayloads: [String: Data] = [:]
         for (member, bytes) in downloaded {
             guard let field = field(forRole: member.role) else {
                 throw RelayFailure.unsupportedRole(member.role)
@@ -29,10 +30,13 @@ public extension RetainedSourceMedia {
             // Asked before ANY of it is applied, so a conflict on the last
             // member cannot leave the first three already written in.
             guard relayed.isVacant(field) else { throw RelayFailure.alreadyHeld(field) }
-            if field == .keyframes, member.role.hasPrefix("stage_keyframe:") {
+            if field == .keyframes {
+                guard keyframePayloads[member.memberId] == nil else { throw RelayFailure.ambiguous(.keyframes) }
+                if member.role.hasPrefix("stage_keyframe:") {
                 guard let frame = member.frameIndex, frame >= 0 else { throw RelayFailure.unsupportedRole(member.role) }
                 let keyframe = KeyframeCondition(frame: frame, image: bytes.base64EncodedString(), name: member.displayName)
-                grouped[field, default: []].append(try MoldJSON.encoder.encode(keyframe))
+                    keyframePayloads[member.memberId] = try MoldJSON.encoder.encode(keyframe)
+                } else { keyframePayloads[member.memberId] = bytes }
             } else { grouped[field, default: []].append(bytes) }
         }
         let referenceInputs = downloaded.filter { field(forRole: $0.member.role) == .references }
@@ -45,6 +49,15 @@ public extension RetainedSourceMedia {
             let bytesByID = Dictionary(uniqueKeysWithValues: referenceInputs.map { ($0.member.memberId, $0.bytes) })
             grouped[.references] = try ordered.map {
                 guard let bytes = bytesByID[$0.memberId] else { throw RelayFailure.ambiguous(.references) }
+                return bytes
+            }
+        }
+        let keyframeInputs = downloaded.filter { field(forRole: $0.member.role) == .keyframes }
+        if !keyframeInputs.isEmpty {
+            let ordered = keyframeMembers(keyframeInputs.map(\.member))
+            guard ordered.count == keyframeInputs.count else { throw RelayFailure.ambiguous(.keyframes) }
+            grouped[.keyframes] = try ordered.map {
+                guard let bytes = keyframePayloads[$0.memberId] else { throw RelayFailure.ambiguous(.keyframes) }
                 return bytes
             }
         }

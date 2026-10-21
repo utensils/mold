@@ -40,4 +40,18 @@ struct RetainedVideoJobReuseRoleTests {
         #expect(throws: (any Error).self) { try RetainedSourceMedia.relayed([(second, Data([2]))], into: request) }
     }
 
+    @Test func parentBoundaryRelaySortsCanonicalPositionsAndRejectsAmbiguousGroups() throws {
+        let first = RetainedSourceMedia.Member(memberId: "start", role: "stage_keyframe:0:0", displayName: "start", sizeBytes: 1, frameIndex: 0)
+        let last = RetainedSourceMedia.Member(memberId: "end", role: "stage_keyframe:0:1", displayName: "end", sizeBytes: 1, frameIndex: 106)
+        let request = GenerateRequest(prompt: "new", model: "video", width: 768, height: 768, steps: 3, guidance: 0)
+        let restored = try RetainedSourceMedia.relayed([(last, Data([2])), (first, Data([1]))], into: request)
+        #expect(restored.keyframes?.map(\.frame) == [0, 106])
+        let duplicate = RetainedSourceMedia.Member(memberId: "duplicate", role: "stage_keyframe:0:0", displayName: "duplicate", sizeBytes: 1, frameIndex: 106)
+        #expect(throws: (any Error).self) { try RetainedSourceMedia.relayed([(first, Data([1])), (duplicate, Data([2]))], into: request) }
+        let ordinary = RetainedSourceMedia.Member(memberId: "ordinary", role: "keyframes", displayName: "ordinary", sizeBytes: 1)
+        let document = try MoldJSON.encoder.encode(KeyframeCondition(frame: 0, image: "AQ=="))
+        #expect(throws: (any Error).self) { try RetainedSourceMedia.relayed([(ordinary, document), (last, Data([2]))], into: request) }
+        #expect(throws: (any Error).self) { try RetainedSourceMedia.relayed([(last, Data([2]))], into: request) }
+    }
+
 }
