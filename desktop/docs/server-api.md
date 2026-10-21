@@ -398,7 +398,10 @@ decimal strings and the optional PCM offset is absent without PCM. Preserve
 resume the same receiver-owned transfer and confirmed offsets. Do not report
 success until completion and a fresh exact-output offer both verify the archive.
 An existing movie or an older completed sync receipt does not prove its separate
-assets are present. Chunk memory remains bounded independently of movie length.
+assets are present. Chunk memory remains bounded independently of movie length. Unchanged sealed files
+use durable verification records bound to exact file facts, owner and descriptor.
+Older bundles need one initial full verification; changed file facts invalidate
+that record and require verification again.
 
 `gif_pause` advertises `{min:0,max:5000,step:10,default:0}`. The optional
 `pause_ms` adds boundary dwell to GIFs without changing frame order or FPS.

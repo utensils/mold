@@ -21,5 +21,8 @@
   browser rounding, and authenticated recovery receipts reconcile uncertain
   submissions without duplicate work. Agent skills distinguish named H3 Fast
   variants, first submission, recovery and legacy sequence limits.
-- **Complete Library mirrors.** Preserve captured recipe fields and completion
-  details while verifying exact media bytes; conflicting settings remain errors.
+- **Complete Library mirrors.** Preserve captured recipes, exact seeds and
+  original inputs alongside resumable audio and clip-history archive transfers.
+  Repair partial copies without duplicate movies; bind copied data to the exact
+  machines and saved outputs. Durable verification records keep unchanged-video
+  scans fast, while changed bytes and conflicting settings remain errors.

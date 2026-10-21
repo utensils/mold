@@ -1,1 +1,0 @@
-- **Durable video Library copies.** Library copies of long videos to durably transfer publication-owned provenance and audio artifacts in resumable, integrity-checked chunks, and clarify retained-input transfer conflicts.
