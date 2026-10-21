@@ -152,6 +152,7 @@ enum Agent {
     Claude,
     Codex,
     Pi,
+    Omp,
     Openclaw,
     Copilot,
     Cursor,
@@ -241,6 +242,18 @@ const AGENTS: &[AgentSpec] = &[
         user_skills: &[".codex", "skills"],
         project_skills: &[".agents", "skills"],
         user_profile: RenderProfile::Codex,
+        project_profile: RenderProfile::Portable,
+    },
+    // Native OMP discovery requires name/description and accepts portable
+    // Agent Skills. Pi's .pi roots are a separate target.
+    AgentSpec {
+        agent: Agent::Omp,
+        name: "omp",
+        label: "Oh My Pi (OMP)",
+        detect: &[".omp"],
+        user_skills: &[".omp", "agent", "skills"],
+        project_skills: &[".omp", "skills"],
+        user_profile: RenderProfile::Portable,
         project_profile: RenderProfile::Portable,
     },
     AgentSpec {
@@ -1461,6 +1474,64 @@ mod tests {
                 spec.agent.project_skill_dir(project),
                 project.join(fixture.project).join("mold")
             );
+        }
+    }
+
+    #[test]
+    fn omp_supports_native_detection_bulk_selection_and_managed_install() {
+        let omp = Agent::from_str("omp", false).expect("OMP must be an explicit CLI target");
+        let home = tempfile::tempdir().unwrap();
+        assert!(!omp.is_detected(home.path()));
+        std::fs::create_dir(home.path().join(".pi")).unwrap();
+        assert!(!omp.is_detected(home.path()), "Pi is a distinct agent");
+        std::fs::create_dir(home.path().join(".omp")).unwrap();
+        assert!(omp.is_detected(home.path()));
+
+        let args = SkillArgs::try_parse_from(["skill", "install", "--all", "--project"]).unwrap();
+        let SkillCommand::Install(args) = args.command else {
+            panic!("expected install")
+        };
+        assert!(selected_agents(&args).unwrap().contains(&omp));
+        for scope in [
+            Scope::User(home.path().to_owned()),
+            Scope::Project(home.path().to_owned()),
+        ] {
+            let dir = scope.skill_dir(omp);
+            let bundle = render_bundle(scope.profile(omp)).unwrap();
+            replace_bundle(&dir, &bundle).unwrap();
+            assert!(std::fs::read_to_string(dir.join("SKILL.md"))
+                .unwrap()
+                .starts_with("---\nname: mold\ndescription: "));
+            assert!(dir.join("references/cli.md").is_file());
+            assert!(dir.join("references/safety.md").is_file());
+            assert!(uninstall_bundle(&dir).unwrap() > 0);
+            assert!(!dir.join("SKILL.md").exists());
+        }
+    }
+
+    #[test]
+    fn every_profile_routes_paired_host_inspection_through_the_cli() {
+        for profile in RenderProfile::ALL {
+            let bundle = render_bundle(profile).unwrap();
+            for path in ["SKILL.md", "references/cli.md"] {
+                let text = &bundle.files[path];
+                assert!(
+                    text.contains("mold list --json --host HOST"),
+                    "{} {path}",
+                    profile.name()
+                );
+                assert!(
+                    text.contains("mold chain limits MODEL"),
+                    "{} {path}",
+                    profile.name()
+                );
+                assert!(
+                    text.contains("secure-client-required"),
+                    "{} {path}",
+                    profile.name()
+                );
+            }
+            assert!(!bundle.files["SKILL.md"].contains("or its `/api/models` data"));
         }
     }
 

@@ -1,5 +1,19 @@
 # Mold CLI workflows
 
+## Remote transport
+
+Use the Mold CLI with a saved `--host NAME` for paired hosts, including read-only
+capability queries. Do not query paired origins with curl or another raw HTTP
+client. The CLI handles the encrypted connection and credentials. API paths
+below name wire contracts, not an alternate connection workflow. If a raw HTTP
+attempt returns `secure-client-required`, stop and use the CLI; its error object
+is not a model list. Never extract pairing secrets to construct an HTTP request.
+
+```bash
+mold list --json --host HOST
+mold chain limits MODEL --fps 24 --json --host HOST
+```
+
 Current Mold versions are distributed through GitHub releases, Nix,
 Docker, AUR, and source builds. crates.io publishing is retired; registry
 versions are historical and should not be recommended for installation.
@@ -18,7 +32,7 @@ mold upscale input.png --model real-esrgan-x4plus:fp16 --output output-4x.png
 ```
 
 For a remote recipe, use `mold list --json --host HOST` or that server's
-`/api/models` before choosing dimensions, frames, steps, conditioning or audio.
+`mold list --json --host HOST` before choosing dimensions, frames, steps, conditioning or audio.
 `mold info MODEL` inspects local model data and rejects `--host`.
 `mold chain validate FILE` also runs locally: omit `--host`; use
 `mold run --script FILE --dry-run --host HOST` for a host-targeted run plan.
@@ -294,6 +308,30 @@ only for a host with no saved credential. Never paste an API key into a prompt
 or command example; supply one only through the user's existing environment or
 approved secret store at execution time.
 
+## Duration without a script
+
+For one continuous prompt, ask the CLI for seconds instead of calculating frames
+or writing an external continuation script. Inspect the selected server first:
+
+```bash
+mold list --json --host plato
+mold chain limits minimax-h3-fl2va:fasth3-v2-int8 --json --host plato
+mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a sunlit garden" --duration 45 --dry-run --host plato
+mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a sunlit garden" --duration 45 --host plato --output garden.mp4
+```
+
+`--duration` uses the selected model's FPS and frame grid. H3 uses fixed 24 FPS;
+long FL2VA videos automatically use durable server-side continuation and publish
+one stitched MP4 with audio. FL2VA without endpoints is text-to-video; a separate
+`t2va` model name is unnecessary. Opening and closing images apply to the outer
+boundaries. Ref2VA's independent clips require an authored `--script` instead.
+The preview reports delivered frames, duration and each clip; frame grids and
+seam trims may make the delivered duration slightly longer than requested.
+`--dry-run` performs no generation or prompt expansion. Each part remains bounded
+by the server's limits; it is not an unlimited-duration promise. LTX-2 and
+continuation-capable Wan recipes also accept seconds; text-only Wan retains its
+automatic-continuation refusal. Use scripts for changing prompts between clips.
+
 ## Scripted sequences
 
 Use `mold run --script` for several video clips stitched into one output.
@@ -370,8 +408,13 @@ mold jobs show job-abc123 --script --host workstation
 mold jobs resume job-abc123 --host workstation
 ```
 
-If exact Resume refuses an old frozen recipe, start a **new attempt** with
-`mold jobs restart JOB_ID --host SOURCE --to DESTINATION`. Omit `--to` for the
+If exact Resume refuses an old frozen recipe, start a **new attempt**:
+
+```bash
+mold jobs restart JOB_ID --host SOURCE --to DESTINATION
+```
+
+Omit `--to` for the
 original machine. The destination must advertise safe restart support; update
 older servers first. This revalidates today's destination recipe and keeps the
 original job. Keep the printed operation UUID; after a lost reply, inspect that
@@ -442,7 +485,7 @@ Transition behavior depends on the model:
   and H3 Ref2VA. Independent clips do not preserve motion across a seam.
 - `cut` renders a fresh clip. `fade` renders a fresh clip and crossfades it;
   `fade_frames` controls the blend. Consult
-  `/api/capabilities/chain-limits?model=MODEL` for current limits.
+  `mold chain limits MODEL --host HOST --json` for current limits.
 - A stage may use `source_image_path` relative to the script. MiniMax H3
   FL2VA also accepts `first_frame_path` and `last_frame_path`; a smooth
   continuation supplies its own first frame, so use a cut for an explicit new
@@ -822,8 +865,17 @@ and pod termination are destructive; follow the safety reference.
 mold serve --help
 mold mcp --host http://localhost:7680
 mold skill list
+mold skill install omp
+mold skill install omp --project
 mold skill install claude-desktop
 ```
+
+`mold skill install omp` installs this complete bundle for Oh My Pi in
+`~/.omp/agent/skills/mold`; `--project` uses `.omp/skills/mold`. OMP is included
+in `--all` and detected from `~/.omp` with `--detected`. The user path targets
+the default OMP profile; use project scope for named profiles or a custom
+agent directory. Restart OMP after installation and use `/skill:mold` when
+skill commands are enabled.
 
 `mold skill install claude-desktop` serves Claude Desktop and claude.ai. It
 writes the skill as a ZIP for the user to upload under Customize > Skills and

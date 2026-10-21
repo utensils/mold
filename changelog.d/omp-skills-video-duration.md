@@ -1,0 +1,2 @@
+- **Oh My Pi skills.** Add `mold skill install omp` with native user and project discovery paths, the complete canonical skill bundle, managed updates and uninstall, and inclusion in `--all` and `--detected`.
+- **Video duration and paired-host planning.** Accept `mold run --duration` for video models, automatically continue long H3 FL2VA videos, preview delivered clip lengths with `--dry-run`, and inspect live bounds with `mold chain limits`. Agent skills direct paired-host queries through the authenticated CLI.

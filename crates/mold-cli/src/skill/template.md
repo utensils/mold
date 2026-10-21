@@ -10,6 +10,23 @@ mold info <model>
 mold server status
 ```
 
+## Paired hosts: use the CLI
+
+Use `mold` commands with the saved `--host NAME` for Mold server operations,
+including discovery and read-only checks. Do not use `curl`, a raw HTTP client,
+or a proxy URL to query a paired host: the CLI owns pairing credentials and
+Secure transport. `secure-client-required` is a transport error, not model data;
+retry through the CLI, never parse it as a models list or extract credentials.
+
+```bash
+mold list --json --host HOST
+mold chain limits MODEL --host HOST --json
+```
+
+`/api/...` names in references describe contracts; they are not instructions
+to bypass the CLI. `mold info MODEL` is local-only. For remote model facts,
+use `mold list --json --host HOST` and select the row by its stable `name`.
+
 ## Native iPhone and iPad app
 
 Mold Studio Companion (`apps/ios`) is remote-only. In Generate, tap **Model**
@@ -53,8 +70,7 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   `--size-mm`/`--up-axis`/`--origin` to make the export print-ready; a
   turntable GIF, APNG or WebP (`mold library export <file> --format gif`) is
   a render of it for sharing where no viewer opens a GLB.
-- For a multi-stage 3-D job, use `mold mesh-workflow` (or `/api/mesh-workflows`
-  directly), after inspecting `/api/models` for the recipe's
+- For a multi-stage 3-D job, use `mold mesh-workflow`, after inspecting `mold list --json --host HOST` for the recipe's
   `capabilities.mesh.workflow_modes`. The `text_to_mesh` workflow durably
   chains an image request into Hunyuan3D; `mesh_texture` takes one GLB/OBJ
   mesh reference and an appearance image; `mesh_roundtrip` rebuilds a supplied
@@ -66,7 +82,7 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   is no local form. A server restart parks an unfinished workflow without
   changing its attached child identity.
 - For the selected server's models and current capabilities, use
-  `mold list --json --host HOST` or its `/api/models` data. `mold info MODEL`
+  `mold list --json --host HOST`. `mold info MODEL`
   inspects local model data; it rejects `--host`. Local script validation also
   omits `--host`. The selected server is authoritative for remote recipes. `display_name` is a presentation alias; use the stable `name`
   in requests, commands, and saved settings. Curated aliases come from the
@@ -75,7 +91,9 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   IDs, defaults, dimensions, frame grids, or runtime availability.
 - For multi-scene video or a clip longer than one render, read
   [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences). Use
-  `mold run --script` and `mold jobs`. Apps also offer **Add clip** and Library **Continue video**; these use the same durable jobs. Discord offers `/video make` and guild Manage Server commands `/video continue|status|resume|cancel`. MiniMax H3
+  `mold run MODEL "prompt" --duration SECONDS --dry-run --host HOST` for a
+  single prompt, then omit `--dry-run` to render. Use `mold run --script`
+  and `mold jobs` for authored scene changes. Apps also offer **Add clip** and Library **Continue video**; these use the same durable jobs. Discord offers `/video make` and guild Manage Server commands `/video continue|status|resume|cancel`. MiniMax H3
   sequences require a server. Each part has at most 16 stages; continue longer
   work with `mold run --script next.toml --continue-from JOB_ID --host HOST`,
   producing separate linked MP4 parts. Read the sequence reference before
@@ -98,6 +116,10 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
 
 1. Run read-only discovery first. Do not assume the local binary and a remote
    host expose the same models or features.
+   `downloaded` and `runtime_available` describe installation and engine support,
+   not a successful preparation or memory reservation. A later admission refusal
+   still wins; preserve it and any returned identity instead of retrying blindly
+   or switching models without the user's direction.
    Typed H3 references use authenticated upload sessions when the host has a
    credential for this client (its saved pairing, or `MOLD_API_KEY` for a host
    with none) and advertises upload support; otherwise they use bounded inline

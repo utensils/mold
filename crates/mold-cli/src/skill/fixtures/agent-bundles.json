@@ -1,6 +1,7 @@
 [
   {"agent":"claude","profile":"claude","user":".claude/skills","project":".claude/skills"},
   {"agent":"codex","profile":"codex","user":".codex/skills","project":".agents/skills"},
+  {"agent":"omp","profile":"portable","user":".omp/agent/skills","project":".omp/skills"},
   {"agent":"pi","profile":"pi","user":".pi/agent/skills","project":".pi/skills"},
   {"agent":"openclaw","profile":"openclaw","user":".openclaw/skills","project":".agents/skills"},
   {"agent":"copilot","profile":"copilot","user":".copilot/skills","project":".github/skills"},

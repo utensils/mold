@@ -1270,6 +1270,7 @@ pub async fn run(
     // forced-local path, which is what makes the two requests identical by
     // construction rather than by review.
     identity: crate::commands::identity::IdentityOptions,
+    dry_run: bool,
 ) -> Result<()> {
     let Ltx2Options {
         frames,
@@ -1484,7 +1485,7 @@ pub async fn run(
             mold_core::manifest::find_manifest(&mold_core::manifest::resolve_model_name(model))
                 .and_then(|manifest| manifest.defaults.source_image);
         let decision = decide_chain_routing(
-            effective_frames,
+            effective_frames.filter(|_| !is_h3),
             family.as_deref(),
             model,
             clip_frames,
@@ -1700,7 +1701,7 @@ pub async fn run(
                         cfg_start_step: None,
                         transparent_background: None,
                     };
-                    materialize_local_builtin_control(&mut probe_req, &config).await?;
+                    materialize_local_builtin_control(&mut probe_req, &config, dry_run).await?;
                     let control_loras = probe_req.loras.take().unwrap_or_default();
                     Some(super::chain::ChainHdrInputs {
                         exr_dir: dir,
@@ -1744,6 +1745,10 @@ pub async fn run(
                     // exactly the requested total — no overshoot to
                     // truncate, no stage rendering past the reference's end.
                     super::chain::exact_fit_last_stage_for_sidecar(&mut chain_req, total_frames)?;
+                }
+                if dry_run {
+                    super::chain::print_dry_run_summary(&chain_req);
+                    return Ok(());
                 }
                 return super::chain::run_chain(
                     chain_req,
@@ -1904,11 +1909,67 @@ pub async fn run(
     // local run must record what a remote one would.
     mold_core::validation::materialize_request_organization(&mut req)
         .map_err(|error| anyhow::anyhow!(error))?;
+    if is_h3 && effective_frames.is_some_and(|frames| frames > mold_core::minimax_h3::MAX_FRAMES) {
+        anyhow::ensure!(
+            !local,
+            "long H3 video requires a paired H3 server; --local is unsupported"
+        );
+        anyhow::ensure!(
+            req.save_to_gallery != Some(false),
+            "long H3 video requires server Library publication; drop --no-save"
+        );
+        let chain = super::chain::h3_one_shot_chain(&req)?;
+        if dry_run {
+            super::chain::print_dry_run_summary(&chain);
+            return Ok(());
+        }
+        status!(
+            "{} Long video: {} clips, {:.2}s delivered at {} fps",
+            theme::icon_info(),
+            chain.stages.len(),
+            f64::from(chain.estimated_total_frames()) / f64::from(chain.fps),
+            chain.fps
+        );
+        return super::chain::run_chain(
+            chain,
+            None,
+            host,
+            output,
+            no_metadata,
+            preview,
+            false,
+            gpus,
+            t5_variant,
+            qwen3_variant,
+            qwen2_variant,
+            qwen2_text_encoder_mode,
+            eager,
+            offload,
+        )
+        .await;
+    }
+    if dry_run {
+        println!("1 clip");
+        println!("model: {}", req.model);
+        println!("canvas: {}x{}", req.width, req.height);
+        if let Some(frames) = req.frames {
+            let fps = req.fps.unwrap_or(24).max(1);
+            println!(
+                "estimated total frames: {frames} ({:.2}s @ {fps}fps)",
+                f64::from(frames) / f64::from(fps)
+            );
+        }
+        println!(
+            "audio: {}",
+            super::chain::describe_enable_audio(req.enable_audio)
+        );
+        return Ok(());
+    }
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let mut reference_session = None;
     if local {
         require_local_request_model_activation(&req, &config)?;
-        materialize_local_builtin_control(&mut req, &config).await?;
+        materialize_local_builtin_control(&mut req, &config, false).await?;
         materialize_local_builtin_camera_controls(&mut req, &config).await?;
         materialize_local_ltx2_reference_canvas(&mut req);
     } else {
@@ -2404,12 +2465,14 @@ pub async fn run(
 async fn materialize_local_builtin_control(
     request: &mut GenerateRequest,
     config: &Config,
+    dry_run: bool,
 ) -> Result<()> {
     let models_dir = config.resolved_models_dir();
     materialize_local_builtin_control_with(
         request,
         config,
         &models_dir,
+        dry_run,
         |download_model| async move {
             mold_core::download::pull_and_configure(
                 download_model,
@@ -2432,6 +2495,7 @@ async fn materialize_local_builtin_control_with<F, Fut, E>(
     request: &mut GenerateRequest,
     config: &Config,
     models_dir: &std::path::Path,
+    dry_run: bool,
     download: F,
 ) -> Result<()>
 where
@@ -2450,6 +2514,12 @@ where
         .map_err(anyhow::Error::msg)?;
     let adapter = mold_core::ltx2_control::resolve_control_adapter(profile, control)
         .map_err(anyhow::Error::msg)?;
+    // A preview checks the same recipe and request contract, but must stop
+    // before acquiring artifacts or folding adapter paths into the request.
+    if dry_run {
+        return Ok(());
+    }
+
     let manifest = mold_core::manifest::find_manifest(adapter.download_model)
         .expect("control registry and hidden manifests must stay in sync");
     let file = manifest
@@ -3224,7 +3294,7 @@ async fn generate_remote_inner(
                     }
                     print_using_local_inference();
                     let mut local_request = req.clone();
-                    materialize_local_builtin_control(&mut local_request, config).await?;
+                    materialize_local_builtin_control(&mut local_request, config, false).await?;
                     materialize_local_builtin_camera_controls(&mut local_request, config).await?;
                     materialize_local_ltx2_reference_canvas(&mut local_request);
                     generate_local(
@@ -6334,6 +6404,7 @@ mod tests {
             None,
             None,
             crate::commands::identity::IdentityOptions::default(),
+            false,
         )
         .await
         .unwrap_err();
@@ -6407,6 +6478,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_control_preview_never_acquires_a_missing_adapter() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = Config {
+            models_dir: temp.path().display().to_string(),
+            ..Config::default()
+        };
+        let mut request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "test", "model": "ltx-2.3-22b-distilled:fp8",
+            "width": 960, "height": 576, "steps": 8, "guidance": 3.0,
+            "output_format": "mp4", "source_video_path": "/guide.mp4",
+            "pipeline": "ic-lora", "ic_lora_control": "hdr",
+            "hdr_exr_dir": "/preview-only"
+        }))
+        .unwrap();
+        materialize_local_builtin_control_with(
+            &mut request,
+            &config,
+            temp.path(),
+            true,
+            |_| async {
+                panic!("a dry run must not download an adapter");
+                #[allow(unreachable_code)]
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(request.loras.is_none());
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
     async fn local_control_materialization_preserves_built_in_first_ordering() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -6446,10 +6549,16 @@ mod tests {
         .unwrap();
 
         let download_calls = AtomicUsize::new(0);
-        materialize_local_builtin_control_with(&mut request, &config, temp.path(), |_| async {
-            download_calls.fetch_add(1, Ordering::Relaxed);
-            Ok::<(), std::convert::Infallible>(())
-        })
+        materialize_local_builtin_control_with(
+            &mut request,
+            &config,
+            temp.path(),
+            false,
+            |_| async {
+                download_calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), std::convert::Infallible>(())
+            },
+        )
         .await
         .unwrap();
 
@@ -6507,9 +6616,13 @@ mod tests {
         }))
         .unwrap();
 
-        materialize_local_builtin_control_with(&mut request, &config, temp.path(), |_| async {
-            Ok::<(), std::convert::Infallible>(())
-        })
+        materialize_local_builtin_control_with(
+            &mut request,
+            &config,
+            temp.path(),
+            false,
+            |_| async { Ok::<(), std::convert::Infallible>(()) },
+        )
         .await
         .unwrap();
 

@@ -393,6 +393,101 @@ impl ChainInputs {
     }
 }
 
+/// Project an overlong H3 FL2VA one-shot onto the existing durable chain
+/// contract. Keep authored endpoints at the outer boundaries only.
+pub(crate) fn h3_one_shot_chain(req: &mold_core::GenerateRequest) -> Result<ChainRequest> {
+    use mold_core::minimax_h3 as h3;
+    anyhow::ensure!(
+        h3::task_for_model(&req.model) == Some(h3::Task::Fl2va)
+            && mold_core::chain::model_supports_sequence(&req.model, h3::FAMILY),
+        "automatic H3 continuation requires a sequence-capable FL2VA recipe; use --script for independent Ref2VA clips"
+    );
+    anyhow::ensure!(req.batch_size == 1, "long H3 video requires --batch 1");
+    anyhow::ensure!(
+        req.scheduler.is_none()
+            && req.sample_shift.is_none()
+            && req.distill_strength_high.is_none()
+            && req.distill_strength_low.is_none(),
+        "long H3 video does not accept scheduler, flow-shift or distill-strength overrides"
+    );
+
+    anyhow::ensure!(
+        !mold_core::identity::request_mentions_identity(req)
+            && req.true_cfg.is_none()
+            && req.cfg_start_step.is_none()
+            && req.mesh.is_none()
+            && req.edit_images.as_ref().is_none_or(Vec::is_empty),
+        "long H3 video does not support identity, mesh or grouped image-edit controls"
+    );
+    anyhow::ensure!(
+        req.video_only != Some(true),
+        "H3 always generates synchronized audio; --video-only is unsupported"
+    );
+    anyhow::ensure!(
+        req.expand != Some(true),
+        "expand the prompt before planning a long H3 video"
+    );
+
+    anyhow::ensure!(
+        req.references.is_none(),
+        "H3 FL2VA does not accept ordered references"
+    );
+    let total = req.frames.context("long video requires a frame count")?;
+    let inputs = ChainInputs {
+        prompt: req.prompt.clone(),
+        model: req.model.clone(),
+        width: req.width,
+        height: req.height,
+        steps: req.steps,
+        guidance: req.guidance,
+        strength: req.strength,
+        seed: req.seed,
+        fps: h3::FIXED_FPS,
+        output_format: mold_core::OutputFormat::Mp4,
+        total_frames: total,
+        clip_frames: h3::MAX_FRAMES,
+        motion_tail: 1,
+        source_image: req.source_image.clone(),
+        placement: req.placement.clone(),
+        enable_audio: Some(true),
+        original_prompt: req.original_prompt.clone(),
+        batch_id: req.batch_id.clone(),
+        batch_index: req.batch_index,
+        batch_count: req.batch_count,
+    };
+    let mut chain = inputs
+        .to_chain_request()
+        .normalise_with_family(Some(h3::FAMILY))?;
+    // The final H3 clip has a 107-frame floor. Rebalance whole grid steps
+    // out of earlier clips so that floor does not add seconds of overshoot.
+    let excess = chain.estimated_total_frames().saturating_sub(total);
+    let mut steps_to_remove = excess / h3::FRAME_STEP;
+    for stage in chain.stages.iter_mut().rev().skip(1) {
+        let remove = steps_to_remove.min((stage.frames - h3::MIN_FRAMES) / h3::FRAME_STEP);
+        stage.frames -= remove * h3::FRAME_STEP;
+        steps_to_remove -= remove;
+    }
+    if let Some(keyframes) = &req.keyframes {
+        anyhow::ensure!(
+            keyframes.len() == 1 && keyframes[0].frame == total - 1,
+            "long H3 video accepts only a final endpoint"
+        );
+        let last = chain.stages.last_mut().context("empty duration plan")?;
+        let mut endpoint = keyframes[0].clone();
+        endpoint.frame = last.frames - 1;
+        last.keyframes = Some(vec![endpoint]);
+    }
+    chain.title = req.title.clone();
+    chain.tags = req.tags.clone();
+    chain.collection = req.collection.clone();
+    chain.source_fit = req.source_fit.clone();
+    chain.offload = req.offload;
+    chain.prompt_transform = req.prompt_transform.clone();
+    chain
+        .normalise_with_family(Some(h3::FAMILY))
+        .map_err(Into::into)
+}
+
 /// Run a chain end-to-end, dispatching to the server (streaming) or the
 /// local orchestrator based on the `local` flag. Handles encoding, save,
 /// preview, and final status messages.
@@ -1802,7 +1897,7 @@ pub async fn run_from_sugar(
 /// Print a human-readable summary of the normalised chain for `--dry-run`
 /// mode. Written to stdout (not through the status! macro) so users can
 /// `mold run --script foo.toml --dry-run | less` cleanly.
-fn print_dry_run_summary(req: &ChainRequest) {
+pub(crate) fn print_dry_run_summary(req: &ChainRequest) {
     use mold_core::chain::TransitionMode;
     let stage_count = req.stages.len();
     let total_frames = req.estimated_total_frames();
@@ -1963,6 +2058,50 @@ mod tests {
         assert!(
             bind_cli_continuation(Some(&bound), "different", ChainJobState::Completed, 2).is_err()
         );
+    }
+
+    #[test]
+    fn h3_duration_plan_balances_clips_and_preserves_authoring() {
+        let mut request: mold_core::GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "minimax-h3-fl2va:fasth3-v2-int8", "prompt": "a continuous camera move",
+            "frames": 1080, "fps": 24, "seed": u64::MAX, "title": "Camera move",
+            "steps": 8, "width": 768, "height": 768, "guidance": 1.0
+        }))
+        .unwrap();
+        request.source_image = Some(vec![1, 2, 3]);
+        request.keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 1079,
+            image: vec![4, 5, 6],
+            name: Some("end.png".into()),
+        }]);
+        let plan = h3_one_shot_chain(&request).unwrap();
+        assert_eq!(plan.stages.len(), 4);
+        assert!((1080..1097).contains(&plan.estimated_total_frames()));
+        assert!(plan
+            .stages
+            .iter()
+            .all(|stage| mold_core::minimax_h3::valid_frame_count(stage.frames)));
+        assert_eq!(plan.stages[0].source_image, request.source_image);
+        assert!(plan.stages[1..]
+            .iter()
+            .all(|stage| stage.source_image.is_none()));
+        let last = plan.stages.last().unwrap();
+        assert_eq!(last.keyframes.as_ref().unwrap()[0].frame, last.frames - 1);
+        assert_eq!(last.keyframes.as_ref().unwrap()[0].image, vec![4, 5, 6]);
+        assert_eq!(plan.seed, Some(u64::MAX));
+        assert_eq!(plan.title, request.title);
+        assert!(plan.ephemeral);
+        request.video_only = Some(true);
+        assert!(h3_one_shot_chain(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("--video-only"));
+        request.video_only = None;
+        request.id_weight = Some(0.8);
+        assert!(h3_one_shot_chain(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("identity"));
     }
 
     #[test]
