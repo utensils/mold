@@ -4,12 +4,14 @@ import MoldClientTesting
 import SwiftUI
 import Testing
 import UIKit
+import Synchronization
 
 @testable import MoldCompanion
 
 @MainActor
 struct QueueConnectionViewTests {
-    @Test func openQueueRebindsPausedParentAfterLateCapabilitiesAndConnectionMetadata() async throws {
+    @Test(arguments: [false, true])
+    func openQueueRebindsPausedParentAfterLateCapabilitiesAndConnectionMetadata(firstPageFails: Bool) async throws {
         let caps = try MoldJSON.decoder.decode(Capabilities.self, from: Data(
             #"{"video_jobs":{"supported":true,"literal_prompts":true,"library_extend":true}}"#.utf8))
         let status = try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
@@ -20,6 +22,8 @@ struct QueueConnectionViewTests {
         let listing = try MoldJSON.decoder.decode(VideoJobListing.self, from: Data("{\"jobs\":[".utf8)
             + MoldJSON.encoder.encode(parent) + Data("],\"has_more\":false,\"next_cursor\":null}".utf8))
         let directory = FileManager.default.temporaryDirectory.appending(path: "queue-view-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let failedOnce = Mutex(false)
         var backends: [FakeBackend] = []
         let hosts = HostStore(list: HostListFile(url: directory.appending(path: "hosts.json")),
                               credentials: HostStoreTests.MemoryCredentials(), makeBackend: { host in
@@ -28,7 +32,12 @@ struct QueueConnectionViewTests {
             fake.stub("capabilities()", returning: caps)
             fake.stub("queue()", returning: emptyQueue)
             fake.stub("listChainJobs()", returning: emptyChains)
-            fake.stub("listVideoJobs(limit:cursor:)", returning: listing)
+            fake.stub("listVideoJobs(limit:cursor:)") { _ in
+                if firstPageFails, failedOnce.withLock({ failed in
+                    if failed { return false }; failed = true; return true
+                }) { throw MoldClientError.unreachable("Fixture unavailable") }
+                return listing
+            }
             backends.append(fake)
             return fake
         })
@@ -52,7 +61,24 @@ struct QueueConnectionViewTests {
         try await Task.sleep(for: .milliseconds(150))
         #expect(videos.jobs.isEmpty)
         hosts.setCapabilities(caps, for: host.id)
-        for _ in 0..<100 where videos.jobs.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        for _ in 0..<100 where videos.jobs.isEmpty && videos.pagination[host.id]?.error == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        if firstPageFails {
+            #expect(videos.pagination[host.id]?.error != nil)
+            #expect(generate.hasVideoQueueContent, "the mounted empty Queue must expose page Retry")
+            #expect(videos.error == nil)
+            try await Task.sleep(for: .milliseconds(100))
+            let retry = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let retryPath = directory.appending(path: "queue-retry.png")
+            try retry.pngData()?.write(to: retryPath)
+            print("QUEUE_RETRY_SCREENSHOT \(retryPath.path)")
+            let owner = VideoJobOwner(host: host, instanceId: "fixture-installation")
+            await videos.loadMore(owner: owner, backend: hosts.backend(for: host), current: { true })
+            #expect(videos.pagination[host.id]?.error == nil)
+        }
         #expect(videos.jobs.first?.detail?.canResume == true)
         var refreshed = host
         refreshed.connectionInstanceID = status.instanceId

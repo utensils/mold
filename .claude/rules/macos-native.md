@@ -384,3 +384,5 @@ and Quit remains available while storage is blocked. Access recovery uses
 NSOpenPanel for the exact canonical existing home, never a replacement home;
 retain granted access for the process and fence late panel answers. Opening or
 cancelling this panel must not start another bootstrap worker.
+
+Extend restores use shared token-owned cancellation/authority state. A changed captured owner or cancelled restore permits fresh inspection; old completion cannot overwrite its replacement or a newer explicit Library action. Queue listing errors stay page-owned, and the shared content predicate retains page Retry/loading rows in an otherwise-empty Queue.

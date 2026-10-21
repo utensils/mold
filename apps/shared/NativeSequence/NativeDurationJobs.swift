@@ -38,11 +38,12 @@ struct NativeDurationJobs: View {
             }.padding(.vertical, 8)
         }
         ForEach(Array(coordinator.pagination.values).sorted { $0.owner.host.name < $1.owner.host.name }, id: \.owner.host.id) { page in
-            if page.hasMore || page.error != nil {
+            if page.hasMore || page.error != nil || page.isLoading {
                 VStack(alignment: .leading, spacing: 6) {
                     if let error = page.error { Text(error).fixedSize(horizontal: false, vertical: true) }
                     if let target = backend(page.owner), current(page.owner) {
-                        Button(page.isLoading ? "Loading videos…" : "Load more videos on \(page.owner.host.name)") {
+                        Button(page.isLoading ? "Loading videos…" : page.error != nil
+                               ? "Retry videos on \(page.owner.host.name)" : "Load more videos on \(page.owner.host.name)") {
                             Task { await coordinator.loadMore(owner: page.owner, backend: target, current: { current(page.owner) }) }
                         }.disabled(page.isLoading).frame(minHeight: 44)
                     }

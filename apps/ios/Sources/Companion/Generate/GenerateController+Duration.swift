@@ -5,7 +5,7 @@ import UIKit
 extension GenerateController {
     var hasVideoQueueContent: Bool {
         !sequence.jobs.isEmpty || sequence.historyNotice != nil
-            || !videoJobs.jobs.isEmpty || !videoJobs.pending.isEmpty || videoJobs.error != nil
+            || videoJobs.hasQueueContent
             || !videoRestarts.pending.isEmpty || videoRestarts.error != nil
     }
 

@@ -21,6 +21,7 @@ final class GenerateController {
     var durationSourceLoading = false
     var durationSourceError: String?
     var durationSourceToken = UUID()
+    @ObservationIgnored var durationSourceRestoration: DurationSourceRestoration?
     @ObservationIgnored var durationTask: Task<Void, Never>?
 
     let retainedReuse = RetainedReuse()

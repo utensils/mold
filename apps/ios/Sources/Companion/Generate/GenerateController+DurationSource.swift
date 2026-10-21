@@ -34,23 +34,40 @@ extension GenerateController {
     }
 
     func restoreDurationSource() async {
-        guard let authoring = videoDuration, authoring.draft.source != nil,
+        guard let authoring = videoDuration, let selected = authoring.draft.source,
               let host = authoring.sourceOwner.flatMap({ hosts.host($0.hostId) }),
-              let instance = hosts.instanceID(of: host.id), (durationSource?.source != authoring.draft.source || durationSourceError != nil), !durationSourceLoading else { return }
+              let instance = hosts.instanceID(of: host.id) else { return }
         let owner = VideoJobOwner(host: host, instanceId: instance)
-        let token = UUID(); durationSourceToken = token; durationSourceLoading = true; durationSourceError = nil
-        defer { if durationSourceToken == token { durationSourceLoading = false } }
+        guard durationSource?.source != selected || durationSource?.owner != owner || durationSourceError != nil else { return }
+        if durationSourceLoading {
+            // An explicit newer Extend/Use Settings inspection owns the shared
+            // loading indicator. Only another automatic restore may replace us.
+            guard let previous = durationSourceRestoration, previous.token == durationSourceToken else { return }
+            if previous.owner == owner, previous.source == selected,
+               previous.sourceOwner == authoring.sourceOwner, !previous.isCancelled { return }
+        }
+        let restoration = DurationSourceRestoration(owner: owner, source: selected, sourceOwner: authoring.sourceOwner)
+        let token = restoration.token
+        durationSourceRestoration = restoration
+        durationSourceToken = token; durationSourceLoading = true; durationSourceError = nil
+        defer {
+            if durationSourceRestoration?.token == token { durationSourceRestoration = nil }
+            if durationSourceToken == token { durationSourceLoading = false }
+        }
         let current = { @MainActor [weak self] in
-            self?.durationSourceToken == token && self?.hosts.host(host.id) == host && self?.hosts.instanceID(of: host.id) == instance
+            !restoration.isCancelled && self?.durationSourceToken == token && self?.hosts.host(host.id) == host
+                && self?.hosts.instanceID(of: host.id) == instance
                 && self?.videoDuration?.draft.source == authoring.draft.source && self?.videoDuration?.sourceOwner == authoring.sourceOwner
         }
-        do {
-            let source = try await VideoLibraryExtensionSource.restore(authoring, owner: owner,
-                backend: hosts.backend(for: host), current: current)
-            guard current() else { return }
-            durationSource = source; videoDuration?.draft.source = source.source
-            saveDraft()
-        } catch { if current() { durationSourceError = UserFacingError.describe(error) } }
+        await withTaskCancellationHandler {
+            do {
+                let source = try await VideoLibraryExtensionSource.restore(authoring, owner: owner,
+                    backend: hosts.backend(for: host), current: current)
+                guard current() else { return }
+                durationSource = source; videoDuration?.draft.source = source.source
+                saveDraft()
+            } catch { if current() { durationSourceError = UserFacingError.describe(error) } }
+        } onCancel: { restoration.cancel() }
     }
 
     /// Library can mount Generate and deliver its action in the same turn.

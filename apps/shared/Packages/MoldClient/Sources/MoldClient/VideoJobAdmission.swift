@@ -42,4 +42,6 @@ public struct VideoJobPage: Hashable, Sendable {
     public var nextCursor: String?
     public var isLoading: Bool
     public var error: String?
+    /// Exact failed page request, including nil for the first page.
+    public var retryCursor: String? = nil
 }

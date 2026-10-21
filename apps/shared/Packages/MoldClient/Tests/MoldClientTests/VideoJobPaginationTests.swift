@@ -4,6 +4,58 @@ import MoldClientTesting
 @testable import MoldClient
 
 extension VideoJobCoordinatorTests {
+    @Test func pageOwnedFailureKeepsAnEmptyQueueVisibleUntilSuccessfulRetry() async throws {
+        let (backend, owner, saved) = try setup()
+        backend.stub("listVideoJobs(limit:cursor:)", throwing: MoldClientError.unreachable("offline"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.discover(owner: owner, backend: backend, current: { true })
+        #expect(coordinator.error == nil)
+        #expect(coordinator.hasQueueContent, "the first-page Retry must not be hidden by Nothing queued")
+        let gate = AsyncStream<Void>.makeStream()
+        let recovered = try listing([], cursor: nil)
+        backend.stub("listVideoJobs(limit:cursor:)") { _ in
+            for await _ in gate.stream { break }; return recovered
+        }
+        let retry = Task { await coordinator.loadMore(owner: owner, backend: backend, current: { true }) }
+        for _ in 0..<100 where backend.count("listVideoJobs(limit:cursor:)") < 2 { await Task.yield() }
+        #expect(coordinator.hasQueueContent, "Retry must stay visible as Loading while its request is pending")
+        gate.continuation.finish(); await retry.value
+        #expect(!coordinator.hasQueueContent)
+    }
+
+    @Test func initialListingFailureIsPageOwnedAndRetryActuallyRequestsFirstPage() async throws {
+        let (backend, owner, saved) = try setup()
+        backend.stub("listVideoJobs(limit:cursor:)", throwing: MoldClientError.unreachable("offline"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        coordinator.error = "Unrelated admission failed"
+        await coordinator.discover(owner: owner, backend: backend, current: { true })
+        #expect(coordinator.error == "Unrelated admission failed")
+        #expect(coordinator.pagination[owner.host.id]?.error != nil)
+        backend.stub("listVideoJobs(limit:cursor:)", returning: try listing([], cursor: nil))
+        await coordinator.loadMore(owner: owner, backend: backend, current: { true })
+        #expect(backend.count("listVideoJobs(limit:cursor:)") == 2)
+        #expect(coordinator.pagination[owner.host.id]?.error == nil)
+        #expect(coordinator.error == "Unrelated admission failed")
+    }
+
+    @Test func failedLaterPageRetriesItsExactCursorAndStaleOwnerCannotRetry() async throws {
+        let (backend, owner, saved) = try setup()
+        backend.stub("listVideoJobs(limit:cursor:)", returning: try listing([], cursor: "next"))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.discover(owner: owner, backend: backend, current: { true })
+        backend.stub("listVideoJobs(limit:cursor:)", throwing: MoldClientError.unreachable("offline"))
+        await coordinator.loadMore(owner: owner, backend: backend, current: { true })
+        #expect(coordinator.error == nil)
+        await coordinator.loadMore(owner: owner, backend: backend, current: { false })
+        #expect(backend.count("listVideoJobs(limit:cursor:)") == 2)
+        let recovered = try listing([], cursor: nil)
+        backend.stub("listVideoJobs(limit:cursor:)") { args in
+            #expect(args[1] as? String == "next")
+            return recovered
+        }
+        await coordinator.loadMore(owner: owner, backend: backend, current: { true })
+        #expect(coordinator.pagination[owner.host.id]?.error == nil)
+    }
     func listing(_ jobs: [VideoJob], cursor: String?) throws -> VideoJobListing {
         let array = String(data: try MoldJSON.encoder.encode(jobs), encoding: .utf8)!
         let suffix = cursor.map { #", "has_more":true,"next_cursor":""# + $0 + #""}"# }
