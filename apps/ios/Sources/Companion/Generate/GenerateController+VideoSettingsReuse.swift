@@ -8,6 +8,7 @@ extension GenerateController {
             durationSourceError = "Reconnect to this video's original machine before using its settings."
             return
         }
+        prepareVideoSourceInspection()
         let owner = VideoJobOwner(host: host, instanceId: instance)
         let snapshot = draft, oldDuration = videoDuration, oldSequence = sequence.draft
         let token = UUID(); durationSourceToken = token; durationSourceLoading = true; durationSourceError = nil

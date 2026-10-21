@@ -5,6 +5,39 @@ import Testing
 @testable import MoldCompanion
 
 @MainActor extension GenerateControllerTests {
+    @Test func firstLibraryVideoReuseSurvivesAutomaticComposerInitialization() async throws {
+        let (generate, fake) = try await setUp()
+        generate.hosts.setHosts([fake.host])
+        let old = try model("ltx-2.5-22b-distilled:bf16"), selected = try model("minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step")
+        fake.stub("models()", returning: [old, selected])
+        fake.stub("status()", returning: try MoldJSON.decoder.decode(ServerStatus.self, from: Data(
+            #"{"version":"test","busy":false,"uptime_secs":1,"instance_id":"installation"}"#.utf8)))
+        fake.stub("capabilities()", returning: try MoldJSON.decoder.decode(Capabilities.self, from: Data(
+            #"{"video_jobs":{"supported":true,"literal_prompts":true,"library_extend":true}}"#.utf8)))
+        await generate.hosts.refreshAll()
+        generate.kind = .clip; generate.choose(old); generate.videoDuration = nil
+        let print = try MoldJSON.decoder.decode(GalleryPrint.self, from: Data(
+            #"{"filename":"first.mp4","format":"mp4","timestamp":1,"metadata":{"prompt":"Original selected prompt","model":"minimax-h3-fl2va:comfy-pruned-int8-pdmd-2step","fps":24,"frames":144,"width":768,"height":768,"video_job":{"id":"source","source_frames":"0","total_frames":"144","authoring":{"duration_ms":"6000","boundary_frames":107,"seed":"7"}}}}"#.utf8))
+        let entry = LibraryEntry(host: generate.hosts.hosts[0], print: print)
+        fake.stub("gallery(etag:)", returning: Fetched<[GalleryPrint]>.fresh([print], etag: nil))
+        let gate = AsyncStream<Void>.makeStream()
+        fake.stub("retainedSourceMedia(for:)") { _ in
+            for await _ in gate.stream { break }
+            return RetainedSourceMedia.Inventory(availability: .unavailableLegacy)
+        }
+        generate.reuse(entry)
+        try await waitUntil { fake.count("retainedSourceMedia(for:)") == 1 }
+        // GenerateView mounts and runs these automatic hooks after its reuse
+        // onChange. They must not invalidate the captured user action.
+        generate.settleChoice(); generate.refreshDurationPlan()
+        gate.continuation.finish()
+        try await waitUntil { !generate.durationSourceLoading }
+        #expect(generate.modelName == selected.name)
+        #expect(generate.draft.prompt == "Original selected prompt")
+        #expect(generate.videoDuration?.draft.seconds == "6")
+        #expect(generate.durationSourceError == nil)
+    }
+
     @Test(arguments: ["minimax-h3-fl2va:comfy-pruned-int8", "wan22-i2v-a14b:fp8", "ltx-2.5-22b-distilled:bf16"])
     func reuseMaterializesOriginalFramesInTheirVisibleWells(name: String) async throws {
         let (generate, fake) = try await setUp()
