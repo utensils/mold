@@ -1090,6 +1090,7 @@ fn refit_request_after_pull(
 }
 
 pub struct Ltx2Options {
+    pub video_job: Option<crate::commands::video_jobs::VideoJobOptions>,
     pub frames: Option<u32>,
     pub predict_duration: bool,
     pub fps: Option<u32>,
@@ -1273,6 +1274,7 @@ pub async fn run(
     dry_run: bool,
 ) -> Result<()> {
     let Ltx2Options {
+        video_job,
         frames,
         predict_duration,
         fps,
@@ -1909,61 +1911,68 @@ pub async fn run(
     // local run must record what a remote one would.
     mold_core::validation::materialize_request_organization(&mut req)
         .map_err(|error| anyhow::anyhow!(error))?;
-    if is_h3 && effective_frames.is_some_and(|frames| frames > mold_core::minimax_h3::MAX_FRAMES) {
-        anyhow::ensure!(
-            !local,
-            "long H3 video requires a paired H3 server; --local is unsupported"
-        );
-        anyhow::ensure!(
-            req.save_to_gallery != Some(false),
-            "long H3 video requires server Library publication; drop --no-save"
-        );
-        let chain = super::chain::h3_one_shot_chain(&req)?;
+    if let Some(options) = video_job.as_ref() {
+        crate::commands::video_jobs::apply_extension_recipe(&mut req, &options.flags);
+    }
+    if video_job.is_none() {
+        if is_h3
+            && effective_frames.is_some_and(|frames| frames > mold_core::minimax_h3::MAX_FRAMES)
+        {
+            anyhow::ensure!(
+                !local,
+                "long H3 video requires a paired H3 server; --local is unsupported"
+            );
+            anyhow::ensure!(
+                req.save_to_gallery != Some(false),
+                "long H3 video requires server Library publication; drop --no-save"
+            );
+            let chain = super::chain::h3_one_shot_chain(&req)?;
+            if dry_run {
+                super::chain::print_dry_run_summary(&chain);
+                return Ok(());
+            }
+            status!(
+                "{} Long video: {} clips, {:.2}s delivered at {} fps",
+                theme::icon_info(),
+                chain.stages.len(),
+                f64::from(chain.estimated_total_frames()) / f64::from(chain.fps),
+                chain.fps
+            );
+            return super::chain::run_chain(
+                chain,
+                None,
+                host,
+                output,
+                no_metadata,
+                preview,
+                false,
+                gpus,
+                t5_variant,
+                qwen3_variant,
+                qwen2_variant,
+                qwen2_text_encoder_mode,
+                eager,
+                offload,
+            )
+            .await;
+        }
         if dry_run {
-            super::chain::print_dry_run_summary(&chain);
+            println!("1 clip");
+            println!("model: {}", req.model);
+            println!("canvas: {}x{}", req.width, req.height);
+            if let Some(frames) = req.frames {
+                let fps = req.fps.unwrap_or(24).max(1);
+                println!(
+                    "estimated total frames: {frames} ({:.2}s @ {fps}fps)",
+                    f64::from(frames) / f64::from(fps)
+                );
+            }
+            println!(
+                "audio: {}",
+                super::chain::describe_enable_audio(req.enable_audio)
+            );
             return Ok(());
         }
-        status!(
-            "{} Long video: {} clips, {:.2}s delivered at {} fps",
-            theme::icon_info(),
-            chain.stages.len(),
-            f64::from(chain.estimated_total_frames()) / f64::from(chain.fps),
-            chain.fps
-        );
-        return super::chain::run_chain(
-            chain,
-            None,
-            host,
-            output,
-            no_metadata,
-            preview,
-            false,
-            gpus,
-            t5_variant,
-            qwen3_variant,
-            qwen2_variant,
-            qwen2_text_encoder_mode,
-            eager,
-            offload,
-        )
-        .await;
-    }
-    if dry_run {
-        println!("1 clip");
-        println!("model: {}", req.model);
-        println!("canvas: {}x{}", req.width, req.height);
-        if let Some(frames) = req.frames {
-            let fps = req.fps.unwrap_or(24).max(1);
-            println!(
-                "estimated total frames: {frames} ({:.2}s @ {fps}fps)",
-                f64::from(frames) / f64::from(fps)
-            );
-        }
-        println!(
-            "audio: {}",
-            super::chain::describe_enable_audio(req.enable_audio)
-        );
-        return Ok(());
     }
     let base_seed = req.seed.unwrap_or_else(|| rand::thread_rng().gen());
     let mut reference_session = None;
@@ -1993,6 +2002,33 @@ pub async fn run(
                 bind_remote_reference_uploads(ctx.client(), &mut req, reference_uploads, batch)
                     .await?;
         }
+    }
+
+    if let Some(options) = video_job {
+        anyhow::ensure!(!local, "Requested-duration videos require a remote server");
+        anyhow::ensure!(batch == 1, "Requested-duration videos currently require --batch 1; each video is a separate durable operation");
+        anyhow::ensure!(
+            !filing.no_save,
+            "Requested-duration videos must be saved in the server Library"
+        );
+        req.seed = Some(base_seed);
+        let admitted = crate::commands::video_jobs::admit(ctx.client(), &req, &options, || {
+            if let Some(lease) = reference_session.as_mut() {
+                lease.preserve_for_uncertain_admission();
+            }
+        })
+        .await?;
+        let Some((job, instance)) = admitted else {
+            return Ok(());
+        };
+        return crate::commands::video_jobs::observe(
+            ctx.client(),
+            job,
+            &instance,
+            options.flags.detach,
+            output.as_deref(),
+        )
+        .await;
     }
 
     // Warn if user-provided dimensions don't match model recommendations.
@@ -6341,6 +6377,7 @@ mod tests {
             Some(42),
             1,
             Ltx2Options {
+                video_job: None,
                 mesh: None,
                 frames: None,
                 predict_duration: false,

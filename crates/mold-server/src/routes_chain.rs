@@ -409,6 +409,15 @@ pub(crate) fn resolved_chain_source_image_contract(
     )
 }
 
+pub(crate) fn require_public_chain_request(request: &ChainRequest) -> Result<(), ApiError> {
+    if request.incoming_source.is_some() || request.generation_controls.is_some() {
+        return Err(ApiError::validation(
+            "incoming_source is reserved for an internal video parent; use /api/video-jobs",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_and_normalize_chain_family(
     config: &mold_core::Config,
     req: &mut ChainRequest,
@@ -740,6 +749,7 @@ pub async fn validate_chain(
     State(state): State<AppState>,
     Json(mut req): Json<ChainRequest>,
 ) -> Result<Json<ChainValidationResponse>, ApiError> {
+    require_public_chain_request(&req)?;
     req.normalize_prompt_newlines();
     let opening_transition = req.stages.first().map(|stage| stage.transition);
     let requested_motion_tail = req.motion_tail_frames;
@@ -859,6 +869,8 @@ mod tests {
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1014,6 +1026,38 @@ mod tests {
     /// The fixture has no model on disk, so the estimate is *withheld* rather
     /// than guessed — and validation still answers. `fits` must never be
     /// fabricated, and validate must not become download-gated.
+    #[tokio::test]
+    async fn legacy_public_routes_refuse_internal_source_before_model_lookup() {
+        let mut request = req(OutputFormat::Mp4);
+        request.model = "nonexistent-no-model-lookup".into();
+        request.incoming_source = Some(mold_core::chain::ChainIncomingSource {
+            parent_job_id: "parent".into(),
+            source_sha256: "a".repeat(64),
+            source_frames: 240,
+        });
+        let state = AppState::for_tests();
+        let error = validate_chain(State(state.clone()), Json(request.clone()))
+            .await
+            .unwrap_err();
+        assert!(
+            error.error.contains("internal video parent"),
+            "{}",
+            error.error
+        );
+        let error = crate::routes_chain_jobs::create_chain_job(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Json(request),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.error.contains("internal video parent"),
+            "{}",
+            error.error
+        );
+    }
+
     #[tokio::test]
     async fn chain_validation_withholds_vram_estimate_it_cannot_price() {
         let state = AppState::for_tests();

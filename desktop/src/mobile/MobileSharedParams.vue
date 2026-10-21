@@ -29,6 +29,7 @@ import {
 
 const props = withDefaults(
   defineProps<{
+    durationActive?: boolean;
     form: GenerateForm;
     section?: "all" | "primary" | "details";
     model?: ModelEntry | null;
@@ -289,7 +290,7 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
       />
     </div>
     <div
-      v-if="canPredictDuration"
+      v-if="!durationActive && canPredictDuration"
       class="field mobile-predict-duration"
       data-test="mobile-predict-duration"
     >
@@ -301,7 +302,7 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
       />
     </div>
     <VideoDurationSlider
-      v-if="supportsVideo && !form.predictDuration"
+      v-if="!durationActive && supportsVideo && !form.predictDuration"
       class="mobile-duration-field"
       :frames="form.frames"
       :fps="form.fps"
@@ -317,7 +318,7 @@ const selectedQuality = computed(() => activeQualityPreset(quality.value, props.
       @update:frames="form.frames = $event"
     />
     <p
-      v-else-if="supportsVideo && form.predictDuration"
+      v-else-if="!durationActive && supportsVideo && form.predictDuration"
       class="field-hint"
       data-test="mobile-predicted-duration-hint"
     >

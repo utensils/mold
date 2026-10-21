@@ -13,6 +13,7 @@ mod lan_access;
 mod regular_access;
 mod regular_pairing;
 pub mod secure_pairing;
+mod video_job_child_authority;
 pub use connections::ConnectionAddresses;
 mod cuda_peak;
 pub(crate) mod dir_sync;
@@ -116,7 +117,33 @@ mod signals;
 pub mod state;
 pub mod thumbnails;
 pub mod variant_dependencies;
+pub(crate) mod video_archive_assets;
+#[cfg(feature = "mp4")]
+mod video_job_actor;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_admission;
+#[cfg(feature = "mp4")]
+mod video_job_create;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_loras;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_manifest;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_openapi;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_output;
+#[cfg(feature = "mp4")]
+mod video_job_pending;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_restart;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_job_restart_routes;
+#[cfg_attr(not(feature = "mp4"), path = "video_jobs_disabled.rs")]
+pub(crate) mod video_jobs;
+#[cfg(feature = "mp4")]
+pub(crate) mod video_prefix_audio;
 mod video_reference_codec;
+pub(crate) mod video_source;
 pub mod video_upscale;
 mod wan_admission;
 pub mod web_ui;
@@ -987,6 +1014,10 @@ async fn run_server_inner(
     #[cfg(feature = "mdns")]
     let mdns_instance_id = state.instance_id.clone();
 
+    if let Some(database) = state.metadata_db.as_ref().as_ref() {
+        // Fence parent-owned children before either durable runner can claim work.
+        mold_db::video_jobs::recover_at_startup(database, video_jobs::now_ms())?;
+    }
     if state.metadata_db.is_some() {
         let Some(jobs_root) = Config::mold_dir().map(|dir| dir.join("jobs")) else {
             anyhow::bail!("metadata DB opened but MOLD_HOME could not be resolved for chain jobs");
@@ -1094,6 +1125,18 @@ async fn run_server_inner(
     // otherwise fall back to the single-threaded queue worker.
     let worker_state = state.clone();
     let scheduler_shutdown = tokio_util::sync::CancellationToken::new();
+    #[cfg(feature = "mp4")]
+    if startup.start_chain_runner && state.metadata_db.is_some() {
+        state.video_jobs = Some(video_job_actor::spawn(
+            state.clone(),
+            scheduler_shutdown.clone(),
+        ));
+    }
+    let video_source_upload_sweeper =
+        video_source_upload_routes::spawn_sweeper(state.clone(), scheduler_shutdown.clone());
+    #[cfg(feature = "mp4")]
+    let video_pending_sweeper =
+        video_jobs::spawn_pending_sweeper(state.clone(), scheduler_shutdown.clone());
     let uses_cooperative_gpu_dispatch =
         startup.start_v2_coordinator || startup.start_legacy_dispatcher;
     let generation_worker_handle = if startup.start_v2_coordinator {
@@ -1806,6 +1849,9 @@ async fn run_server_inner(
     }
     tracing::debug!(step = "downloads", "awaiting shutdown step");
     downloads_shutdown.cancel();
+    video_source_upload_sweeper.abort();
+    #[cfg(feature = "mp4")]
+    video_pending_sweeper.abort();
     downloads_driver.abort();
     let _ = downloads_driver.await;
     tracing::debug!(step = "video-upscale", "awaiting shutdown step");
@@ -3009,3 +3055,7 @@ mod tests {
 }
 
 mod chain_restart;
+
+mod video_source_upload;
+
+mod video_source_upload_routes;

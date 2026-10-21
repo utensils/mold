@@ -344,9 +344,33 @@ impl DurableMediaAdmission {
         state: &AppState,
         authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
         reference_identity: Option<crate::reference_uploads::ReferenceIdentity>,
+        body: mold_core::GenerationBatchAdmissionRequest,
+        observer_mode: Option<ObserverMode>,
+        completion_payload: SseCompletionPayload,
+    ) -> Result<DurableAdmissionOutcome, ApiError> {
+        self.admit_batch_owned(
+            state,
+            authenticated,
+            reference_identity,
+            body,
+            observer_mode,
+            completion_payload,
+            None,
+        )
+        .await
+    }
+
+    /// Server-only ownership; no HTTP request can supply this association.
+    #[allow(clippy::too_many_arguments)] // Explicit trusted ownership never enters the public request.
+    pub(crate) async fn admit_batch_owned(
+        self: &Arc<Self>,
+        state: &AppState,
+        authenticated: Option<&crate::auth::ApiKeyAuthenticated>,
+        reference_identity: Option<crate::reference_uploads::ReferenceIdentity>,
         mut body: mold_core::GenerationBatchAdmissionRequest,
         observer_mode: Option<ObserverMode>,
         completion_payload: SseCompletionPayload,
+        stage_owner: Option<mold_db::chain_stage_generations::ChainStageOwner>,
     ) -> Result<DurableAdmissionOutcome, ApiError> {
         body.client_batch_id = crate::routes::canonical_client_batch_id(&body.client_batch_id)?;
         if body.requests.is_empty() {
@@ -424,6 +448,26 @@ impl DurableMediaAdmission {
         if let Some(existing) = existing_by_client(state, &body.client_batch_id).await? {
             self.verify_existing_async(state, &body.client_batch_id, &fingerprint, &existing)
                 .await?;
+            let db = state.metadata_db.clone();
+            let owner = stage_owner.clone();
+            let ids = existing
+                .children
+                .iter()
+                .map(|child| child.job_id.clone())
+                .collect::<Vec<_>>();
+            spawn_admission_blocking("chain stage replay ownership", move || {
+                let db = db
+                    .as_ref()
+                    .as_ref()
+                    .ok_or_else(|| ApiError::internal("chain stage database unavailable"))?;
+                mold_db::chain_stage_generations::require_batch_owner(db, &ids, owner.as_ref())
+                    .map_err(|_| {
+                        ApiError::validation(
+                            "existing generation batch has different chain stage ownership",
+                        )
+                    })
+            })
+            .await??;
             // A replay carries no observer: the print was admitted by an
             // earlier POST and is answered with that batch on every facade,
             // which is what makes a client-chosen id idempotent on
@@ -760,17 +804,20 @@ impl DurableMediaAdmission {
                         admission_authority: child.admission_authority.as_deref(),
                     })
                     .collect::<Vec<_>>();
-                match journal.record_batch_with_media(MediaBatchJournalAdmission {
-                    id: &batch_id_for_db,
-                    client_batch_id: &client_id_for_db,
-                    operation_receipt: sealed
-                        .receipt
-                        .as_ref()
-                        .expect("sealed batch has an operation receipt")
-                        .as_str(),
-                    children: &children,
-                    observer_job_ids: &observers_for_db,
-                }) {
+                match journal.record_batch_with_media_owned(
+                    MediaBatchJournalAdmission {
+                        id: &batch_id_for_db,
+                        client_batch_id: &client_id_for_db,
+                        operation_receipt: sealed
+                            .receipt
+                            .as_ref()
+                            .expect("sealed batch has an operation receipt")
+                            .as_str(),
+                        children: &children,
+                        observer_job_ids: &observers_for_db,
+                    },
+                    stage_owner.as_ref(),
+                ) {
                     Ok(
                         mold_db::generation_batches::GenerationBatchMediaInsertOutcome::Inserted(_),
                     ) => {

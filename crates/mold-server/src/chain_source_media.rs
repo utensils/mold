@@ -60,11 +60,31 @@ struct SourceMediaIndex {
     requests: BTreeMap<String, MediaSetRef>,
 }
 
+#[cfg(any(feature = "mp4", test))]
+pub(crate) fn persist_video_parent(
+    jobs_root: &Path,
+    job_dir: &Path,
+    job_id: &str,
+    request: ChainRequest,
+) -> anyhow::Result<ChainRequest> {
+    persist_with_owner(jobs_root, job_dir, job_id, request, "video-jobs")
+}
+
 pub(crate) fn persist_scrubbed(
     jobs_root: &Path,
     job_dir: &Path,
     job_id: &str,
+    request: ChainRequest,
+) -> anyhow::Result<ChainRequest> {
+    persist_with_owner(jobs_root, job_dir, job_id, request, OWNER)
+}
+
+fn persist_with_owner(
+    jobs_root: &Path,
+    job_dir: &Path,
+    job_id: &str,
     mut request: ChainRequest,
+    owner: &str,
 ) -> anyhow::Result<ChainRequest> {
     // Client-provided identities never authorize bytes or survive an input removal.
     for stage in &mut request.stages {
@@ -106,7 +126,7 @@ pub(crate) fn persist_scrubbed(
             bytes,
         ));
     }
-    if request.continue_from.is_some() && (media.len() > 64 || total_bytes > 512 * 1024 * 1024) {
+    if request.has_incoming_boundary() && (media.len() > 64 || total_bytes > 512 * 1024 * 1024) {
         bail!("linked part retained conditioning exceeds 64 members or 512 MiB");
     }
     if media.is_empty() {
@@ -120,7 +140,7 @@ pub(crate) fn persist_scrubbed(
     // chain authority that relates it to `job_id`.
     let storage_job_id = format!("{job_id}-{}", uuid::Uuid::new_v4().simple());
     let media_set = store
-        .seal(OWNER, &storage_job_id, media)
+        .seal(owner, &storage_job_id, media)
         .context("sealing chain authored source media")?;
     let mut index = read_index(job_dir)?.unwrap_or_default();
     index.version = 1;
@@ -179,14 +199,14 @@ pub(crate) fn hydrate(
     mut request: ChainRequest,
 ) -> anyhow::Result<ChainRequest> {
     let Some(index) = read_index(job_dir)? else {
-        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+        if request.has_incoming_boundary() && request.motion_tail_frames > 0 {
             bail!("linked part has no sealed continuation recovery authority");
         }
         ensure_hydrated(&request)?;
         return Ok(request);
     };
     let Some(media_set) = media_revision(&index, &request)? else {
-        if request.continue_from.is_some() && request.motion_tail_frames > 0 {
+        if request.has_incoming_boundary() && request.motion_tail_frames > 0 {
             bail!("linked part media revision is missing");
         }
         ensure_hydrated(&request)?;
@@ -335,7 +355,7 @@ pub(crate) fn handoff_current_to_gallery(
     request: &ChainRequest,
     gate: &crate::batch_transaction::GalleryPublicationGate,
 ) -> anyhow::Result<()> {
-    if !(request.continue_from.is_some() && request.motion_tail_frames > 0)
+    if !(request.has_incoming_boundary() && request.motion_tail_frames > 0)
         && request.stages.iter().all(|stage| {
             stage.source_image.is_none()
                 && stage.keyframes.is_none()
@@ -713,6 +733,8 @@ mod tests {
         };
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             model: "ltx-2-19b-distilled:fp8".into(),
@@ -914,6 +936,22 @@ mod tests {
         assert_eq!(
             hydrated.stages[0].source_image.as_deref(),
             Some(&[1, 2, 3][..])
+        );
+    }
+
+    #[test]
+    fn legacy_chain_gc_preserves_video_parent_original_inputs() {
+        let home = tempfile::tempdir().unwrap();
+        let chains = home.path().join("chain-jobs");
+        std::fs::create_dir_all(&chains).unwrap();
+        let parents = home.path().join("video-jobs");
+        let parent = parents.join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let sealed = persist_video_parent(&parents, &parent, "parent", request()).unwrap();
+        reconcile_orphans(&chains).unwrap();
+        assert_eq!(
+            hydrate(&parents, &parent, sealed).unwrap().stages[0].source_image,
+            Some(vec![1, 2, 3])
         );
     }
 

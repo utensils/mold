@@ -1208,3 +1208,13 @@ describe("AdvancedDrawer transparent background (Qwen Image 2.1)", () => {
     );
   });
 });
+it("leaves timing controls with the duration editor while keeping FPS and audio options", () => {
+  const wrapper = factory(
+    "ltx2",
+    { model: "ltx-2-19b-distilled:fp8" },
+    { durationActive: true },
+  );
+  expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
+  expect(wrapper.find('[data-test="video-frames"]').exists()).toBe(false);
+  expect(wrapper.find('[data-test="video-fps"]').exists()).toBe(true);
+});

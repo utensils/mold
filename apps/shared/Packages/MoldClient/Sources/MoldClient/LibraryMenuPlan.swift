@@ -21,6 +21,7 @@ public enum LibraryAction: Hashable, Sendable {
     case open
     case reuse
     case continueVideo
+    case extendVideo
     case useAsSourceImage
     case addAsReference
     case useAsFirstFrame, useAsLastFrame
@@ -67,6 +68,7 @@ public struct LibraryMenuPlan: Sendable {
     public let meshExports: MeshExport.Split?
     public let canOpen: Bool
     public let canContinueVideo: Bool
+    public let canExtendVideo: Bool
     public let canReuse: Bool
     public let canUseAsSource: Bool
     public let canUseEndpoints: Bool
@@ -89,7 +91,7 @@ public struct LibraryMenuPlan: Sendable {
                 name: String? = nil, shelves: [CollectionShelf] = [],
                 enclosingShelf: CollectionShelf? = nil, exportFormats: [String] = [],
                 meshExports: MeshExport.Split? = nil,
-                canOpen: Bool = true, canReuse: Bool = false, canContinueVideo: Bool = false,
+                canOpen: Bool = true, canReuse: Bool = false, canContinueVideo: Bool = false, canExtendVideo: Bool = false,
                 canUseAsSource: Bool = false,
                 canAddReference: Bool = false, canUseEndpoints: Bool = false, canUpscale: Bool = false,
                 upscalers: [UpscalerOption] = [], trashCount: Int = 0,
@@ -105,6 +107,7 @@ public struct LibraryMenuPlan: Sendable {
         self.exportFormats = exportFormats
         self.canOpen = canOpen
         self.canContinueVideo = canContinueVideo
+        self.canExtendVideo = canExtendVideo
         self.canReuse = canReuse
         self.canUseAsSource = canUseAsSource
         self.canUseEndpoints = canUseEndpoints

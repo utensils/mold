@@ -1074,6 +1074,16 @@ Queue toolbar actions carry explicit pause/resume and empty-queue icons in both 
 
 ## Multi-clip video
 
-In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+On updated machines advertising duration video jobs, use one prompt and **Duration**. The initial value follows the selected recipe; a chosen length survives model changes and a cold launch. The server reports the single-generation limit and number of clips joined into one movie. **Define scenes** optionally adds separate prompts. Generate prepares ordinary source media, typed references and batch variations, then creates one durable Queue parent per movie. Queue offers the server’s progress, Stop, Resume, deletion of recovery data and paged recovery. An unanswered submission remains a known attempt to check before making another.
+
+Library **Extend Video…** opens the original recipe and adds duration to its ending, producing a longer movie while keeping the original. The original machine and source identity stay pinned; original typed references are shown and inherited unless replaced. Historical opening and closing images are cleared. For continuous extension, the original ending supplies the first frame; a newly attached opening image remains visible and must be removed before generating. Older machines retain the existing single-generation controls, while saved authored-sequence drafts keep their separate-part **Continue video** behavior.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
+
+Failed or interrupted video jobs offer **Start again…** when their machine supports recovery. Choose the same machine to start again, or another compatible machine to **Send video**. This creates a new attempt and keeps the original. Saved attempts remain in Queue after relaunch and can be checked or stopped using their original operation identity; unanswered submissions are never silently submitted again. **Delete job…** removes the confirmed job’s recovery data while keeping saved Library videos.
+
+Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
+
+Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.
+
+A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.

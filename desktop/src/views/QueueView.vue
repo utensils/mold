@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoJobHistory from "@studio/components/VideoJobHistory.vue";
 /*
  * Queue (README §04): the same list the sidebar rail shows, at full width —
  * three counts, one explainer, and a table with a sentence of status per row.
@@ -152,6 +153,15 @@ function previewSrc(row: QueueRow): string | null {
 
 <template>
   <div class="flex h-full min-h-0 flex-col bg-bg">
+    <VideoJobHistory
+      :existing-keys="
+        queue.rows.value.flatMap((row) =>
+          row.kind === 'shared'
+            ? [`${row.shared.hostId}:${row.shared.instanceId}:${row.shared.id}`]
+            : [],
+        )
+      "
+    />
     <!-- view toolbar -->
     <div
       class="flex h-[var(--mold-shell-viewbar-h)] shrink-0 items-center gap-3 border-b border-border bg-chrome px-3.5"

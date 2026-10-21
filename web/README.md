@@ -162,3 +162,35 @@ A stalled job remains live and may still reserve its device. Queue rows and Job 
 In Queue, a failed, interrupted or paused multi-clip video offers **Start again…**. Review the destination, then choose **Start again** on its original machine or **Send video** on another connected machine. Saved prompts, seed, settings and inputs stay together; the original remains unchanged. Machine-local adapters can restart only on their original machine. Unsupported retained inputs explain the refusal before admission. A lost reply keeps the known job for **Check queue**, and **Stop new attempt** cancels that destination operation without changing the original.
 
 On updated machines, **Delete recovery data…** is available for a failed or interrupted multi-clip job. Its separate confirmation deletes that job and retained inputs; saved Library videos remain available. The original installation and job revision must still match. **Stop new attempt** requires the updated installation-fenced control; an interrupted cancellation reply keeps its intent for reconciliation with the same job ID.
+
+### Video duration and Library Extend
+
+On an updated machine, Clip keeps one prompt and a **Duration** field. The
+initial duration follows the selected recipe's short clip; choosing another
+model preserves the duration you entered. Presets include 30 seconds, and a
+custom duration has no client-side upper limit. The machine reports its single
+generation limit and the actual number of clips joined into one video.
+**Define scenes** optionally gives each scene its own prompt and duration.
+Generate prepares the existing image/reference inputs once, validates the full
+request, and queues one durable video job per requested copy.
+
+**Extend video…** on a Library video restores its recipe and prompt, then asks
+for **Add duration**. The original remains saved; the new Library video contains
+the original plus the added footage. The draft stays bound to that original
+machine and installation. Its ending supplies a continuous opening boundary;
+a conflicting selected opening image requires an explicit correction. Retained
+original references are listed, while a new closing frame remains optional
+when the selected recipe supports one. Start new video clears the prefix.
+
+Queue shows video parent progress, Stop, Resume, and settled recovery actions.
+**Start again or send…** creates a new attempt with the saved settings and
+inputs and keeps the original job unchanged. Same-machine restarts reuse an
+immutable local prefix grant; sending to another machine copies the original
+video in bounded chunks. Saved video jobs use bounded, stable Load more pages.
+An unanswered submission retains its exact operation and machine for Check
+queue/Stop recovery instead of creating another attempt automatically.
+
+These controls require affirmative server capabilities. A saved Duration or
+Extend draft stays visible but blocked on an older or replaced machine; it is
+never silently submitted as a shorter ordinary clip. Legacy authored clip
+drafts retain their separate-part Continue behavior on older machines.

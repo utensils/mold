@@ -1142,9 +1142,18 @@ impl QueueJournal {
         Some(self.attach_claimed(admission.id, claim.claim_token))
     }
 
+    #[cfg(test)]
     pub(crate) fn record_batch_with_media(
         self: &Arc<Self>,
         admission: MediaBatchJournalAdmission<'_>,
+    ) -> Result<GenerationBatchMediaInsertOutcome, String> {
+        self.record_batch_with_media_owned(admission, None)
+    }
+
+    pub(crate) fn record_batch_with_media_owned(
+        self: &Arc<Self>,
+        admission: MediaBatchJournalAdmission<'_>,
+        stage_owner: Option<&mold_db::chain_stage_generations::ChainStageOwner>,
     ) -> Result<GenerationBatchMediaInsertOutcome, String> {
         let owner_uuid = self
             .owner_uuid
@@ -1238,8 +1247,14 @@ impl QueueJournal {
             request_sha256: admission.operation_receipt.to_string(),
             created_at_ms: now,
         };
-        let outcome = generation_batches::insert_or_get_with_media(db, &batch, &rows, &obligations)
-            .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
+        let outcome = generation_batches::insert_or_get_with_media_owned(
+            db,
+            &batch,
+            &rows,
+            &obligations,
+            stage_owner,
+        )
+        .map_err(|error| format!("could not persist media generation batch: {error:#}"))?;
         if matches!(outcome, GenerationBatchMediaInsertOutcome::Inserted(_)) {
             if let Some(service) = self.queue_media_admission.get() {
                 for job_id in admission.observer_job_ids {

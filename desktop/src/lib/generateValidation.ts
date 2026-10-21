@@ -310,7 +310,7 @@ function holdsConditioningImage(mode: SourceImageMode, form: GenerateForm): bool
  */
 export function sourceConditioningValidationError(
   form: GenerateForm,
-  options: { ignoreUnsupportedStagedSource?: boolean } = {},
+  options: { ignoreUnsupportedStagedSource?: boolean; incomingVideoBoundary?: boolean } = {},
 ): string | null {
   if (isMinimaxH3Family(form.family)) return null;
   const caps = generationCapabilitiesForFamily(
@@ -327,8 +327,9 @@ export function sourceConditioningValidationError(
   // Continuations remain separate because their tail frames really do travel
   // on the wire and must still satisfy/refuse the advertised contract.
   const hasSourceImage =
-    (!options.ignoreUnsupportedStagedSource || caps.supportsSourceImage) &&
-    holdsConditioningImage(caps.sourceImageMode, form);
+    options.incomingVideoBoundary === true ||
+    ((!options.ignoreUnsupportedStagedSource || caps.supportsSourceImage) &&
+      holdsConditioningImage(caps.sourceImageMode, form));
   // A canvasless recipe (a 3-D mesh) reconstructs its source image. It is not
   // an image-to-VIDEO checkpoint, so the shared first-frame wording would
   // misname the very thing the user has to attach. The snapshot is the

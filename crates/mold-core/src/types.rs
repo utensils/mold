@@ -3447,6 +3447,10 @@ pub struct OutputMetadata {
     /// settings authoring surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<crate::chain::ChainOutputMetadata>,
+    /// Bounded whole-video provenance. Full clip history remains in an owned
+    /// archive artifact rather than growing every Library row indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_job: Option<crate::video_artifacts::VideoJobProvenance>,
     /// The durable 3-D workflow that produced this print, and the role it
     /// plays in it (additive). Every stage of a workflow publishes an ordinary
     /// print, so this is what lets a client route a queue row back to the 3-D
@@ -3704,6 +3708,7 @@ impl OutputMetadata {
             fps: req.fps,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             // A fact about the stored file; the encoder or the publication
             // path (`apply_still_output`) records it.
             has_alpha: None,
@@ -11027,6 +11032,7 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryImage {
     pub filename: String,
+    #[serde(deserialize_with = "crate::video_job::deserialize_literal_metadata")]
     pub metadata: OutputMetadata,
     pub timestamp: u64,
     /// File format inferred from extension. Omitted for backwards compat when
@@ -12286,6 +12292,10 @@ pub struct MiniMaxH3Capability {
 /// can add their own sub-structs without churning existing fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerCapabilities {
+    /// Arbitrary-duration parents. Absent until admission and recovery are live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_jobs: Option<crate::video_job::VideoJobCapabilities>,
+
     /// `/api/models` rows carry a complete version-1 generation profile.
     /// Absent/false identifies a legacy host whose flattened fields require
     /// the contained one-release client adapter.

@@ -683,3 +683,12 @@ describe("MobileSharedParams transparent background", () => {
     expect(buildRequest(form).transparent_background).toBe(true);
   });
 });
+it("does not leave a second bounded duration slider beside the parent duration editor", () => {
+  setActivePinia(createPinia());
+  const form = reactive({ ...newGenerateForm(), model: "ltx-2-19b-distilled:fp8", family: "ltx2" });
+  const wrapper = mount(MobileSharedParams, {
+    props: { form, lastSeed: null, durationActive: true },
+    global: { stubs: { MobileResolutionPicker: true, MobileSeedPicker: true } },
+  });
+  expect(wrapper.find('[data-test="mobile-duration"]').exists()).toBe(false);
+});

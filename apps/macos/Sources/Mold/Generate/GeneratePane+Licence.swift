@@ -47,7 +47,7 @@ extension GeneratePane {
             let feedbackID = controller.submissionFeedback.begin("Checking model requirements on \(host.name)…")
             let pressed = LicenceSubmission(
                 draft: controller.draft, model: controller.modelName, host: host.id,
-                sequence: controller.sequence.draft)
+                sequence: controller.sequence.draft, videoDuration: controller.videoDuration)
             let probeDraft = controller.sequence.probeDraft(pressed.draft)
             Task {
                 let answered = await probe.settle(
@@ -77,11 +77,12 @@ extension GeneratePane {
         let model: String?
         let host: MoldHost.ID
         var sequence: SequenceDraft? = nil
+        var videoDuration: VideoDurationAuthoring? = nil
     }
 
     private var currentSubmission: LicenceSubmission? {
         host.map { LicenceSubmission(draft: controller.draft, model: controller.modelName,
-            host: $0.id, sequence: controller.sequence.draft) }
+            host: $0.id, sequence: controller.sequence.draft, videoDuration: controller.videoDuration) }
     }
 
     /// Whether the continuation may run the press it was started for.

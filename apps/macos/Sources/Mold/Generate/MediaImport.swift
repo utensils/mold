@@ -34,4 +34,11 @@ nonisolated enum MediaImport {
             try Data(contentsOf: url)
         }.value
     }
+    /// File actions use the same off-main IO door as attachment reads.
+    static func copy(from source: URL, to destination: URL) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: source).write(to: destination, options: .atomic)
+        }.value
+    }
+
 }

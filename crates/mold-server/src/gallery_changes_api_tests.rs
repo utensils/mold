@@ -1203,10 +1203,13 @@ async fn a_fresh_host_with_no_output_dir_is_ready_and_empty() {
 /// update the expectation together.
 #[test]
 fn the_row_derivation_is_pinned_to_row_format() {
-    assert_eq!(ROW_FORMAT, 1, "bump the golden row below with ROW_FORMAT");
+    assert_eq!(ROW_FORMAT, 2, "bump the golden row below with ROW_FORMAT");
     let dir = Path::new("/golden-gallery");
     let db = MetadataDb::open_in_memory().unwrap();
     let mut row = record("golden.png", 1_700_000_000_000);
+    row.metadata.prompt = r"scene\npath".into();
+    row.metadata.negative_prompt = Some(r"bad\ttext".into());
+    row.metadata.seed = u64::MAX;
     row.output_dir = dir.to_string_lossy().into_owned();
     row.file_mtime_ms = Some(1_700_000_001_000);
     row.file_size_bytes = Some(2048);
@@ -1246,8 +1249,9 @@ const GOLDEN_ROW: &str = r#"{
     "model": "test",
     "output_mode": "one-shot",
     "pipeline_requested": false,
-    "prompt": "prompt for golden.png",
-    "seed": 1,
+    "prompt": "scene\\npath",
+    "negative_prompt": "bad\\ttext",
+    "seed": 18446744073709551615,
     "steps": 1,
     "version": "test",
     "width": 64

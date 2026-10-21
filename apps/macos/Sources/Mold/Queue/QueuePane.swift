@@ -27,7 +27,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, generate.sequence.historyNotice == nil {
+            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",
@@ -35,10 +35,17 @@ struct QueuePane: View {
                 )
             } else {
                 List(selection: $selection) {
-                    NativeSequenceJobs(session: generate.sequence, backend: { job in
-                        guard hosts.host(job.host.id) == job.host, hosts.instanceID(of: job.host.id) == job.installation else { return nil }
-                        return hosts.backend(for: job.host.id)
-                    }, open: { host, filename in openVideo(PrintID(host: host.id, filename: filename)) })
+                    NativeVideoQueue(sequence:generate.sequence,videos:generate.videoJobs,restarts:generate.videoRestarts,
+                        targets:hosts.hosts.compactMap { host in
+                            guard let instance=hosts.instanceID(of:host.id) else {return nil}
+                            return VideoRestartTarget(host:host,instanceId:instance)
+                        },backend:{target in
+                            guard recoveryCurrent(target) else {return nil}
+                            return hosts.backend(for:target.host.id)
+                        },current:recoveryCurrent,capabilities:{hosts.capabilities[$0]},
+                        open:{host,filename in openVideo(PrintID(host:host.id,filename:filename))},changed:{
+                            Task {await generate.discoverSequences();await generate.recoverDurationJobs(discover:true)}
+                        })
                         .selectionDisabled(true)
                     // A paused machine says so whether or not it has rows:
                     // an empty queue behind a closed gate looks exactly like
@@ -74,7 +81,7 @@ struct QueuePane: View {
             QueueDetailSheet(entry: target.entry, host: target.host)
         }
         .destructionDialog($pendingDestruction)
-        .task { await load(); await generate.discoverSequences() }
+        .task { await load(); await generate.discoverSequences(); await generate.recoverDurationJobs(activity: activity.byHost, discover: true) }
         .task {
             while !Task.isCancelled {
                 await queue.pollProgress()
@@ -88,6 +95,10 @@ struct QueuePane: View {
         .task { await upscales.recover() }
         .focusedSceneValue(\.refreshAction) { Task { await load() } }
         .focusedSceneValue(\.queueSelection, queueSelection)
+    }
+
+    private func recoveryCurrent(_ target:VideoRestartTarget)->Bool {
+        hosts.host(target.host.id)==target.host && hosts.instanceID(of:target.host.id)==target.instanceId
     }
 
     /// Not `private`: `QueuePane+Commands.swift`'s Move Up/Down items call

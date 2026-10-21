@@ -101,4 +101,16 @@ struct GenerateLicenceTests {
         #expect(!GeneratePane.resumes(pressed, now: editedLength))
     }
 
+    @Test func durationAndScenesEditsCannotResumeAnEarlierGeneratePress() {
+        let host = UUID()
+        var duration = VideoDurationAuthoring(draft: .init(seconds: "5"))
+        let pressed = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "video", host: host, videoDuration: duration)
+        duration.draft.seconds = "30"
+        let edited = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "video", host: host, videoDuration: duration)
+        #expect(!GeneratePane.resumes(pressed, now: edited))
+        duration.draft.scenes = [.init(prompt: "scene", seconds: "30")]
+        let scenes = GeneratePane.LicenceSubmission(draft: RenderDraft(), model: "video", host: host, videoDuration: duration)
+        #expect(!GeneratePane.resumes(edited, now: scenes))
+    }
+
 }

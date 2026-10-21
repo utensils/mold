@@ -242,3 +242,5 @@ the entire stream but retain only the requested member and create no sibling
 plaintext files. Responses stay private/no-store; caches never persist plaintext.
 
 Thumbnail misses additionally hold a separate two-slot payload-lifetime permit from selected-member extraction through rendering and plaintext drop; the shared cold-work permit alone cannot bound buffers waiting between phases.
+
+Stored `GenerationRecord.metadata`, committed archive records, Mold `mold:parameters` containers, Trash metadata, and `GalleryImage.metadata` carry logical strings serialized by Mold. Decode them with the explicit literal metadata reader; never reapply legacy prompt-escape normalization. Keep the legacy request parser unchanged. A decoding fix that changes existing Gallery rows must bump `gallery_changes_api::ROW_FORMAT` and its golden fixture so feed cursors and listing validators invalidate stale replicas.

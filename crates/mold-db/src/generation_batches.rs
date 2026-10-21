@@ -274,6 +274,22 @@ pub fn insert_or_get_with_media(
     children: &[(GenerationBatchChildRow, GenerationQueueRow)],
     obligations: &[QueueMediaObligation],
 ) -> Result<GenerationBatchMediaInsertOutcome> {
+    insert_or_get_with_media_owned(db, batch, children, obligations, None)
+}
+
+/// Trusted internal stage owner is committed with the queue row and encrypted
+/// obligations; a restart never sees executable child work without its owner.
+pub fn insert_or_get_with_media_owned(
+    db: &MetadataDb,
+    batch: &GenerationBatchRow,
+    children: &[(GenerationBatchChildRow, GenerationQueueRow)],
+    obligations: &[QueueMediaObligation],
+    stage_owner: Option<&crate::chain_stage_generations::ChainStageOwner>,
+) -> Result<GenerationBatchMediaInsertOutcome> {
+    ensure!(
+        stage_owner.is_none() || children.len() == 1,
+        "an owned chain stage must admit exactly one generation"
+    );
     let mut obligations_by_id = HashMap::new();
     for obligation in obligations {
         if obligations_by_id
@@ -333,6 +349,16 @@ pub fn insert_or_get_with_media(
         if let Some(existing) =
             get_by_client_on_conn(conn, &batch.owner_uuid, &batch.client_batch_id)?
         {
+            for child in &existing.children {
+                ensure!(
+                    crate::chain_stage_generations::matches_on_conn(
+                        conn,
+                        &child.job_id,
+                        stage_owner
+                    )?,
+                    "existing generation batch has different chain stage ownership"
+                );
+            }
             let mut gc_pending_media_set_ids = Vec::new();
             let mut colliding_media_set_ids = Vec::new();
             for obligation in obligations {
@@ -383,6 +409,9 @@ pub fn insert_or_get_with_media(
                     child.updated_at_ms,
                 ],
             )?;
+            if let Some(owner) = stage_owner {
+                crate::chain_stage_generations::record_on_conn(conn, &queue_row.id, owner)?;
+            }
         }
         Ok(GenerationBatchMediaInsertOutcome::Inserted(
             GenerationBatchDetail {
@@ -1079,6 +1108,7 @@ pub fn cancel_all_queued(
         bail!("bulk queue cancellation requires a cancelled terminal outcome");
     }
     db.transact_immediate(|conn| {
+        crate::video_job_child_owners::require_ordinary_bulk_on_conn(conn,owner_uuid,false)?;
         let reserved: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM generation_queue_transfers WHERE owner_uuid=?1)", params![owner_uuid], |row|row.get(0))?;
         if reserved { bail!("resolve reserved queue transfers before bulk cancellation"); }
 
@@ -1468,6 +1498,172 @@ mod tests {
             request_sha256: hash.into(),
             created_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn owned_stage_is_atomic_and_parent_interruption_fences_every_dispatch_boundary() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,manifest_sha256,job_json,created_at_ms,updated_at_ms) VALUES('parent','running','sha','{}','sha','{}',0,0)",[])?;
+            conn.execute("INSERT INTO video_job_parts(parent_id,part_index,child_id,part_json) VALUES('parent','0','chain','{}')",[])?;
+            conn.execute("INSERT INTO chain_jobs(id,state,model,request_json,job_dir,stage_count,created_at,updated_at) VALUES('chain','running','h3','{}','/jobs/chain',1,0,0)",[])?;
+            Ok(())
+        }).unwrap();
+        let owner = crate::chain_stage_generations::ChainStageOwner {
+            chain_id: "chain".into(),
+            stage_index: 0,
+        };
+        insert_or_get_with_media_owned(&db, &batch("receipt"), &rows(1), &[], Some(&owner))
+            .unwrap();
+        let bound = crate::chain_stage_generations::owner_for_generation(&db, "job-0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(bound.chain_id, "chain");
+        assert_eq!(bound.stage_index, 0);
+        assert_eq!(bound.video_parent_id.as_deref(), Some("parent"));
+        let claim = generation_queue::claim_next(&db, "owner-1", "token", 2)
+            .unwrap()
+            .unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET state='interrupted' WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(generation_queue::claimed_runtime_position(
+            &db,
+            "owner-1",
+            &claim.row.id,
+            "token",
+            8
+        )
+        .unwrap()
+        .unwrap()
+        .position
+        .is_none());
+        assert_eq!(
+            generation_queue::mark_dispatched_claimed(&db, &claim.row.id, "token", 3).unwrap(),
+            None
+        );
+        generation_queue::release_claim(&db, &claim.row.id, "token", 4).unwrap();
+        assert!(generation_queue::claim_next(&db, "owner-1", "next", 5)
+            .unwrap()
+            .is_none());
+        assert!(
+            generation_queue::claim_by_id(&db, "owner-1", &claim.row.id, "exact", 5)
+                .unwrap()
+                .is_none()
+        );
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET state='running' WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(generation_queue::claim_next(&db, "owner-1", "resumed", 6)
+            .unwrap()
+            .is_some());
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE video_jobs SET cancel_requested=1 WHERE id='parent'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            generation_queue::mark_dispatched_claimed(&db, &claim.row.id, "resumed", 7).unwrap(),
+            None
+        );
+        db.with_conn(|conn| {
+            conn.execute("DELETE FROM video_jobs WHERE id='parent'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            generation_queue::mark_dispatched_claimed(&db, &claim.row.id, "resumed", 8).unwrap(),
+            None
+        );
+        assert!(get(&db, "owner-1", "batch-1").unwrap().is_some());
+        generation_queue::release_claim(&db, &claim.row.id, "resumed", 9).unwrap();
+        db.with_conn(|conn| {
+            conn.execute("UPDATE chain_stage_generations SET video_parent_id=NULL WHERE generation_id='job-0'",[])?;
+            conn.execute("DELETE FROM chain_jobs WHERE id='chain'",[])?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            generation_queue::claim_next(&db, "owner-1", "missing-chain", 10)
+                .unwrap()
+                .is_none()
+        );
+        let mut ordinary = rows(1).pop().unwrap().1;
+        ordinary.id = "unrelated-ordinary".into();
+        generation_queue::insert(&db, &ordinary).unwrap();
+        assert_eq!(
+            generation_queue::claim_next(&db, "owner-1", "ordinary", 11)
+                .unwrap()
+                .unwrap()
+                .row
+                .id,
+            "unrelated-ordinary"
+        );
+    }
+
+    #[test]
+    fn stage_owner_failure_rolls_back_batch_queue_and_media_obligations() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let owner = crate::chain_stage_generations::ChainStageOwner {
+            chain_id: "missing".into(),
+            stage_index: 0,
+        };
+        assert!(insert_or_get_with_media_owned(
+            &db,
+            &batch("receipt"),
+            &rows(1),
+            &[],
+            Some(&owner)
+        )
+        .is_err());
+        assert!(get(&db, "owner-1", "batch-1").unwrap().is_none());
+        assert!(generation_queue::claim_next(&db, "owner-1", "token", 2)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn ordinary_batch_cannot_be_claimed_as_an_owned_stage_and_completed_receipts_keep_owner() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        insert_or_get_with_media(&db, &batch("receipt"), &rows(1), &[]).unwrap();
+        let owner = crate::chain_stage_generations::ChainStageOwner {
+            chain_id: "chain".into(),
+            stage_index: 0,
+        };
+        assert!(insert_or_get_with_media_owned(
+            &db,
+            &batch("receipt"),
+            &rows(1),
+            &[],
+            Some(&owner)
+        )
+        .is_err());
+        assert!(generation_queue::claim_next(&db, "owner-1", "ordinary", 2)
+            .unwrap()
+            .is_some());
+        // A trusted mapping outlives queue settlement, so exact completed
+        // stage reattachment cannot lose its authority with the queue row.
+        db.with_conn(|conn| {conn.execute("INSERT INTO chain_jobs(id,state,model,request_json,job_dir,stage_count,created_at,updated_at) VALUES('chain','running','h3','{}','/jobs/chain',1,0,0)",[])?;
+            crate::chain_stage_generations::record_on_conn(conn,"job-0",&owner)?;Ok(())}).unwrap();
+        generation_queue::delete(&db, "job-0").unwrap();
+        crate::chain_stage_generations::require_batch_owner(&db, &["job-0".into()], Some(&owner))
+            .unwrap();
+        assert!(
+            crate::chain_stage_generations::require_batch_owner(&db, &["job-0".into()], None)
+                .is_err()
+        );
     }
 
     #[test]

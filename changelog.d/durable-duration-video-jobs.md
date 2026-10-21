@@ -1,0 +1,3 @@
+- **Durable video duration and Library extension.** Added an API for one prompt or optional scenes with exact duration, automatic clip joins, bounded rendering, restart and transfer, and recovery that preserves completed clips and Library media.
+- **Faithful Library recipes.** Preserve literal prompt and negative-prompt text and full-range seeds across Gallery records, archived metadata, Trash restore, and CLI reads.
+- **Stable extension sound and interrupted admission.** Freeze source MP4 audio into parent-owned PCM so deleting the original Library item cannot change resumed sound; keep admission and export locks until detached input work has finished.

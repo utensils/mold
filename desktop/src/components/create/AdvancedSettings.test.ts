@@ -1022,3 +1022,9 @@ it.each(["model", "pipeline"] as const)(
     encoding.mockRestore();
   },
 );
+it("hides one-shot frames and chain cues when the parent owns requested duration", () => {
+  const form = reactive({ ...newGenerateForm(), family: "ltx2", model: "ltx-2-19b-distilled:fp8" });
+  const wrapper = mountSettings(form, { durationActive: true });
+  expect(wrapper.find('input[aria-label="Frames"]').exists()).toBe(false);
+  expect(wrapper.find('[data-test="chain-cue"]').exists()).toBe(false);
+});

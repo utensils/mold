@@ -161,6 +161,7 @@ impl VideoMetadata {
             fps: Some(self.fps),
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: mold_core::build_info::version_string(),
             id_image_name: None,
             id_image_sha256: None,
@@ -733,6 +734,146 @@ impl Mp4StreamEncoder {
     }
 }
 
+/// File-backed H.264 encoder. Only one encoded picture remains in memory.
+pub struct Mp4FileEncoder {
+    encoder: Mp4StreamEncoder,
+    writer: Option<mp4_rs::Mp4Writer<std::fs::File>>,
+    output: std::fs::File,
+    frames: u64,
+    poisoned: bool,
+}
+
+impl Mp4FileEncoder {
+    pub fn new(output: std::fs::File, width: u32, height: u32, fps: u32) -> Result<Self> {
+        anyhow::ensure!(
+            output.metadata()?.len() == 0,
+            "encoder staging file must be empty"
+        );
+        anyhow::ensure!(
+            width > 0
+                && height > 0
+                && width <= u16::MAX as u32
+                && height <= u16::MAX as u32
+                && fps > 0
+                && fps.checked_mul(1000).is_some(),
+            "invalid encoder dimensions or frame rate"
+        );
+        Ok(Self {
+            encoder: Mp4StreamEncoder::new(width, height, fps)?,
+            writer: None,
+            output,
+            frames: 0,
+            poisoned: false,
+        })
+    }
+
+    pub fn push(&mut self, frame: &RgbImage) -> Result<()> {
+        anyhow::ensure!(!self.poisoned, "file encoder already failed");
+        let result = self.push_inner(frame);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn push_inner(&mut self, frame: &RgbImage) -> Result<()> {
+        anyhow::ensure!(
+            self.frames < u64::from(u32::MAX),
+            "MP4 sample table exhausted"
+        );
+        // Bounded GOPs make tail extraction independent of the movie length.
+        if self.frames > 0 && self.frames.is_multiple_of(u64::from(self.encoder.fps) * 2) {
+            self.encoder.encoder.force_intra_frame();
+        }
+        let old_sps = self.encoder.sps.clone();
+        let old_pps = self.encoder.pps.clone();
+        self.encoder.push(frame)?;
+        anyhow::ensure!(
+            old_sps
+                .as_ref()
+                .is_none_or(|sps| Some(sps) == self.encoder.sps.as_ref())
+                && old_pps
+                    .as_ref()
+                    .is_none_or(|pps| Some(pps) == self.encoder.pps.as_ref()),
+            "encoder decoder configuration changed"
+        );
+        if self.writer.is_none() {
+            use mp4_rs::{AvcConfig, MediaConfig, Mp4Config, Mp4Writer, TrackConfig, TrackType};
+            let config = Mp4Config {
+                major_brand: "isom".parse()?,
+                minor_version: 0x200,
+                compatible_brands: vec![
+                    "isom".parse()?,
+                    "iso2".parse()?,
+                    "avc1".parse()?,
+                    "mp41".parse()?,
+                ],
+                timescale: self.encoder.fps * 1000,
+            };
+            let mut writer = Mp4Writer::write_start(self.output.try_clone()?, &config)?;
+            writer.add_track(&TrackConfig {
+                track_type: TrackType::Video,
+                timescale: config.timescale,
+                language: "und".into(),
+                media_conf: MediaConfig::AvcConfig(AvcConfig {
+                    width: self.encoder.width as u16,
+                    height: self.encoder.height as u16,
+                    seq_param_set: self.encoder.sps.clone().context("missing SPS")?,
+                    pic_param_set: self.encoder.pps.clone().context("missing PPS")?,
+                }),
+            })?;
+            self.writer = Some(writer);
+        }
+        let (bytes, is_sync) = self
+            .encoder
+            .samples
+            .pop()
+            .context("missing encoded picture")?;
+        self.encoder.sample_payload_bytes = 0;
+        self.writer
+            .as_mut()
+            .context("missing writer")?
+            .write_sample(
+                1,
+                &mp4_rs::Mp4Sample {
+                    start_time: self.frames * 1000,
+                    duration: 1000,
+                    rendering_offset: 0,
+                    is_sync,
+                    bytes: bytes.into_vec().into(),
+                },
+            )?;
+        self.frames += 1;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<u64> {
+        anyhow::ensure!(
+            !self.poisoned && self.frames > 0,
+            "cannot finish failed or empty file encoder"
+        );
+        self.writer
+            .as_mut()
+            .context("missing writer")?
+            .write_end()?;
+        drop(self.writer.take());
+        let stsd = mp4_mux::build_stsd(
+            self.encoder.sps.as_ref().context("missing SPS")?,
+            self.encoder.pps.as_ref().context("missing PPS")?,
+            self.encoder.width,
+            self.encoder.height,
+        );
+        crate::video_assembly_boxes::replace_track_box(
+            &mut self.output,
+            1,
+            &[*b"mdia", *b"minf", *b"stbl", *b"stsd"],
+            &stsd,
+        )?;
+        self.output.sync_all()?;
+        Ok(self.frames)
+    }
+}
+
 /// Encode a sequence of RGB frames into an MP4 (H.264/AVC) video.
 ///
 /// Uses OpenH264 for H.264 encoding with a minimal QuickTime-compatible MP4 muxer.
@@ -824,24 +965,7 @@ mod mp4_mux {
         b
     }
 
-    pub fn write_mp4(
-        samples: &[(Box<[u8]>, bool)],
-        sps: &[u8],
-        pps: &[u8],
-        width: u32,
-        height: u32,
-        fps: u32,
-        max_output_bytes: Option<usize>,
-    ) -> Result<Vec<u8>> {
-        let timescale = fps * 1000;
-        let sample_duration = 1000u32; // each frame = 1000 ticks at timescale = fps*1000
-        let duration_ticks = samples.len() as u32 * sample_duration;
-
-        // Compute sample sizes and total mdat size
-        let sample_sizes: Vec<u32> = samples.iter().map(|(d, _)| d.len() as u32).collect();
-        let mdat_payload: usize = sample_sizes.iter().map(|&s| s as usize).sum();
-
-        // Build stbl children
+    pub(super) fn build_stsd(sps: &[u8], pps: &[u8], width: u32, height: u32) -> Vec<u8> {
         let mut stsd_content = Vec::new();
         write_u32(&mut stsd_content, 0); // version + flags
         write_u32(&mut stsd_content, 1); // entry_count
@@ -878,6 +1002,29 @@ mod mp4_mux {
 
             write_box(&mut stsd_content, b"avc1", &avc1);
         }
+        let mut result = Vec::new();
+        write_box(&mut result, b"stsd", &stsd_content);
+        result
+    }
+
+    pub fn write_mp4(
+        samples: &[(Box<[u8]>, bool)],
+        sps: &[u8],
+        pps: &[u8],
+        width: u32,
+        height: u32,
+        fps: u32,
+        max_output_bytes: Option<usize>,
+    ) -> Result<Vec<u8>> {
+        let timescale = fps * 1000;
+        let sample_duration = 1000u32; // each frame = 1000 ticks at timescale = fps*1000
+        let duration_ticks = samples.len() as u32 * sample_duration;
+
+        // Compute sample sizes and total mdat size
+        let sample_sizes: Vec<u32> = samples.iter().map(|(d, _)| d.len() as u32).collect();
+        let mdat_payload: usize = sample_sizes.iter().map(|&s| s as usize).sum();
+
+        let stsd = build_stsd(sps, pps, width, height);
 
         // stts: sample-to-time (all frames same duration)
         let mut stts = Vec::new();
@@ -926,7 +1073,7 @@ mod mp4_mux {
             write_u32(&mut stco, mdat_offset + 8); // offset to mdat payload
 
             let mut stbl = Vec::new();
-            write_box(&mut stbl, b"stsd", &stsd_content);
+            stbl.extend_from_slice(&stsd);
             write_box(&mut stbl, b"stts", &stts);
             write_box(&mut stbl, b"stsc", &stsc);
             write_box(&mut stbl, b"stsz", &stsz);
@@ -1069,6 +1216,92 @@ mod mp4_mux {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_encoder_keeps_long_movie_boundaries_in_short_independent_gops() {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = Mp4FileEncoder::new(output.reopen().unwrap(), 32, 32, 24).unwrap();
+        for index in 0..180 {
+            encoder
+                .push(&RgbImage::from_pixel(
+                    32,
+                    32,
+                    image::Rgb([(index % 200) as u8, 80, 40]),
+                ))
+                .unwrap();
+        }
+        assert_eq!(encoder.finish().unwrap(), 180);
+        let reader =
+            crate::video_assembly_input::checked_reader(output.reopen().unwrap(), &mut || Ok(()))
+                .unwrap();
+        let keyframes = &reader.tracks()[&1]
+            .trak
+            .mdia
+            .minf
+            .stbl
+            .stss
+            .as_ref()
+            .unwrap()
+            .entries;
+        assert_eq!(keyframes, &[1, 49, 97, 145]);
+        let (_, oracle) = crate::ltx2::media::decode_video_frames_from_path(output.path()).unwrap();
+        let boundary = crate::video_assembly_frames::tail(
+            output.reopen().unwrap(),
+            153,
+            3,
+            32,
+            32,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(boundary, oracle[150..153]);
+    }
+    #[test]
+    fn file_encoder_preserves_existing_picture_packets_and_presentation() {
+        use super::*;
+        let frames: Vec<_> = (0..12)
+            .map(|index| RgbImage::from_pixel(32, 32, image::Rgb([index * 10, 40, 90])))
+            .collect();
+        let expected = encode_mp4(&frames, 24).unwrap();
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder =
+            Mp4FileEncoder::new(output.as_file().try_clone().unwrap(), 32, 32, 24).unwrap();
+        for frame in &frames {
+            encoder.push(frame).unwrap();
+        }
+        assert_eq!(encoder.finish().unwrap(), 12);
+        let mut old =
+            mp4_rs::Mp4Reader::read_header(std::io::Cursor::new(&expected), expected.len() as u64)
+                .unwrap();
+        let mut actual =
+            crate::video_assembly_input::checked_reader(output.reopen().unwrap(), &mut || Ok(()))
+                .unwrap();
+        assert_eq!(actual.tracks()[&1].sample_count(), 12);
+        for index in 1..=12 {
+            assert_eq!(
+                old.read_sample(1, index).unwrap().unwrap().bytes,
+                actual.read_sample(1, index).unwrap().unwrap().bytes
+            );
+        }
+        let original = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(original.path(), expected).unwrap();
+        let path = [*b"mdia", *b"minf", *b"stbl", *b"stsd"];
+        assert_eq!(
+            crate::video_assembly_boxes::read_track_box(
+                &mut original.reopen().unwrap(),
+                1,
+                &path,
+                4096
+            )
+            .unwrap(),
+            crate::video_assembly_boxes::read_track_box(
+                &mut output.reopen().unwrap(),
+                1,
+                &path,
+                4096
+            )
+            .unwrap()
+        );
+    }
     use super::*;
 
     /// Create a simple test frame with a gradient pattern.

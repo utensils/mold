@@ -13,17 +13,17 @@ struct QueueView: View {
 
     var body: some View {
         Group {
-            if hosts.hosts.isEmpty {
+            if hosts.hosts.isEmpty, !generate.hasVideoQueueContent {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here. Add a machine to begin.")) {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.sequence.historyNotice == nil, !queue.unavailableMachines.isEmpty {
+            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.sequence.historyNotice == nil, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
                            message: String(localized: "Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh.")) {
                     Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.sequence.historyNotice == nil {
+            } else if queue.isEmpty, generate.sequence.jobs.isEmpty, generate.videoJobs.jobs.isEmpty, generate.sequence.historyNotice == nil, generate.videoJobs.pending.isEmpty, generate.videoJobs.error == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
             } else {
@@ -40,11 +40,16 @@ struct QueueView: View {
         } message: {
             Text("Anything already rendering keeps going. Waiting and held jobs are cancelled.")
         }
-        .refreshable { await queue.reload() }
+        .refreshable { await queue.reload(); await generate.discoverDurationVideos() }
         // A job just held asks for a decision: a warning, as on Generate.
         .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
-        .task(id: hosts.upHosts.map(\.id)) { await queue.reload(); await generate.discoverSequences() }
+        .task(id: hosts.upHosts.map(\.id)) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
         .task { await queue.followRunning() }
+    }
+
+    private func recoveryCurrent(_ target:VideoRestartTarget)->Bool {
+        hosts.host(target.host.id)==target.host && hosts.instanceID(of:target.host.id)==target.instanceId
+            && !generate.followingSuspended
     }
 
     private var emptyTitle: String {
@@ -55,12 +60,17 @@ struct QueueView: View {
 
     private var list: some View {
         List {
-            NativeSequenceJobs(session: generate.sequence, backend: { job in
-                guard hosts.host(job.host.id) == job.host, hosts.instanceID(of: job.host.id) == job.installation else { return nil }
-                return hosts.backend(for: job.host)
-            }, open: { host, filename in
-                router.open(.print(host: host.id, filename: filename))
-            })
+            NativeVideoQueue(sequence:generate.sequence,videos:generate.videoJobs,restarts:generate.videoRestarts,
+                targets:hosts.hosts.compactMap {host in
+                    guard let instance=hosts.instanceID(of:host.id) else {return nil}
+                    return VideoRestartTarget(host:host,instanceId:instance)
+                },backend:{target in
+                    guard recoveryCurrent(target) else {return nil}
+                    return hosts.backend(for:target.host)
+                },current:recoveryCurrent,capabilities:{hosts.capabilities[$0]},
+                open:{host,filename in router.open(.print(host:host.id,filename:filename))},changed:{
+                    Task {await generate.discoverSequences();await generate.discoverDurationVideos()}
+                })
             FailureBanner()
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)

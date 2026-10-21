@@ -1,3 +1,4 @@
+import { protectLegacyGenerateWire } from "../lib/legacyGenerateWire";
 import { ApiError, apiJsonTo, type ApiTarget } from "./client";
 
 export type GenerationLifecyclePhase =
@@ -380,7 +381,10 @@ export async function admitGenerationBatch<TRequest>(
             : {}),
           ...Object.fromEntries(new Headers(extraHeaders)),
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify({
+          ...request,
+          requests: request.requests.map(protectLegacyGenerateWire),
+        }),
         ...(signal ? { signal } : {}),
       },
     ),

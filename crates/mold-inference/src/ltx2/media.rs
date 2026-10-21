@@ -220,7 +220,7 @@ fn channel_config_channels(config: ChannelConfig) -> u32 {
     }
 }
 
-fn annex_b_convert_packet(
+pub(crate) fn annex_b_convert_packet(
     packet: &[u8],
     length_size: u8,
     sps: &[Vec<u8>],

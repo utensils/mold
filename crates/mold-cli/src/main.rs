@@ -792,6 +792,11 @@ pub enum JobsAction {
     List {
         #[arg(long)]
         json: bool,
+        /// Continue the bounded duration-video queue listing.
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
     },
     /// Show one sequence job, or print the script that made it
     #[command(after_long_help = "\
@@ -800,7 +805,7 @@ Examples:
   mold jobs show job-abc123 --json
   mold jobs show job-abc123 --script > edited.toml")]
     Show {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Print the raw `ChainJobDetail` document as JSON
@@ -812,7 +817,7 @@ Examples:
         script: bool,
     },
     Resume {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
     },
@@ -836,7 +841,7 @@ Examples:
         operation_id: Option<String>,
     },
     Retake {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Zero-based stage index (0 is the first clip)
@@ -864,7 +869,7 @@ Examples:
   mold jobs amend job-abc123 --script edited.toml --dry-run
   mold jobs amend job-abc123 --script edited.toml --fps 30 --no-audio")]
     Amend {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         /// Edited `mold.chain.v1` TOML script carrying the full stage list
@@ -896,12 +901,15 @@ Examples:
         dry_run: bool,
     },
     Cancel {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
+        /// Stop a known duration-video admission, even before its queue row exists.
+        #[arg(long)]
+        video: bool,
     },
     Delete {
-        /// Sequence job id as shown by `mold jobs list`
+        /// Video or sequence job id as shown by `mold jobs list`
         #[arg(value_name = "JOB-ID", add = ArgValueCandidates::new(completion_cache::complete_job_id))]
         id: String,
         #[arg(long)]
@@ -1937,11 +1945,13 @@ Examples:
         #[arg(long, help_heading = "Video")]
         fps: Option<u32>,
 
-        /// Requested video duration in seconds. Uses the model's FPS and frame
-        /// grid; continuation-capable models automatically chain longer video.
-        /// H3 uses fixed 24 FPS, with clips on its 17n+5 grid (4–15 seconds each).
-        #[arg(long, conflicts_with_all = ["frames", "predict_duration"], help_heading = "Video")]
-        duration: Option<f64>,
+        /// Requested video duration in seconds. Longer videos automatically
+        /// join model-sized clips with the appropriate overlap (remote server).
+        #[arg(long, value_parser = commands::video_jobs::parse_duration_ms, conflicts_with_all = ["frames", "clip_frames", "frames_per_clip", "motion_tail", "predict_duration", "script", "upscale"], help_heading = "Video")]
+        duration: Option<u64>,
+
+        #[command(flatten)]
+        video_job: commands::video_jobs::VideoJobFlags,
 
         /// Per-clip frame cap for chained video. When --frames exceeds this,
         /// the CLI splits into multiple chained clips stitched at render time.
@@ -3613,6 +3623,7 @@ async fn run(
             predict_duration,
             fps,
             duration,
+            mut video_job,
             clip_frames,
             motion_tail,
             audio,
@@ -3699,6 +3710,7 @@ async fn run(
             upscale: _upscale, // TODO: wire into generate pipeline for post-generation upscaling
         } => {
             apply_spatial_tile_override(spatial_tile.as_deref());
+            video_job.dry_run = dry_run;
 
             // A chain request has no title slot yet; refuse rather than
             // silently dropping the flag.
@@ -3812,6 +3824,7 @@ async fn run(
                 predict_duration,
                 fps,
                 duration,
+                video_job,
                 clip_frames,
                 motion_tail,
                 audio,
@@ -7068,7 +7081,7 @@ mod tests {
                 strength,
                 ..
             } => {
-                assert_eq!(duration, Some(8.5));
+                assert_eq!(duration, Some(8500));
                 assert_eq!(reference.len(), 3);
                 assert_eq!(reference[0].kind, commands::h3::ReferenceKind::Image);
                 assert_eq!(reference[1].kind, commands::h3::ReferenceKind::Video);
@@ -7080,6 +7093,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn duration_refuses_ignored_clip_authoring_controls() {
+        for flag in ["--clip-frames", "--frames-per-clip", "--motion-tail"] {
+            assert!(
+                try_parse(&["run", "a garden", "--duration", "30", flag, "17"]).is_err(),
+                "{flag}"
+            );
+        }
+        assert!(try_parse(&[
+            "jobs",
+            "cancel",
+            "01234567-89ab-4cde-8123-456789abcdef",
+            "--video"
+        ])
+        .is_ok());
+    }
     #[test]
     fn run_h3_duration_conflicts_with_explicit_frames() {
         let error = try_parse(&[

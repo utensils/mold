@@ -35,7 +35,7 @@ struct LibrarySelectionTests {
     }
 
     @Test func authoredClipContextMenuOffersContinueAlongsideMenuBar() throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://fixture.invalid")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://fixture.invalid")!)
         let hosts = HostStore(hosts: [host]) { _ in FakeBackend(host: host) }
         var actions = LibraryActions(hosts: hosts, library: LibraryStore(hosts: hosts))
         actions.continueVideo = { _ in }

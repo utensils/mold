@@ -110,7 +110,32 @@ struct StoreInner {
     reserved_bytes: u64,
 }
 
+/// Authenticated input ownership captured before a one-use session disappears.
+/// Callers add their durable operation identity; bearer tokens never enter this receipt.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct InputConsumptionClaim {
+    pub kind: String,
+    pub session_sha256: String,
+    pub request_scope_sha256: String,
+    pub credential_identity: String,
+    pub instance_id: String,
+}
+
+/// Whether a failed durable callback may already have published ownership.
+/// Published failures must invalidate the token even though admission returns
+/// an error; preserving it would allow the same input to be claimed twice.
+// Shared legacy helpers retain the callback type when duration consumers are disabled.
+#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+pub(crate) enum ConsumptionReceiptError {
+    NotPublished(ApiError),
+    Published(ApiError),
+}
+
+pub(crate) type ConsumptionReceipt<'a> =
+    dyn FnMut(&InputConsumptionClaim) -> Result<(), ConsumptionReceiptError> + Send + 'a;
+
 struct UploadSession {
+    instance_id: String,
     identity: String,
     scope_sha256: String,
     request: mold_core::GenerateRequest,
@@ -144,6 +169,7 @@ enum UploadState {
 }
 
 struct UploadSource {
+    size_bytes: u64,
     path: PathBuf,
     metadata: GenerationReferenceMetadata,
 }
@@ -182,7 +208,7 @@ impl ReferenceIdentity {
             })
     }
 
-    fn identity_str(&self) -> String {
+    pub(crate) fn identity_str(&self) -> String {
         match self {
             Self::ApiKey(identity) => identity.clone(),
             Self::AuthDisabled { instance_id } => format!("auth-disabled-inline:{instance_id}"),
@@ -980,6 +1006,7 @@ impl ReferenceUploadStore {
         inner.sessions.insert(
             session_digest,
             UploadSession {
+                instance_id: instance_id.to_string(),
                 identity: identity.to_string(),
                 scope_sha256: scope_sha256.clone(),
                 request: payload.request,
@@ -1229,6 +1256,7 @@ impl ReferenceUploadStore {
         identity: &str,
         request: &mold_core::GenerateRequest,
         frozen_scope_sha256: Option<&str>,
+        consume: bool,
     ) -> Result<(Option<String>, HashMap<String, UploadSource>), ApiError> {
         let Some(references) = request.references.as_deref() else {
             return Ok((None, HashMap::new()));
@@ -1315,6 +1343,7 @@ impl ReferenceUploadStore {
             sources.insert(
                 upload_digest,
                 UploadSource {
+                    size_bytes: *size_bytes,
                     path: slot.path.clone(),
                     metadata: metadata.as_ref().clone(),
                 },
@@ -1331,7 +1360,7 @@ impl ReferenceUploadStore {
                 Some("references".to_string()),
             ));
         }
-        session.consuming = true;
+        session.consuming = consume;
         Ok((Some(digest), sources))
     }
 
@@ -1363,11 +1392,38 @@ impl ReferenceUploadStore {
         digest: Option<&str>,
         success: bool,
         quota: &mut ResolvedQuotaLease,
-    ) {
-        let Some(digest) = digest else { return };
+        receipt: Option<&mut ConsumptionReceipt<'_>>,
+    ) -> Result<(), ApiError> {
+        let Some(digest) = digest else { return Ok(()) };
+        let mut published_error = None;
         let dir = {
             let mut inner = self.inner.lock().await;
             if success {
+                if let Some(receipt) = receipt {
+                    let session = inner.sessions.get_mut(digest).ok_or_else(|| {
+                        ApiError::validation(
+                            "reference upload session disappeared before ownership transfer",
+                        )
+                    })?;
+                    let claim = InputConsumptionClaim {
+                        kind: "reference_upload".to_string(),
+                        session_sha256: digest.to_string(),
+                        request_scope_sha256: session.scope_sha256.clone(),
+                        credential_identity: session.identity.clone(),
+                        instance_id: session.instance_id.clone(),
+                    };
+                    if let Err(error) = receipt(&claim) {
+                        match error {
+                            ConsumptionReceiptError::NotPublished(error) => {
+                                session.consuming = false;
+                                return Err(error);
+                            }
+                            ConsumptionReceiptError::Published(error) => {
+                                published_error = Some(error)
+                            }
+                        }
+                    }
+                }
                 let transferred = inner
                     .sessions
                     .get_mut(digest)
@@ -1391,6 +1447,10 @@ impl ReferenceUploadStore {
         if let Some(dir) = dir {
             let _ = tokio::fs::remove_dir_all(dir).await;
         }
+        match published_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Convert every public authority in `request.references` into a private
@@ -1403,6 +1463,70 @@ impl ReferenceUploadStore {
         request: &mut mold_core::GenerateRequest,
         media_roots: &[PathBuf],
         frozen_scope_sha256: Option<&str>,
+    ) -> Result<Option<StagedReferences>, ApiError> {
+        self.resolve_request_mode(
+            identity,
+            request,
+            media_roots,
+            frozen_scope_sha256,
+            true,
+            None,
+        )
+        .await
+    }
+
+    /// Persist ownership while the authenticated one-use session is exclusively
+    /// locked. An unpublished failure preserves the upload; an ambiguous
+    /// published claim invalidates it to prevent duplicate ownership.
+    #[cfg(any(feature = "mp4", test))]
+    pub(crate) async fn resolve_request_with_receipt(
+        &self,
+        identity: Option<&ReferenceIdentity>,
+        request: &mut mold_core::GenerateRequest,
+        media_roots: &[PathBuf],
+        frozen_scope_sha256: Option<&str>,
+        receipt: &mut ConsumptionReceipt<'_>,
+    ) -> Result<Option<StagedReferences>, ApiError> {
+        self.resolve_request_mode(
+            identity,
+            request,
+            media_roots,
+            frozen_scope_sha256,
+            true,
+            Some(receipt),
+        )
+        .await
+    }
+
+    /// Authenticate and stage a private preview without consuming upload
+    /// handles. The preview owns its own quota until its lease is dropped.
+    #[cfg(any(feature = "mp4", test))]
+    pub(crate) async fn preview_request(
+        &self,
+        identity: Option<&ReferenceIdentity>,
+        request: &mut mold_core::GenerateRequest,
+        media_roots: &[PathBuf],
+        frozen_scope_sha256: Option<&str>,
+    ) -> Result<Option<StagedReferences>, ApiError> {
+        self.resolve_request_mode(
+            identity,
+            request,
+            media_roots,
+            frozen_scope_sha256,
+            false,
+            None,
+        )
+        .await
+    }
+
+    async fn resolve_request_mode(
+        &self,
+        identity: Option<&ReferenceIdentity>,
+        request: &mut mold_core::GenerateRequest,
+        media_roots: &[PathBuf],
+        frozen_scope_sha256: Option<&str>,
+        consume: bool,
+        receipt: Option<&mut ConsumptionReceipt<'_>>,
     ) -> Result<Option<StagedReferences>, ApiError> {
         self.purge_expired().await;
         let Some(references) = request.references.clone() else {
@@ -1422,10 +1546,25 @@ impl ReferenceUploadStore {
             minimax_h3::validate_references(&references).map_err(ApiError::reference)?;
         }
         let (session_digest, upload_sources) = self
-            .upload_sources_for_request(&identity, request, frozen_scope_sha256)
+            .upload_sources_for_request(&identity, request, frozen_scope_sha256, consume)
             .await?;
         let mut quota = ResolvedQuotaLease::new(self.resolved_bytes.clone());
-        self.ensure_roots().await?;
+        // A preview may outlive the original session, so its hard links need
+        // independent accounting. Consuming admission instead transfers the
+        // existing reservation after successful staging.
+        if !consume {
+            let bytes = upload_sources
+                .values()
+                .try_fold(0_u64, |total, source| total.checked_add(source.size_bytes))
+                .ok_or_else(|| ApiError::validation("reference preview size overflow"))?;
+            self.reserve_resolved_bytes(&mut quota, bytes).await?;
+        }
+        let consumed_session = session_digest.as_deref().filter(|_| consume);
+        if let Err(error) = self.ensure_roots().await {
+            self.finish_consumed_session(consumed_session, false, &mut quota, None)
+                .await?;
+            return Err(error);
+        }
         let resolved_root = self.root.join(format!("resolved-{}", uuid::Uuid::new_v4()));
         let root = resolved_root.clone();
         if let Err(error) = tokio::task::spawn_blocking(move || create_private_directory(&root))
@@ -1435,8 +1574,8 @@ impl ReferenceUploadStore {
                 ApiError::internal(format!("failed to create resolved staging: {error:#}"))
             })
         {
-            self.finish_consumed_session(session_digest.as_deref(), false, &mut quota)
-                .await;
+            self.finish_consumed_session(consumed_session, false, &mut quota, None)
+                .await?;
             return Err(error);
         }
 
@@ -1453,13 +1592,18 @@ impl ReferenceUploadStore {
             Ok(value) => value,
             Err(error) => {
                 let _ = tokio::fs::remove_dir_all(&resolved_root).await;
-                self.finish_consumed_session(session_digest.as_deref(), false, &mut quota)
-                    .await;
+                self.finish_consumed_session(consumed_session, false, &mut quota, None)
+                    .await?;
                 return Err(error);
             }
         };
-        self.finish_consumed_session(session_digest.as_deref(), true, &mut quota)
-            .await;
+        if let Err(error) = self
+            .finish_consumed_session(consumed_session, true, &mut quota, receipt)
+            .await
+        {
+            let _ = tokio::fs::remove_dir_all(&resolved_root).await;
+            return Err(error);
+        }
         let fingerprint = fingerprint_of(&entries);
         request.references = Some(descriptors);
         Ok(Some(StagedReferences {
@@ -1602,6 +1746,8 @@ fn remove_session_locked(inner: &mut StoreInner, digest: &str) -> Option<PathBuf
 
 fn request_scope_sha256(request: &mold_core::GenerateRequest) -> Result<String, ApiError> {
     let mut scoped = request.clone();
+    mold_core::prompt_text::normalize_real_line_endings_for_scope(&mut scoped);
+    mold_core::minimax_h3::canonicalize_request_model(&mut scoped);
     scoped.references = scoped.references.as_ref().map(|references| {
         references
             .iter()
@@ -3112,6 +3258,45 @@ mod tests {
         reference
     }
 
+    #[test]
+    fn legacy_prep_request_scope_matches_literal_parent_crlf_and_backslashes() {
+        let mut literal = request(png_reference(
+            GenerationReferenceAuthority::Descriptor,
+            Some("a".repeat(64)),
+        ));
+        literal.prompt = "actual\r\nline and literal\\n".into();
+        literal.negative_prompt = Some("negative\rline\\n".into());
+        literal.original_prompt = Some("original\r\nidea\\n".into());
+        literal.prompt_transform = Some(mold_core::PromptTransformProvenance {
+            operation: mold_core::PromptTransformOperation::Expand,
+            root_prompt: Some("root\r\nidea\\n".into()),
+            source_prompt: "source\rline\\n".into(),
+            source_kind: Default::default(),
+            task: mold_core::ExpandTask::TextToVideo,
+            dimensions: Vec::new(),
+        });
+        let admitted: mold_core::GenerateRequest = serde_json::from_value(
+            serde_json::to_value(mold_core::prompt_text::protect_generate_request_for_wire(
+                &literal,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(admitted.prompt, literal.prompt);
+        assert_eq!(
+            request_scope_sha256(&admitted).unwrap(),
+            request_scope_sha256(&literal).unwrap()
+        );
+        let mut changed = literal.clone();
+        changed.prompt.push_str(" actual change");
+        assert_ne!(
+            request_scope_sha256(&changed).unwrap(),
+            request_scope_sha256(&literal).unwrap()
+        );
+        assert!(literal.prompt.contains('\r'));
+        assert!(literal.prompt.contains("\\n"));
+    }
+
     fn keyed() -> ReferenceIdentity {
         ReferenceIdentity::ApiKey("auth-a".to_string())
     }
@@ -3127,6 +3312,22 @@ mod tests {
         String,
         Vec<u8>,
     ) {
+        upload_and_resolve_mode(store, false).await.unwrap()
+    }
+
+    async fn upload_and_resolve_mode(
+        store: &ReferenceUploadStore,
+        fail_after_rename: bool,
+    ) -> Result<
+        (
+            StagedReferences,
+            mold_core::GenerateRequest,
+            ReferenceUploadCompleteResponse,
+            String,
+            Vec<u8>,
+        ),
+        ApiError,
+    > {
         let bytes = png_bytes();
         let byte_count = bytes.len() as u64;
         let digest = format!("{:x}", Sha256::digest(&bytes));
@@ -3160,12 +3361,135 @@ mod tests {
             },
             Some(complete.metadata.sha256.clone()),
         ));
-        let staged = store
-            .resolve_request(Some(&keyed()), &mut final_request, &[], None)
+        // Planning may inspect twice without spending the upload authority.
+        for _ in 0..2 {
+            let mut preview_request = final_request.clone();
+            let preview = store
+                .preview_request(Some(&keyed()), &mut preview_request, &[], None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(std::fs::read(&preview.paths()[0]).unwrap(), bytes);
+            assert!(store
+                .inner
+                .lock()
+                .await
+                .sessions
+                .values()
+                .all(|session| !session.consuming));
+            assert!(store.resolved_bytes.load(Ordering::Acquire) >= byte_count);
+            drop(preview);
+            assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+        }
+        let mut refused_request = final_request.clone();
+        let mut refuse_receipt = |_: &InputConsumptionClaim| {
+            Err(ConsumptionReceiptError::NotPublished(ApiError::internal(
+                "receipt persistence failed",
+            )))
+        };
+        assert!(store
+            .resolve_request_with_receipt(
+                Some(&keyed()),
+                &mut refused_request,
+                &[],
+                None,
+                &mut refuse_receipt
+            )
             .await
-            .unwrap()
+            .is_err());
+        assert!(store
+            .inner
+            .lock()
+            .await
+            .sessions
+            .values()
+            .all(|session| !session.consuming));
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+        let receipt_path = store.root.join("test-ownership-receipt.json");
+        let mut receipt = |claim: &InputConsumptionClaim| {
+            assert!(
+                store.inner.try_lock().is_err(),
+                "claim must precede exclusive token removal"
+            );
+            let mut replacement = ReferenceUploadStore::from_mold_home();
+            // Rebuild session state and salts against the same physical root;
+            // only the live fixture's file-cleanup lifetime remains shared.
+            replacement.root = store.root.clone();
+            replacement._lifetime = store._lifetime.clone();
+            let mut old = request(png_reference(
+                GenerationReferenceAuthority::Upload {
+                    handle: handle.clone(),
+                },
+                Some(complete.metadata.sha256.clone()),
+            ));
+            assert!(futures::executor::block_on(replacement.resolve_request(
+                Some(&keyed()),
+                &mut old,
+                &[],
+                None
+            ))
+            .is_err());
+            assert_eq!(claim.kind, "reference_upload");
+            assert_eq!(claim.instance_id, "instance-a");
+            assert_eq!(claim.credential_identity, "auth-a");
+            assert_eq!(claim.session_sha256.len(), 64);
+            let bytes = serde_json::to_vec(claim).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(&handle));
+            use std::io::Write;
+            let mut temporary = tempfile::NamedTempFile::new_in(store.root.as_ref()).unwrap();
+            temporary.write_all(&bytes).unwrap();
+            temporary.as_file().sync_all().unwrap();
+            temporary.persist(&receipt_path).unwrap();
+            if fail_after_rename {
+                return Err(ConsumptionReceiptError::Published(ApiError::internal(
+                    "injected directory fsync failure after receipt rename",
+                )));
+            }
+            std::fs::File::open(store.root.as_ref())
+                .unwrap()
+                .sync_all()
+                .unwrap();
+            Ok(())
+        };
+        let staged = store
+            .resolve_request_with_receipt(
+                Some(&keyed()),
+                &mut final_request,
+                &[],
+                None,
+                &mut receipt,
+            )
+            .await?
             .unwrap();
-        (staged, final_request, complete, handle, bytes)
+        assert!(receipt_path.is_file());
+        assert!(store.inner.lock().await.sessions.is_empty());
+        Ok((staged, final_request, complete, handle, bytes))
+    }
+
+    #[tokio::test]
+    async fn receipt_failure_after_rename_invalidates_token_and_releases_staging_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(directory.path().join("runtime"));
+        assert!(upload_and_resolve_mode(&store, true).await.is_err());
+        assert!(store.root.join("test-ownership-receipt.json").is_file());
+        assert!(store.inner.lock().await.sessions.is_empty());
+        assert_eq!(store.resolved_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_owns_media_before_token_removal_and_old_tokens_cannot_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReferenceUploadStore::at(dir.path().join("first-runtime"));
+        let (_staged, _logical, complete, handle, _bytes) = upload_and_resolve(&store).await;
+        let mut old = request(png_reference(
+            GenerationReferenceAuthority::Upload { handle },
+            Some(complete.metadata.sha256),
+        ));
+        let restarted = ReferenceUploadStore::at(dir.path().join("second-runtime"));
+        assert!(restarted
+            .resolve_request(Some(&keyed()), &mut old, &[], None)
+            .await
+            .is_err());
     }
 
     /// Seal the staged set as admission does, then hydrate it as a consumer

@@ -24,7 +24,7 @@ struct VideoNormalizationCapture {
     let body: Data
     let fingerprint: String
 
-    static func capture(_ request: GenerateRequest, capabilities uploads: ReferenceUploadCapabilities, apiKey: String?) throws -> Self {
+    static func capture(_ request: GenerateRequest, capabilities uploads: ReferenceUploadCapabilities, apiKey: String?, literalPrompts: Bool = false) throws -> Self {
         let refusal = ReferenceUploadPolicy.refusal("REFERENCE_NORMALIZATION_INVALID", "Prepare fresh video references from the original files on a compatible keyed host.")
         try VideoNormalizationPolicy.requireValidAdvertisement(uploads)
         guard let caps = VideoNormalizationPolicy.capability(uploads, apiKey: apiKey), request.batchSize == 1,
@@ -58,7 +58,7 @@ struct VideoNormalizationCapture {
             }
         }
         var scoped = request; scoped.pendingReferenceInputs = nil; scoped.references = nil
-        let body = try MoldJSON.encoder.encode(Body(request: scoped, referenceCandidates: candidates))
+        let body = try MoldJSON.encoder.encode(Body(request: literalPrompts ? scoped.protectedForLegacyPromptWire : scoped, referenceCandidates: candidates))
         var domain = Data("mold-reference-normalization-candidate-v1\0".utf8); domain.append(body)
         return Self(entries: entries, body: body, fingerprint: TransportDigest.sha256(domain))
     }

@@ -182,3 +182,24 @@ public extension FakeBackend {
         try await respond("generationAsset(_:assetID:)", [filename, assetID])
     }
 }
+
+extension FakeBackend {
+    public func chainRestartOptions(id: String) async throws -> ChainRestartOptions {
+        try await respond("chainRestartOptions(id:)", [id])
+    }
+    public func exportChainRestart(id: String, request: ChainRestartExportRequest) async throws -> ChainRestartExport {
+        try await respond("exportChainRestart(id:request:)", [id, request])
+    }
+    public func createChainJob(requestJSON: String, operationId: String, destinationInstanceId: String) async throws -> CreateChainJobResponse {
+        try await respond("createChainJob(requestJSON:operationId:destinationInstanceId:)", [requestJSON, operationId, destinationInstanceId])
+    }
+    public func discardChainJob(id: String, request: ChainDiscardRequest) async throws {
+        let _: Void = try await respond("discardChainJob(id:request:)", [id, request])
+    }
+}
+
+extension FakeBackend {
+    public func cancelChainOperation(id: String, operationId: String, destinationInstanceId: String) async throws {
+        let _: Void = try await respond("cancelChainOperation(id:operationId:destinationInstanceId:)", [id, operationId, destinationInstanceId])
+    }
+}

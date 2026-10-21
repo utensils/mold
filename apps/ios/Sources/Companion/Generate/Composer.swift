@@ -108,7 +108,7 @@ struct Composer: View {
                     frameRange: (generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames) ... max(generate.sequenceLimits?.authoring?.minFrames ?? temporal?.frames.min ?? retainedFrames, min(temporal?.frames.max ?? retainedFrames, generate.sequenceLimits?.framesPerClipCap ?? temporal?.frames.max ?? retainedFrames)),
                     frameStep: generate.sequenceLimits?.authoring?.frameStep ?? temporal?.frames.step ?? 1, maximumClips: generate.sequenceLimits?.maxStages ?? 16,
                     carryMode: generate.sequenceLimits?.authoring?.carryMode)
-            } else if generate.recipe?.capabilities.promptRequirement != .ignored {
+            } else if generate.recipe?.capabilities.promptRequirement != .ignored && !(generate.usesVideoDuration && generate.videoDuration?.draft.scenesEnabled == true && generate.videoDuration?.draft.scenes.isEmpty == false) {
                 HStack(alignment: .top, spacing: 8) {
                     TextField("Prompt", text: $generate.draft.prompt,
                               prompt: Text(generate.kind == .clip ? "Describe a clip…" : "Describe a picture…")
@@ -130,7 +130,7 @@ struct Composer: View {
                 .frame(minHeight: 44)
                 .accessibilityIdentifier("prompt-editor-open")
                 .accessibilityFocused($editorOpenerFocused)
-            } else {
+            } else if generate.recipe?.capabilities.promptRequirement == .ignored {
                 Text("This model works from a picture, not a description.")
                     .foregroundStyle(.secondaryText)
             }
@@ -145,7 +145,29 @@ struct Composer: View {
                 .accessibilityIdentifier("prompt-history")
                 .disabled(generate.target == nil && hosts.preferredHost == nil)
             }
-            if generate.kind == .clip, generate.sequence.draft == nil, generate.sequenceLimits?.supportsSequence == true {
+            if let error = generate.durationSourceError,
+               generate.videoDuration?.draft.source == nil || !generate.usesVideoDuration {
+                NativeVideoSourceFailure(message: error, keepDraft: generate.keepDraftAfterSourceFailure)
+            }
+            if generate.usesVideoDuration, let authoring = generate.videoDuration {
+                NativeDurationEditor(draft: Binding(get: { generate.videoDuration?.draft ?? authoring.draft }, set: {
+                    generate.videoDuration?.draft = $0
+                }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
+                    singleClipMaxFrames: generate.recipe?.temporal?.frames.max,
+                    fps: generate.draft.fps ?? 24, sourceTitle: generate.videoDuration?.sourceOwner?.title,
+                    sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
+                    busy: generate.durationTask != nil,
+                    originalReferencesReplaced: !generate.draft.media.generationReferences.isEmpty,
+                    originalReferences: generate.durationSource?.originalReferences,
+                    inheritedRecipeNotes: generate.durationSource?.inheritedRecipeNotes ?? [],
+                    sourceNotice: generate.durationSourceError,
+                    retrySource: { Task { await generate.restoreDurationSource() } }, retry: { generate.refreshDurationPlan() },
+                    startFresh: { generate.videoDuration?.startFresh(); generate.durationSource = nil; generate.durationSourceError = nil; generate.saveDraft() })
+                if let error = generate.durationError ?? generate.videoJobs.error, error != generate.durationSourceError {
+                    Text(error).font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if generate.kind == .clip, !generate.usesVideoDuration, generate.sequence.draft == nil, generate.sequenceLimits?.supportsSequence == true {
                 Button("Add another clip", systemImage: "plus") {
                     generate.sequence.begin(prompt: generate.draft.prompt,
                         frames: generate.draft.frames ?? generate.sequenceLimits!.framesPerClipRecommended)
@@ -221,17 +243,17 @@ struct GenerateRow: View {
         let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
                              : AnyLayout(HStackLayout(spacing: 12))
         layout {
-            Text(generate.sequence.draft == nil ? (estimate ?? " ") : " ").monospacedDigit().foregroundStyle(.secondaryText)
-                .accessibilityHidden(estimate == nil || generate.sequence.draft != nil)
+            Text(generate.sequence.draft == nil && !generate.usesVideoDuration ? (estimate ?? " ") : " ").monospacedDigit().foregroundStyle(.secondaryText)
+                .accessibilityHidden(estimate == nil || generate.sequence.draft != nil || generate.usesVideoDuration)
             if !stacked { Spacer(minLength: 0) }
             Button { if !promptEditorPresented { generate.generate() } } label: {
-                Label(generate.sequence.draft == nil ? "Generate" : "Generate video", systemImage: "wand.and.sparkles")
+                Label(generate.sequence.draft == nil && !generate.usesVideoDuration ? "Generate" : "Generate video", systemImage: "wand.and.sparkles")
                     .frame(maxWidth: stacked ? .infinity : nil)
             }
             .prominentAction()
             .controlSize(.large)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(generate.blocker != nil || promptEditorPresented || generate.sequence.preparing)
+            .disabled(generate.blocker != nil || promptEditorPresented || generate.sequence.preparing || generate.durationTask != nil)
             .accessibilityIdentifier("submit-generation")
             .accessibilityShowsLargeContentViewer()
             .sensoryFeedback(.impact(weight: .light), trigger: generate.queued.count + (generate.run.isBusy ? 1 : 0))
@@ -261,7 +283,7 @@ struct ChipRow: View {
                         generate.draft.batchSize = $0
                     }
                 }
-                if generate.sequence.draft == nil, let temporal = recipe.temporal {
+                if generate.sequence.draft == nil, !generate.usesVideoDuration, let temporal = recipe.temporal {
                     LengthChip(temporal: temporal)
                 }
             }

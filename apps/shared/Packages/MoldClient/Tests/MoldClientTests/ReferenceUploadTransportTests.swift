@@ -136,3 +136,17 @@ private func requestBody(_ request: URLRequest) -> Data {
     }
     return data
 }
+
+extension ReferenceUploadTransportTests {
+    @Test func literalVideoUploadsProtectOnlyTheScopedLegacyRequest() async throws {
+        let (backend, base, caps) = try fixture()
+        var original = base; original.prompt = "literal\\new\r\nnext"
+        let lease = try await backend.preparingLiteralVideoInputs().prepareReferenceUploads(original, capabilities: caps, expectedInstanceId: "instance")
+        let opening = try #require(ReferenceUploadStub.requests.first { $0.httpMethod == "POST" })
+        let body = try #require(JSONSerialization.jsonObject(with: requestBody(opening)) as? [String: Any])
+        let scoped = try #require(body["request"] as? [String: Any])
+        #expect(scoped["prompt"] as? String == "literal\\\\new\r\nnext")
+        #expect(lease.request.prompt == original.prompt)
+        await lease.cancel()
+    }
+}

@@ -302,3 +302,30 @@ describe("durable generation admission API", () => {
     }
   });
 });
+it("serializes ordinary prepared siblings with the same legacy scope protection", async () => {
+  const prompt = String.raw`C:\new\render` + "\r\nActual line";
+  const request = {
+    client_batch_id: "batch",
+    requests: [
+      {
+        model: "selected",
+        prompt,
+        negative_prompt: prompt,
+        original_prompt: prompt,
+        prompt_transform: { source_prompt: prompt, root_prompt: prompt },
+        seed: 123,
+      },
+    ],
+  };
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(Response.json(batch()));
+  await admitGenerationBatch(target, request);
+  const wire = JSON.parse(String(fetchMock.mock.calls[0]![1]!.body))
+    .requests[0];
+  expect(wire.prompt).toBe(prompt.replaceAll("\\", "\\\\"));
+  expect(wire.prompt_transform.root_prompt).toBe(
+    prompt.replaceAll("\\", "\\\\"),
+  );
+  expect(request.requests[0]!.prompt).toBe(prompt);
+});

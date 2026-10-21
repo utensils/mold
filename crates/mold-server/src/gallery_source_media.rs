@@ -77,7 +77,7 @@ pub(crate) fn private_media_authorized(
 /// `archive_identity_sha256`, which is what stops a DIFFERENT request consuming
 /// it. The constant is domain-separated so it can never collide with a real
 /// `ApiKeySet::durable_identity` digest.
-fn reuse_credential_identity(
+pub(crate) fn reuse_credential_identity(
     authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
 ) -> String {
     match authenticated {
@@ -662,6 +662,7 @@ struct ReuseSessionMember {
     position: String,
 }
 
+#[derive(Clone)]
 struct ReuseSession {
     instance_id: String,
     credential_identity: String,
@@ -684,8 +685,10 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-fn request_sha256(request: &mold_core::GenerateRequest) -> Result<String, ApiError> {
-    let bytes = serde_json::to_vec(request)
+pub(crate) fn request_sha256(request: &mold_core::GenerateRequest) -> Result<String, ApiError> {
+    let mut scoped = request.clone();
+    mold_core::prompt_text::normalize_real_line_endings_for_scope(&mut scoped);
+    let bytes = serde_json::to_vec(&scoped)
         .map_err(|error| ApiError::internal(format!("reuse request encoding failed: {error}")))?;
     let mut digest = Sha256::new();
     digest.update(b"mold.gallery-source-reuse-request.v1\0");
@@ -709,12 +712,70 @@ fn issue_session_token() -> Result<(String, [u8; 32]), ApiError> {
     Ok((token, hash))
 }
 
+#[cfg(test)]
 fn take_reuse_session(
     token_hash: &[u8; 32],
     now: u64,
     instance_id: &str,
     credential_identity: &str,
     request_digest: &str,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        true,
+        None,
+    )
+}
+
+fn take_reuse_session_with_receipt(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        true,
+        receipt,
+    )
+}
+
+fn peek_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+) -> Result<ReuseSession, ApiError> {
+    read_reuse_session(
+        token_hash,
+        now,
+        instance_id,
+        credential_identity,
+        request_digest,
+        false,
+        None,
+    )
+}
+
+fn read_reuse_session(
+    token_hash: &[u8; 32],
+    now: u64,
+    instance_id: &str,
+    credential_identity: &str,
+    request_digest: &str,
+    consume: bool,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
 ) -> Result<ReuseSession, ApiError> {
     let mut sessions = reuse_sessions()
         .lock()
@@ -736,6 +797,32 @@ fn take_reuse_session(
             "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH",
             StatusCode::CONFLICT,
         ));
+    }
+    if !consume {
+        return Ok(held.clone());
+    }
+    if let Some(receipt) = receipt {
+        let result = receipt(&crate::reference_uploads::InputConsumptionClaim {
+            kind: "gallery_reuse".to_string(),
+            session_sha256: token_hash
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            request_scope_sha256: held.request_sha256.clone(),
+            credential_identity: held.credential_identity.clone(),
+            instance_id: held.instance_id.clone(),
+        });
+        if let Err(error) = result {
+            match error {
+                crate::reference_uploads::ConsumptionReceiptError::NotPublished(error) => {
+                    return Err(error)
+                }
+                crate::reference_uploads::ConsumptionReceiptError::Published(error) => {
+                    sessions.remove(token_hash);
+                    return Err(error);
+                }
+            }
+        }
     }
     Ok(sessions
         .remove(token_hash)
@@ -880,6 +967,78 @@ pub(crate) async fn hydrate_reuse_session(
     headers: &HeaderMap,
     request: &mut mold_core::GenerateRequest,
 ) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        MAX_SOURCE_DOWNLOAD_BYTES,
+        true,
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "mp4")]
+pub(crate) async fn preview_hydrate_reuse_session(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        false,
+        None,
+    )
+    .await
+}
+
+/// Consume only after authenticated bytes have been hydrated successfully.
+/// The receipt is written under the exclusive one-use session lock.
+#[cfg(feature = "mp4")]
+pub(crate) async fn hydrate_reuse_session_with_receipt(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+    receipt: &mut crate::reference_uploads::ConsumptionReceipt<'_>,
+) -> Result<(), ApiError> {
+    hydrate_reuse_session_with_mode(
+        state,
+        authenticated,
+        auth,
+        headers,
+        request,
+        maximum_bytes,
+        true,
+        Some(receipt),
+    )
+    .await
+}
+
+// Keep authorization and one-use claim fences explicit at this boundary.
+#[allow(clippy::too_many_arguments)]
+async fn hydrate_reuse_session_with_mode(
+    state: &AppState,
+    authenticated: Option<&Extension<crate::auth::ApiKeyAuthenticated>>,
+    auth: Option<&Extension<crate::auth::AuthState>>,
+    headers: &HeaderMap,
+    request: &mut mold_core::GenerateRequest,
+    maximum_bytes: u64,
+    consume: bool,
+    receipt: Option<&mut crate::reference_uploads::ConsumptionReceipt<'_>>,
+) -> Result<(), ApiError> {
     let Some(handle) = headers.get(REUSE_SESSION_HEADER) else {
         return Ok(());
     };
@@ -901,7 +1060,8 @@ pub(crate) async fn hydrate_reuse_session(
     let request_digest = request_sha256(request)?;
     let token_hash = session_token_hash(handle);
     let now = unix_timestamp();
-    let session = take_reuse_session(
+    let _publication = state.gallery_publication_gate.read().await;
+    let session = peek_reuse_session(
         &token_hash,
         now,
         state.instance_id.as_str(),
@@ -929,12 +1089,23 @@ pub(crate) async fn hydrate_reuse_session(
             StatusCode::CONFLICT,
         ));
     }
+    let mut selected_bytes = 0u64;
     for selected in &session.members {
         let current_member = current
             .members
             .iter()
             .find(|member| member.member.member_id == selected.member_id)
             .ok_or_else(|| ApiError::not_found("retained source-media member was removed"))?;
+        selected_bytes = selected_bytes
+            .checked_add(current_member.member.size_bytes)
+            .filter(|bytes| *bytes <= maximum_bytes)
+            .ok_or_else(|| {
+                ApiError::with_code(
+                    "Retained inputs exceed this operation's media budget",
+                    "RETAINED_SOURCE_MEDIA_TOO_LARGE",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                )
+            })?;
         if current_member.media_set != selected.media_set
             || current_member.pin_id != selected.pin_id
             || current_member.index != selected.index
@@ -957,23 +1128,40 @@ pub(crate) async fn hydrate_reuse_session(
     })?;
     let members = session.members;
     let decrypted = tokio::task::spawn_blocking(move || {
+        let mut remaining = maximum_bytes;
         members
             .into_iter()
             .map(|member| {
-                lifecycle
-                    .gallery_member_bytes(
-                        member.media_set.clone(),
-                        member.pin_id.clone(),
-                        member.index,
-                    )
-                    .map(|bytes| (member, bytes))
+                let bytes = lifecycle.gallery_member_bytes_bounded(
+                    member.media_set.clone(),
+                    member.pin_id.clone(),
+                    member.index,
+                    remaining,
+                )?;
+                remaining -= bytes.len() as u64;
+                Ok::<_, crate::queue_media_store::QueueMediaError>((member, bytes))
             })
             .collect::<Result<Vec<_>, _>>()
     })
     .await
     .map_err(|error| ApiError::internal(format!("reuse session decrypt task failed: {error}")))?
     .map_err(|error| ApiError::internal(format!("reuse session decrypt failed: {error}")))?;
-    hydrate_selected_members(request, decrypted)
+    // Hydration may reject incompatible targets. Do not spend the session
+    // until every selected byte and its target mapping have been validated.
+    let mut hydrated = request.clone();
+    hydrate_selected_members(&mut hydrated, decrypted)?;
+    if consume {
+        take_reuse_session_with_receipt(
+            &token_hash,
+            unix_timestamp(),
+            state.instance_id.as_str(),
+            &credential_identity,
+            &request_digest,
+            receipt,
+        )?;
+    }
+    *request = hydrated;
+    Ok(())
 }
 
 fn ensure_hydration_target_is_empty(
@@ -2003,6 +2191,31 @@ mod tests {
     }
 
     #[test]
+    fn literal_parent_reuse_scope_preserves_backslashes_and_equates_real_line_endings() {
+        let mut literal = request();
+        literal.prompt = "actual\r\nline and literal\\n".into();
+        let legacy: mold_core::GenerateRequest = serde_json::from_value(
+            serde_json::to_value(mold_core::prompt_text::protect_generate_request_for_wire(
+                &literal,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            request_sha256(&legacy).unwrap(),
+            request_sha256(&literal).unwrap()
+        );
+        let mut changed = literal.clone();
+        changed.prompt.push_str("changed");
+        assert_ne!(
+            request_sha256(&literal).unwrap(),
+            request_sha256(&changed).unwrap()
+        );
+        assert!(literal.prompt.contains('\r'));
+        assert!(literal.prompt.contains("\\n"));
+    }
+
+    #[test]
     fn request_digest_is_typed_deterministic_and_media_sensitive() {
         let first = request();
         let mut same = serde_json::from_slice::<mold_core::GenerateRequest>(
@@ -2035,7 +2248,7 @@ mod tests {
     }
 
     #[test]
-    fn reuse_session_is_scope_bound_and_consumed_exactly_once() {
+    fn reuse_session_receipt_is_scope_bound_and_consumed_exactly_once() {
         let token = format!("test-{}", uuid::Uuid::new_v4());
         let token_hash = session_token_hash(&token);
         let now = unix_timestamp();
@@ -2061,6 +2274,33 @@ mod tests {
                 .code,
             "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH"
         );
+        for _ in 0..2 {
+            peek_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
+        }
+        assert_eq!(
+            peek_reuse_session(&token_hash, now, "instance-a", "other-client", "request")
+                .err()
+                .unwrap()
+                .code,
+            "RETAINED_MEDIA_REUSE_SCOPE_MISMATCH"
+        );
+        let mut refuse = |_: &crate::reference_uploads::InputConsumptionClaim| {
+            Err(
+                crate::reference_uploads::ConsumptionReceiptError::NotPublished(
+                    ApiError::internal("receipt could not be persisted"),
+                ),
+            )
+        };
+        assert!(take_reuse_session_with_receipt(
+            &token_hash,
+            now,
+            "instance-a",
+            "credential-a",
+            "request",
+            Some(&mut refuse)
+        )
+        .is_err());
+        peek_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
         take_reuse_session(&token_hash, now, "instance-a", "credential-a", "request").unwrap();
         assert_eq!(
             take_reuse_session(&token_hash, now, "instance-a", "credential-a", "request")

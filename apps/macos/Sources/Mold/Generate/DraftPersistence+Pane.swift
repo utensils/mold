@@ -32,8 +32,10 @@ struct PersistedDraft: ViewModifier {
     }
 
     private var descriptor: DraftDescriptor {
-        DraftDescriptor(controller.draft, model: controller.modelName,
+        var descriptor = DraftDescriptor(controller.draft, model: controller.modelName,
                         family: controller.modelFamily, recipeID: controller.recipeID)
+        descriptor.videoDuration = controller.videoDuration
+        return descriptor
     }
 
     private var inputs: DraftInputSnapshot {

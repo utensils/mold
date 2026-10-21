@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { currentTarget } from "../../lib/api/client";
 import {
@@ -152,6 +153,7 @@ const props = withDefaults(
     tagSuggestions: () => [],
   },
 );
+const extendVideoAvailable = ref(false);
 const emit = defineEmits<{
   "continue-published": [
     value: { filename: string; owner: import("@studio/api/chainJobs").ChainOwner },
@@ -736,8 +738,15 @@ const clipsOwner = computed(() => {
         <Icon name="reuse" :size="13" />
         Use these settings
       </button>
+      <VideoExtendButton
+        v-if="video && !fromTrash"
+        :owner="clipsOwner"
+        :filename="item.filename"
+        :metadata="item.metadata"
+        @available="extendVideoAvailable = $event"
+      />
       <VideoClips
-        v-if="video && !fromTrash && item.metadata.chain_job_id"
+        v-if="!extendVideoAvailable && video && !fromTrash && item.metadata.chain_job_id"
         :source="{ jobId: item.metadata.chain_job_id, filename: item.filename }"
         :owner="clipsOwner"
         @published="emit('continue-published', $event)"

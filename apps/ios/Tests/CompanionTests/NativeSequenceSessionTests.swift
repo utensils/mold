@@ -5,9 +5,22 @@ import Testing
 
 @MainActor
 struct NativeSequenceSessionTests {
+    @Test func confirmedDiscardRemovesOnlyExactCapturedMachineInstallation() throws {
+        let session=NativeSequenceSession(defaults:UserDefaults(suiteName:UUID().uuidString)!)
+        let host=MoldHost(name:"Machine",baseURL:URL(string:"http://machine:7680")!,apiKey:"secret")
+        let old=NativeSequenceSession.Job(jobId:"same",host:host,installation:"old",detail:nil,message:"Failed")
+        let replacement=NativeSequenceSession.Job(jobId:"same",host:host,installation:"new",detail:nil,message:"Failed")
+        session.jobs=[replacement]
+        try session.remember(.init(id:"same",host:host.id,origin:host.baseURL.absoluteString,installation:"new"))
+        session.removeDiscarded(old)
+        #expect(session.jobs.count==1 && session.pending.count==1)
+        session.removeDiscarded(replacement)
+        #expect(session.jobs.isEmpty && session.pending.isEmpty)
+    }
+
     @Test func pendingAdmissionSurvivesRelaunchWithoutCredentialsOrMedia() throws {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!, apiKey: "private")
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!, apiKey: "private")
         let record = NativeSequenceSession.Pending(id: UUID().uuidString, host: host.id,
             origin: host.baseURL.absoluteString, installation: "installation")
         let first = NativeSequenceSession(defaults: defaults)
@@ -76,7 +89,7 @@ struct NativeSequenceAdmissionTests {
         }
     }
     @Test func acceptedButLostReplyRecoversKnownIDWithoutResubmitting() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot waters a garden", frames: 107)
@@ -93,7 +106,7 @@ struct NativeSequenceAdmissionTests {
         #expect(session.jobs.isEmpty)
     }
     @Test func definitiveRefusalDoesNotLeaveAnUncertainPendingJob() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.reject()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -108,7 +121,7 @@ struct NativeSequenceAdmissionTests {
         #expect(await backend.creates == 1)
     }
     @Test func editedClipsDuringPreparationDoNotSubmitStalePlan() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot", frames: 107)
@@ -126,7 +139,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func stopBeforeAcceptanceSettlesAbsentJobWithoutPollingForever() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.holdCreate()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -146,7 +159,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func continuedReferencesRequireExplicitRecoveryAfterRemoval() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let session = NativeSequenceSession(defaults: defaults)
@@ -182,7 +195,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func oldRecoveryCannotReplaceAnExplicitlyOpenedNewerTakeOfTheSameJob() async throws {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         func entry(_ filename: String) throws -> LibraryEntry {
@@ -211,7 +224,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test(arguments: [425, 499]) func unknownAdmissionStatusRetainsItsRecoveryRow(status: Int) async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         await backend.reject(status: status)
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
@@ -226,7 +239,7 @@ struct NativeSequenceAdmissionTests {
     }
 
     @Test func changedRouteRefusesBeforeMutation() async {
-        let host = MoldHost(name: "Plato", baseURL: URL(string: "http://plato:7680")!)
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
         let backend = SequenceBackendFixture()
         let session = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)
         session.begin(prompt: "A robot", frames: 107)

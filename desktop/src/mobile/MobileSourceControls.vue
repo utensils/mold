@@ -76,6 +76,7 @@ import {
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    incomingVideoBoundary?: boolean;
     normalizationCapabilities?:
       | import("@studio/api/referenceNormalizationTypes").VideoNormalizationCapabilities
       | null
@@ -374,7 +375,11 @@ async function onNamedViewFile(role: NamedViewRole, file: File): Promise<void> {
  * checks it. Its own slot rather than a branch of `validationError`, because
  * the ControlNet paragraph must keep naming the ControlNet problem.
  */
-const conditioningError = computed(() => sourceConditioningValidationError(props.form));
+const conditioningError = computed(() =>
+  sourceConditioningValidationError(props.form, {
+    incomingVideoBoundary: props.incomingVideoBoundary === true,
+  }),
+);
 const valid = computed(() => !validationError.value && !conditioningError.value);
 
 watch(valid, (next) => emit("validity-change", next), { immediate: true });
@@ -746,6 +751,7 @@ function applyMask(mask: string): void {
   <template v-else-if="plan.kind === 'h3-boundaries'">
     <fieldset class="mobile-source-controls" data-test="mobile-h3-boundaries">
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         :plan="plan"
         touch-friendly
         :source="h3Authoring.firstFrame"
@@ -792,6 +798,7 @@ function applyMask(mask: string): void {
     <fieldset v-if="showStrip" class="mobile-source-controls" data-test="mobile-source-controls">
       <legend class="mobile-source-legend">{{ referencesOnly ? "References" : "Pictures" }}</legend>
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         v-if="plan.kind === 'attachments' && plan.primary === 'target'"
         :plan="plan"
         touch-friendly
@@ -904,6 +911,7 @@ function applyMask(mask: string): void {
       data-test="mobile-source-controls"
     >
       <SourceMediaWells
+        :incoming-boundary="incomingVideoBoundary"
         :plan="plan"
         touch-friendly
         test-id-prefix="mobile-"

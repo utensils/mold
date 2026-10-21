@@ -105,6 +105,7 @@ pub async fn create_chain_job(
     ),
     ApiError,
 > {
+    crate::routes_chain::require_public_chain_request(&req)?;
     if let Some(expected) = headers.get("x-mold-destination-instance") {
         if expected.to_str().ok() != Some(state.instance_id.as_str()) {
             return Err(conflict(
@@ -122,6 +123,7 @@ pub async fn create_chain_job(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let _guard = handle.lock_job(&job_id).await;
+    crate::video_job_child_authority::require_public_chain(db, &job_id)?;
     if operation_id
         .as_deref()
         .is_some_and(|id| handle.take_mutation_cancel(id))
@@ -405,7 +407,16 @@ pub async fn list_chain_jobs(
     let root = jobs_root()?;
     let rows = chain_jobs::list_jobs(db)
         .map_err(|e| ApiError::internal(format!("failed to list chain jobs: {e:#}")))?;
-    let jobs = rows
+    let mut visible = Vec::new();
+    for row in rows {
+        if mold_db::video_job_child_owners::parent_id(db, &row.id)
+            .map_err(|e| ApiError::internal(format!("failed to read child ownership: {e:#}")))?
+            .is_none()
+        {
+            visible.push(row);
+        }
+    }
+    let jobs = visible
         .into_iter()
         .filter_map(|row| {
             let manifest = read_manifest_optional(&row, &root);
@@ -541,6 +552,7 @@ pub async fn resume_chain_job(
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
     let row = chain_jobs::get_job(db, &id)
@@ -634,6 +646,7 @@ pub async fn retake_chain_job(
     crate::routes::ensure_generation_available(&state)?;
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
     let row = chain_jobs::get_job(db, &id)
@@ -705,6 +718,7 @@ pub async fn amend_chain_job(
     req.normalize_prompt_newlines();
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
 
@@ -731,6 +745,7 @@ pub async fn amend_chain_job(
         require_persisted_chain_model_activation(&state, &row, &manifest).await?;
         let effective = crate::chain_job_runner::effective_request(&manifest)
             .map_err(|e| ApiError::internal(format!("failed to load chain request: {e:#}")))?;
+        crate::routes_chain::require_public_chain_request(&effective)?;
         let mut candidate = crate::chain_job_runner::amend_candidate_request(&effective, &req);
         let motion_tail_before = candidate.motion_tail_frames;
         crate::routes_chain::validate_chain_build_features(&candidate)?;
@@ -831,6 +846,7 @@ pub async fn cancel_chain_job(
 ) -> Result<(StatusCode, Json<ChainJobSummary>), ApiError> {
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     let _guard = handle.lock_job(&id).await;
     let summary = cancel_chain_job_locked(handle, db, &root, &id)?;
@@ -872,6 +888,7 @@ pub async fn cancel_chain_job_mutation(
         .to_string();
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     handle.request_mutation_cancel(&operation_id);
     let _guard = handle.lock_job(&id).await;
@@ -944,6 +961,7 @@ pub async fn delete_chain_job(
 ) -> Result<StatusCode, ApiError> {
     let handle = chain_jobs_handle(&state)?;
     let db = metadata_db(&state)?;
+    crate::video_job_child_authority::require_public_chain(db, &id)?;
     let root = jobs_root()?;
     {
         let _guard = handle.lock_job(&id).await;
@@ -1411,6 +1429,8 @@ mod tests {
     fn req(format: OutputFormat) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1652,6 +1672,32 @@ mod tests {
         fn small_jobs_waiting(&self) -> usize {
             0
         }
+    }
+
+    #[tokio::test]
+    async fn reserved_internal_child_cancel_refuses_before_mutation_tombstone() {
+        let mut state = AppState::for_tests();
+        state.metadata_db = Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let (handle, _) = crate::chain_job_runner::ChainJobRunnerHandle::command_probe_for_tests();
+        state.chain_jobs = Some(Arc::new(handle));
+        let child = uuid::Uuid::new_v4().to_string();
+        let operation = uuid::Uuid::new_v4().to_string();
+        state.metadata_db.as_ref().as_ref().unwrap().with_conn(|conn| {
+            conn.execute("INSERT INTO video_job_child_owners(child_id,parent_id) VALUES(?1,'removed-parent')",[&child])?;Ok(())
+        }).unwrap();
+        let error = cancel_chain_job_mutation(
+            State(state.clone()),
+            Path((child, operation.clone())),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "VIDEO_JOB_CHILD_OWNED");
+        assert!(!state
+            .chain_jobs
+            .as_ref()
+            .unwrap()
+            .take_mutation_cancel(&operation));
     }
 
     #[tokio::test]

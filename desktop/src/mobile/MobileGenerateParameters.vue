@@ -99,6 +99,7 @@ import {
 
 const props = withDefaults(
   defineProps<{
+    durationActive?: boolean;
     form: GenerateForm;
     /** Selected model row; carries the continuation capability. */
     selectedModel?: ModelEntry | null;
@@ -140,7 +141,7 @@ const frameMinimum = computed(() => minVideoFrames(videoContract.value));
 const fixedFps = computed(() => fixedVideoFps(videoContract.value));
 const generationRequest = computed(() => buildRequest(props.form));
 const frameError = computed(() =>
-  caps.value.supportsVideo
+  !props.durationActive && caps.value.supportsVideo
     ? fixedFps.value !== null
       ? videoFramesError(props.form.frames, videoContract.value)
       : videoFrameGridError(props.form.frames, videoContract.value)
@@ -154,7 +155,7 @@ const fpsError = computed(() =>
     : null,
 );
 const chainDecision = computed<ChainRoutingDecision>(() =>
-  caps.value.supportsVideo
+  !props.durationActive && caps.value.supportsVideo
     ? decideGenerateRequestRouting(generationRequest.value, props.form.family, props.selectedModel)
     : { kind: "single" },
 );
@@ -744,6 +745,7 @@ const searchedAdapters = computed(() =>
       <legend class="mobile-generate-legend">Video</legend>
 
       <VideoDurationSlider
+        v-if="!durationActive"
         :frames="form.frames"
         :fps="form.fps"
         :model="selectedModel"
@@ -757,7 +759,7 @@ const searchedAdapters = computed(() =>
       />
 
       <div class="mobile-generate-field-grid">
-        <label class="field mobile-generate-field">
+        <label v-if="!durationActive" class="field mobile-generate-field">
           <span>Frames</span>
           <small>{{ frameGridLabel }} grid</small>
           <input
@@ -820,7 +822,7 @@ const searchedAdapters = computed(() =>
       </div>
 
       <p
-        v-if="frameError"
+        v-if="!durationActive && frameError"
         :id="frameErrorId"
         class="mobile-generate-validation"
         role="alert"
@@ -838,7 +840,7 @@ const searchedAdapters = computed(() =>
         {{ fpsError }}
       </p>
       <p
-        v-if="chainDecision.kind === 'chain'"
+        v-if="!durationActive && chainDecision.kind === 'chain'"
         class="mobile-generate-callout"
         data-test="mobile-chain-cue"
       >

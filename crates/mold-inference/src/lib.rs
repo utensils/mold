@@ -131,6 +131,12 @@ pub mod shared_pool;
 pub mod upscaler;
 mod vae_recovery;
 pub mod vae_tiling;
+pub mod video_assembly;
+#[cfg(feature = "mp4")]
+pub mod video_assembly_audio;
+pub(crate) mod video_assembly_boxes;
+pub mod video_assembly_frames;
+pub(crate) mod video_assembly_input;
 // The T2V engine is live, but the family ships in layers: the 14B/A14B and
 // I2V configs, the diffusers-format rename table, and several accessors are
 // built and tested here ahead of the layers that consume them.

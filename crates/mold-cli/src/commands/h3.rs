@@ -167,6 +167,7 @@ pub(crate) fn prepare_authoring(
         last_frame,
         references,
         &std::collections::HashSet::new(),
+        false,
     )
 }
 
@@ -184,6 +185,7 @@ pub(crate) fn prepare_authoring_candidates(
     last_frame: Option<&Path>,
     references: &[ReferenceArg],
     fresh_video_indices: &std::collections::HashSet<usize>,
+    inherit_library_references: bool,
 ) -> Result<PreparedAuthoring> {
     let is_h3 = minimax_h3::is_family(family);
     let has_h3_authoring = duration_seconds.is_some()
@@ -269,7 +271,7 @@ pub(crate) fn prepare_authoring_candidates(
                     "MiniMax H3 Ref2VA accepts ordered --reference inputs, not --image/--first-frame/--last-frame"
                 );
             }
-            if references.is_empty() {
+            if references.is_empty() && !inherit_library_references {
                 anyhow::bail!(
                     "MiniMax H3 Ref2VA requires at least one ordered --reference KIND=PATH"
                 );
@@ -1262,6 +1264,39 @@ mod tests {
         }])
         .expect_err("symlink references must fail no-follow");
         assert!(error.to_string().contains("no-follow"));
+    }
+
+    #[test]
+    fn ref2va_library_extension_defers_missing_references_to_source_authority() {
+        let prepare = |inherit, first| {
+            prepare_authoring_candidates(
+                minimax_h3::REF2VA_COMFY,
+                minimax_h3::FAMILY,
+                None,
+                None,
+                None,
+                None,
+                None,
+                first,
+                None,
+                None,
+                &[],
+                &std::collections::HashSet::new(),
+                inherit,
+            )
+        };
+        assert!(prepare(false, None)
+            .unwrap_err()
+            .to_string()
+            .contains("requires at least one"));
+        let restored = prepare(true, None)
+            .expect("Library source restores exact retained references at full server validation");
+        assert!(restored.references.is_none());
+        assert!(restored.uploads.is_empty());
+        assert!(prepare(true, Some(Path::new("not-read.png")))
+            .unwrap_err()
+            .to_string()
+            .contains("not --image"));
     }
 
     #[test]

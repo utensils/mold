@@ -35,6 +35,7 @@ import { primaryModifierPressed, shortcutLabel } from "../../lib/platform";
 
 const props = withDefaults(
   defineProps<{
+    promptHidden?: boolean;
     /** Prompt text (v-model). */
     prompt: string;
     /** Aspect label for the summary line (e.g. "1:1" or "Custom"). */
@@ -189,7 +190,7 @@ function onKeydown(event: KeyboardEvent) {
     (event.key === "e" || event.key === "E")
   ) {
     event.preventDefault();
-    if (!transformsDisabled.value) emit("expand");
+    if (!props.promptHidden && !transformsDisabled.value) emit("expand");
     return;
   }
   const el = event.target as HTMLTextAreaElement;
@@ -245,6 +246,7 @@ watch(
 <template>
   <div class="composer">
     <textarea
+      v-if="!promptHidden"
       ref="textarea"
       class="composer__prompt"
       data-test="composer-prompt"
@@ -256,7 +258,7 @@ watch(
     />
 
     <button
-      v-if="!transformBlockedReason"
+      v-if="!promptHidden && !transformBlockedReason"
       type="button"
       class="prompt-editor-opener"
       data-test="edit-prompt"
@@ -303,6 +305,7 @@ watch(
       <button
         type="button"
         class="composer__expand"
+        v-if="!promptHidden"
         data-test="composer-expand"
         :disabled="transformsDisabled"
         :title="transformTitle"
@@ -315,6 +318,7 @@ watch(
       <button
         type="button"
         class="composer__expand"
+        v-if="!promptHidden"
         data-test="composer-remix"
         :disabled="transformsDisabled"
         :title="transformTitle"

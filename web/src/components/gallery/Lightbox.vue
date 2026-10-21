@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
 
@@ -118,6 +119,7 @@ const endpointChoices = inject(
   SOURCE_ATTACHMENT_CHOICES,
   computed(() => []),
 );
+const extendVideoAvailable = ref(false);
 const emit = defineEmits<{
   (
     e: "continue-published",
@@ -1194,8 +1196,20 @@ const clipsOwner = computed(() => {
               </svg>
               Reuse these settings
             </button>
+            <VideoExtendButton
+              v-if="isVideoFile && item && !inTrash"
+              :owner="clipsOwner"
+              :filename="item.filename"
+              :metadata="item.metadata"
+              :title="item.title"
+              @available="extendVideoAvailable = $event"
+            />
             <VideoClips
-              v-if="isVideoFile && item?.metadata.chain_job_id"
+              v-if="
+                !extendVideoAvailable &&
+                isVideoFile &&
+                item?.metadata.chain_job_id
+              "
               :source="{
                 jobId: item.metadata.chain_job_id,
                 filename: item.filename,
@@ -1614,8 +1628,20 @@ const clipsOwner = computed(() => {
               </svg>
               Reuse these settings
             </button>
+            <VideoExtendButton
+              v-if="isVideoFile && item && !inTrash"
+              :owner="clipsOwner"
+              :filename="item.filename"
+              :metadata="item.metadata"
+              :title="item.title"
+              @available="extendVideoAvailable = $event"
+            />
             <VideoClips
-              v-if="isVideoFile && item?.metadata.chain_job_id"
+              v-if="
+                !extendVideoAvailable &&
+                isVideoFile &&
+                item?.metadata.chain_job_id
+              "
               :source="{
                 jobId: item.metadata.chain_job_id,
                 filename: item.filename,

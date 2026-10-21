@@ -65,6 +65,7 @@ import ReferenceCropModal from "@studio/components/ReferenceCropModal.vue";
 const props = withDefaults(
   defineProps<{
     form: GenerateForm;
+    incomingVideoBoundary?: boolean;
     /**
      * The row that answers for the CHECKPOINT'S CONTRACT; its advertised
      * recipe wins over the form's snapshot so this component and its mount
@@ -665,6 +666,7 @@ function setSourceFitMode(e: Event) {
     :data-test="plan.kind === 'attachments' ? undefined : 'source-media-controls'"
   >
     <SourceMediaWells
+      :incoming-boundary="incomingVideoBoundary"
       v-if="plan.kind !== 'attachments' || plan.primary === 'target'"
       :plan="plan"
       :titled="titled"
@@ -972,6 +974,7 @@ function setSourceFitMode(e: Event) {
   <!-- MiniMax H3 FL2VA boundaries: the exact same wells, H3-owned state. -->
   <div v-else-if="plan.kind === 'h3-boundaries'" data-test="source-media-controls">
     <SourceMediaWells
+      :incoming-boundary="incomingVideoBoundary"
       :plan="plan"
       :titled="titled"
       :source="h3Authoring.firstFrame"

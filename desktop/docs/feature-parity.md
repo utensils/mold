@@ -597,3 +597,37 @@ Queue job details offer **Cancel batch** for multi-output durable batches with c
 In Queue, a failed, interrupted or paused multi-clip video offers **Start again…**. Review the destination, then choose **Start again** on its original machine or **Send video** on another connected machine. Saved prompts, seed, settings and inputs stay together; the original remains unchanged. Machine-local adapters can restart only on their original machine. Unsupported retained inputs explain the refusal before admission. A lost reply keeps the known job for **Check queue**, and **Stop new attempt** cancels that destination operation without changing the original.
 
 On updated machines, **Delete recovery data…** is available for a failed or interrupted multi-clip job. Its separate confirmation deletes that job and retained inputs; saved Library videos remain available. The original installation and job revision must still match. **Stop new attempt** requires the updated installation-fenced control; an interrupted cancellation reply keeps its intent for reconciliation with the same job ID.
+
+## Duration video parents and Library Extend
+
+Web, Tauri desktop, and Tauri mobile share the Duration editor, plan preview,
+prepared-media admission, durable video controls, and recovery journal in
+`studio/`. One ordinary prompt remains the default. Duration starts at the
+current recipe's short clip, survives model changes, and supports custom
+seconds without a product duration ceiling. The server reports the safe
+single-generation limit and actual joined-clip count. Optional Define scenes
+supplies ordered prompts and scene durations; there is no timeline or output
+mode picker. Audio and FPS remain normal recipe controls, while competing
+one-shot Frames/Duration/VRAM estimates are hidden during this workflow.
+
+Library Extend works for ordinary generated videos as well as joined videos.
+It restores original scalar recipe settings and prompt, with a new random
+seed for added footage. Add duration makes a new video containing the entire
+original plus the tail and preserves the original. The authenticated source
+archive and original retained-reference inventory are checked without loading
+the MP4 into browser memory. Historical endpoints are not restored as new
+endpoints. A continuous plan owns the opening boundary; a selected conflicting
+opening stays visible and requires correction. Source owner identity and
+safe descriptors survive cold drafts; keys, input bytes and upload grants do
+not enter that record. Older-server absence is an explicit update/reconnect
+block for a saved Duration/Extend draft.
+
+Activity identifies video parents explicitly rather than guessing from titles
+or child jobs. Parent details use current server Stop/Resume/Delete flags;
+deleting recovery data preserves saved Library videos. Start again or send
+uses revision-bound opaque exports, retains full-range seed/prompt values,
+and leaves the original untouched. Same-installation prefix grants avoid a
+network copy; an explicit cross-machine Send streams bounded chunks. An
+unanswered create/Stop is recovered with the exact captured destination and
+operation before another attempt is admitted. Recoverable-list pagination is
+stable under earlier jobs completing or disappearing.

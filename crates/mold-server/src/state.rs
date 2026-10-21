@@ -449,6 +449,8 @@ pub struct AppState {
     /// Durable chain-job runner handle. `None` when DB-backed chain jobs are
     /// unavailable; chain-job API handlers return 503 in that state.
     pub chain_jobs: Option<Arc<crate::chain_job_runner::ChainJobRunnerHandle>>,
+    #[cfg(feature = "mp4")]
+    pub(crate) video_jobs: Option<Arc<crate::video_job_actor::VideoJobRunnerHandle>>,
     /// Durable mesh workflow runner. Absent when SQLite persistence or GPU
     /// generation is unavailable.
     pub mesh_workflows: Option<Arc<crate::mesh_workflow_runner::MeshWorkflowRunnerHandle>>,
@@ -753,6 +755,8 @@ impl AppState {
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
+            #[cfg(feature = "mp4")]
+            video_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -832,6 +836,8 @@ impl AppState {
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
+            #[cfg(feature = "mp4")]
+            video_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -924,6 +930,8 @@ impl AppState {
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
+            #[cfg(feature = "mp4")]
+            video_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -983,6 +991,8 @@ impl AppState {
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
+            #[cfg(feature = "mp4")]
+            video_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),
@@ -1039,6 +1049,8 @@ impl AppState {
             gallery_publication_gate: crate::batch_transaction::GalleryPublicationGate::default(),
             gallery_feed_readiness: Arc::default(),
             chain_jobs: None,
+            #[cfg(feature = "mp4")]
+            video_jobs: None,
             mesh_workflows: None,
             downloads: DownloadQueue::new(),
             resources: ResourceBroadcaster::new(),

@@ -1,0 +1,61 @@
+import { mount } from "@vue/test-utils";
+import { expect, it } from "vitest";
+import VideoDurationEditor from "./VideoDurationEditor.vue";
+import type { VideoDurationAuthoring } from "../lib/videoDurationAuthoring";
+const initial: VideoDurationAuthoring = {
+  durationMs: "30000",
+  scenesEnabled: false,
+  scenes: [],
+};
+it("keeps scenes optional and hands the first edited scene back to the ordinary prompt", async () => {
+  const wrapper = mount(VideoDurationEditor, {
+    props: { modelValue: initial, prompt: "Original prompt" },
+  });
+  expect(wrapper.findAll("textarea")).toHaveLength(0);
+  await wrapper.get('[data-test="define-video-scenes"]').trigger("click");
+  const draft = wrapper.emitted(
+    "update:modelValue",
+  )![0]![0] as VideoDurationAuthoring;
+  expect(draft.scenes[0]?.prompt).toBe("Original prompt");
+  await wrapper.setProps({
+    modelValue: {
+      ...draft,
+      scenes: [{ ...draft.scenes[0]!, prompt: "Edited scene" }],
+    },
+  });
+  await wrapper.get('[data-test="video-one-prompt"]').trigger("click");
+  expect(wrapper.emitted("singlePrompt")![0]).toEqual(["Edited scene"]);
+  expect(wrapper.findAll('button[type="submit"]')).toHaveLength(0);
+});
+it("sums scene times exactly and supports ordered editing without hiding an invalid row", async () => {
+  const wrapper = mount(VideoDurationEditor, {
+    props: {
+      modelValue: {
+        ...initial,
+        scenesEnabled: true,
+        scenes: [
+          { id: "a", prompt: "First", durationMs: "1000" },
+          { id: "b", prompt: "Second", durationMs: "2000" },
+        ],
+      },
+      prompt: "Original",
+    },
+  });
+  await wrapper.get('[data-test="video-scene-a-up"]').trigger("click");
+  expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+  await wrapper.get('[data-test="video-scene-b-up"]').trigger("click");
+  const moved = wrapper
+    .emitted("update:modelValue")!
+    .at(-1)![0] as VideoDurationAuthoring;
+  expect(moved.scenes.map((scene) => scene.prompt)).toEqual([
+    "Second",
+    "First",
+  ]);
+  expect(moved.durationMs).toBe("3000");
+  await wrapper.get('[data-test="video-scene-a-prompt"]').setValue("");
+  const invalid = wrapper
+    .emitted("update:modelValue")!
+    .at(-1)![0] as VideoDurationAuthoring;
+  expect(invalid.scenes).toHaveLength(2);
+  expect(invalid.scenes[0]?.prompt).toBe("");
+});

@@ -4,6 +4,10 @@ import Foundation
 /// server, ask anyway" -- kept beside `Capabilities+Reading`'s own answers so
 /// a client never reads a raw `Bool?` and guesses.
 public extension Capabilities {
+    /// Positive support guarantees the destination-instance header is enforced.
+    /// Older hosts silently ignore that header and are unsafe restart targets.
+    var canRestartChain: Bool { queue?.chainRestart == true }
+    var canControlRestartedChain: Bool { canRestartChain && queue?.chainRestartControls == true }
     /// Whether this machine can stop work that has already STARTED.
     ///
     /// Absence is a definitive no, and unusually it is the server that says

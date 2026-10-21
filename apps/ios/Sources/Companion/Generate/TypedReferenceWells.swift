@@ -138,7 +138,7 @@ struct TypedReferenceWells: View {
     private var importHost: MoldHost? { generate.referenceImportTarget }
     private var currentFence: ReferenceImportFence {
         ReferenceImportFence(model: generate.modelName, host: generate.target?.id,
-            recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) })
+            recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) }, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner)
     }
     private func openFiles(replacing reference: AuthoringReference? = nil, at index: Int? = nil) {
         replacementIndex = index
@@ -160,7 +160,7 @@ struct TypedReferenceWells: View {
                     let reference = try await GenerationReferenceImporter.loadAuthoring(url: url, capabilities: uploadCapabilities, apiKey: capturedHost?.apiKey)
                     try Task.checkCancellation()
                     guard fence.isCurrent(model: generate.modelName, host: generate.target?.id,
-                                          recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) }) else {
+                                          recipe: generate.recipe, media: generate.draft.media, authority: importHost, instance: importHost.flatMap { generate.hosts.instanceID(of: $0.id) }, videoSource: generate.videoDuration?.draft.source, videoSourceOwner: generate.videoDuration?.sourceOwner) else {
                         throw ReferenceImportError("Attachments changed while choosing. Choose the file again.")
                     }
                     var media = generate.draft.media

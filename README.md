@@ -319,17 +319,32 @@ black borders, `lanczos-resize` stretches.
 mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
 ```
 
-For several clips, use **Add clip** in the apps or a CLI/API script. Library **Continue video** makes the next separate linked part on the original machine. LTX-2 uses a
-latent motion tail; image-conditioned Wan and H3 FL2VA can continue from the
-last frame. Text-only Wan, legacy LTX-Video and H3 Ref2VA join independent
-clips. H3 sequences require an H3-enabled server. A complete script and job
-recovery workflow are in the [video guide](https://utensils.io/mold/guide/video#multi-prompt-scripts).
+For longer videos, enter one prompt and choose **Duration** in the apps. The
+length summary shows the selected model's single-render limit and clip count.
+**Define scenes** optionally gives each scene its own prompt. Library **Extend
+video** adds another prompt and duration, publishing the original plus extension
+as a new movie. The original stays in Library.
+
+```bash
+mold --host plato run MODEL "a paper boat drifts along a sunlit stream" --duration 30
+mold --host plato run "the boat passes under a bridge" --extend-library PRINT.mp4 --duration 10
+```
+
+The server renders one bounded clip at a time and publishes one joined MP4 in
+its active `MOLD_HOME` Library. The recipe selects continuous context or blended
+independent clips; independent clips use different seeds. There is no fixed
+overall duration cap. Each clip must still fit the selected host's memory.
+H3 requires an H3-enabled server. `--output` downloads an additional copy onto
+the CLI machine. Keep the printed video UUID and inspect it after a disconnect.
+See the [video guide](https://utensils.io/mold/guide/video#longer-videos).
 
 Failed video generations retain their inputs in the durable queue for safe
 movement to another machine. `mold jobs restart ID --to HOST` starts a separate
-attempt of an unlinked failed sequence using the destination's current recipe,
+attempt using the destination's current recipe,
 while keeping the original job recoverable. Exact Resume preserves its frozen recipe.
 Web and Tauri Queue expose the same choice as **Start again…**. Updated machines also offer **Delete recovery data…** for failed/interrupted jobs, with a separate confirmation that preserves saved Library videos.
+
+For advanced frame-level scripts and separate linked parts:
 
 ```bash
 mold chain validate shot.toml

@@ -1,0 +1,3 @@
+### Added
+
+- Web, Tauri desktop and mobile can request a video duration with one prompt, optionally define scenes, extend an existing Library video into a longer saved movie, and manage durable parent jobs with exact-machine recovery, Restart and Send controls.

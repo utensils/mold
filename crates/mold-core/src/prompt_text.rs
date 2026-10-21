@@ -76,7 +76,34 @@ fn protect_prompt_for_wire(prompt: &mut String) {
     }
 }
 
-pub(crate) fn protect_generate_request_for_wire(
+/// Canonical request-scope identity shared with legacy preparation endpoints.
+/// Call only on a scope copy: literal inference requests keep their exact text.
+/// Backslash escapes remain literal; only actual platform line endings agree.
+#[doc(hidden)]
+pub fn normalize_real_line_endings_for_scope(request: &mut crate::GenerateRequest) {
+    fn normalize(text: &mut String) {
+        if text.contains('\r') {
+            *text = text.replace("\r\n", "\n").replace('\r', "\n");
+        }
+    }
+    normalize(&mut request.prompt);
+    for text in [&mut request.negative_prompt, &mut request.original_prompt]
+        .into_iter()
+        .flatten()
+    {
+        normalize(text);
+    }
+    if let Some(transform) = request.prompt_transform.as_mut() {
+        if let Some(root) = transform.root_prompt.as_mut() {
+            normalize(root);
+        }
+        normalize(&mut transform.source_prompt);
+    }
+}
+
+/// Protect literal prompt backslashes when sending a request to legacy input endpoints.
+#[doc(hidden)]
+pub fn protect_generate_request_for_wire(
     request: &crate::GenerateRequest,
 ) -> crate::GenerateRequest {
     let mut wire = request.clone();
@@ -94,6 +121,25 @@ pub(crate) fn protect_generate_request_for_wire(
         protect_prompt_for_wire(&mut transform.source_prompt);
     }
     wire
+}
+
+/// Read a server-authored literal chain snapshot. Legacy public admission still
+/// normalizes shell escapes; v3 manifests must never apply that input transform.
+pub fn chain_request_from_literal_json(json: &str) -> serde_json::Result<crate::ChainRequest> {
+    let raw: serde_json::Value = serde_json::from_str(json)?;
+    let mut request: crate::ChainRequest = serde_json::from_value(raw.clone())?;
+    if let (Some(transform), Some(value)) = (
+        request.prompt_transform.as_mut(),
+        raw.get("prompt_transform"),
+    ) {
+        transform.root_prompt = value
+            .get("root_prompt")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        // Typed deserialization above already checked the required string.
+        transform.source_prompt = value["source_prompt"].as_str().unwrap().to_owned();
+    }
+    Ok(request)
 }
 
 /// Prepare a canonical chain for the legacy-compatible HTTP prompt boundary.
@@ -163,6 +209,15 @@ pub(crate) fn protect_retake_request_for_wire(
     wire
 }
 
+/// Read logical metadata serialized by Mold without reapplying legacy prompt
+/// escapes. Request parsing keeps its existing single-pass normalization.
+pub fn output_metadata_from_literal_json(input: &str) -> serde_json::Result<crate::OutputMetadata> {
+    let mut deserializer = serde_json::Deserializer::from_str(input);
+    let metadata = crate::video_job::deserialize_literal_metadata(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -173,6 +228,33 @@ mod tests {
     use crate::{
         ChainRequest, ExpandRequest, GenerateRequest, OutputMetadata, RemixRequest, Scheduler,
     };
+
+    #[test]
+    fn gallery_wire_and_stored_metadata_keep_literal_prompts_and_full_seed() {
+        let request: GenerateRequest = serde_json::from_value(
+            serde_json::json!({"model":"test","prompt":"scene","width":64,"height":64,"steps":1}),
+        )
+        .unwrap();
+        let mut metadata = OutputMetadata::from_generate_request(&request, u64::MAX, None, "test");
+        metadata.prompt = r"scene\npath".into();
+        metadata.negative_prompt = Some(r"bad\ttext".into());
+        let json = serde_json::to_string(&metadata).unwrap();
+        let stored = super::output_metadata_from_literal_json(&json).unwrap();
+        assert_eq!(stored.prompt, metadata.prompt);
+        assert_eq!(stored.negative_prompt, metadata.negative_prompt);
+        assert_eq!(stored.seed, u64::MAX);
+        assert!(super::output_metadata_from_literal_json(&(json + " trailing")).is_err());
+        let gallery: crate::GalleryImage = serde_json::from_value(
+            serde_json::json!({"filename":"literal.mp4","metadata":metadata,"timestamp":1}),
+        )
+        .unwrap();
+        assert_eq!(gallery.metadata.prompt, r"scene\npath");
+        assert_eq!(
+            gallery.metadata.negative_prompt.as_deref(),
+            Some(r"bad\ttext")
+        );
+        assert_eq!(gallery.metadata.seed, u64::MAX);
+    }
 
     #[test]
     fn decodes_literal_and_platform_newlines() {
@@ -234,8 +316,8 @@ mod tests {
         assert_eq!(transform.root_prompt.as_deref(), Some("root\n\nidea"));
         assert_eq!(transform.source_prompt, "source\nprompt");
 
-        // Legacy embedded metadata is deserialized through the same contract,
-        // so Library and Reuse settings improve without regenerating a print.
+        // Direct legacy metadata parsing keeps its historical normalization.
+        // Authoritative stored Gallery data uses the explicit literal reader.
         let metadata =
             OutputMetadata::from_generate_request(&request, 42, Some(Scheduler::Ddim), "test");
         let mut wire = serde_json::to_value(metadata).unwrap();

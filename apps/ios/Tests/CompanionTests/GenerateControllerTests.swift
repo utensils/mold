@@ -13,6 +13,59 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func orphanedRestartReceiptKeepsQueueRecoveryVisibleWithoutMachines() async throws {
+        let (original, _) = try await setUp()
+        let host = try #require(original.hosts.hosts.first)
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let record: [String:Any] = ["operation_id":"pending", "destination_host_id":host.id.uuidString,
+            "destination_origin":host.baseURL.absoluteString, "destination_instance_id":"installation",
+            "destination_mode":host.connectionMode.rawValue, "source_host_id":UUID().uuidString,
+            "source_job_id":"source", "source_instance_id":"original", "source_revision":"revision",
+            "protocol_kind":"videoJob", "cancel_requested":false, "cancel_acknowledged":false]
+        defaults.set(try JSONSerialization.data(withJSONObject: [record]), forKey: VideoRestartController.journalKey)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts,
+            videoRestarts: VideoRestartController(defaults: defaults))
+        original.hosts.setHosts([])
+        #expect(original.hosts.hosts.isEmpty)
+        #expect(restored.hasVideoQueueContent)
+    }
+
+    @Test func failedExtensionBlocksExistingDraftUntilExplicitAcknowledgement() async throws {
+        let (generate, _) = try await setUp()
+        let original = generate.draft, token = generate.durationSourceToken
+        generate.durationSourceError = "Original controls cannot be preserved. Use Start again or CLI."
+        generate.durationError = generate.durationSourceError
+        #expect(generate.blocker == generate.durationSourceError)
+        generate.keepDraftAfterSourceFailure()
+        #expect(generate.durationSourceError == nil && generate.durationError == nil)
+        #expect(generate.durationSourceToken != token)
+        #expect(generate.draft == original)
+    }
+
+    @Test func pinnedSourceUsesItsOwnInstalledModelContract() async throws {
+        let (generate, _) = try await setUp()
+        let first = try #require(generate.hosts.hosts.first)
+        let second = MoldHost(name: "Original video machine", baseURL: URL(string: "http://10.0.0.5:7680")!)
+        let local = try model()
+        let remote = try MoldJSON.decoder.decode(Model.self, from: Data(
+            #"{"name":"flux-dev:q4","family":"flux","description":"Original machine recipe","downloaded":true}"#.utf8))
+        generate.hosts.setHosts([first, second])
+        generate.hosts.setReachability(try #require(generate.hosts.reachability[first.id]), for: second.id)
+        generate.hosts.setModels([local], for: first.id)
+        generate.hosts.setModels([remote], for: second.id)
+        generate.machine = .pinned(second.id)
+        generate.modelName = remote.name
+        #expect(generate.model?.description == "Original machine recipe")
+    }
+
+    @Test func openingAnExtensionBlocksOldComposerUntilSourceInspectionCompletes() async throws {
+        let (generate, _) = try await setUp()
+        generate.durationSourceLoading = true
+        #expect(generate.blocker == "Checking original video inputs…")
+        generate.durationSourceLoading = false
+        #expect(generate.blocker != "Checking original video inputs…")
+    }
+
     @Test func restoredAuthoredDraftKeepsClipComposerWhenOrdinaryDraftIsUnavailable() async throws {
         let (original, _) = try await setUp()
         let sequence = NativeSequenceSession(defaults: UserDefaults(suiteName: UUID().uuidString)!)

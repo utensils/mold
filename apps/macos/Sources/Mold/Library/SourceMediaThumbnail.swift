@@ -90,7 +90,7 @@ struct SourceMediaTile: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(current.member.sourceLabel), \(source.usages.count) uses, \(current.owner.hostName)")
         .accessibilityIdentifier("source-media-tile")
-        .contextMenu { Button("Details and Reuse", systemImage: "info.circle") { showingDetails = true } }
+        .rowActionMenu([RowAction(kind: true, title: "Details and Reuse")], perform: { _ in showingDetails = true })
         .onChange(of: current.id, initial: true) { _, id in preferredID = id }
         .sheet(isPresented: $showingDetails) {
             SourceMediaDetails(source: source, initial: current.id, gallery: true, openOwner: openOwner)

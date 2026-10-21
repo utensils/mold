@@ -1038,6 +1038,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
         fps: row.get::<_, Option<i64>>(21)?.map(|n| n as u32),
         chain_job_id: None,
         chain: None,
+        video_job: None,
         // A row reconstructed from the legacy columns knows nothing about a
         // 3-D workflow; the field only ever arrives with the saved JSON.
         mesh_workflow: None,
@@ -1062,7 +1063,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Generat
     let trashed_at_ms: Option<i64> = row.get(31)?;
     let metadata = metadata_json
         .as_deref()
-        .and_then(|json| serde_json::from_str::<OutputMetadata>(json).ok())
+        .and_then(|json| mold_core::prompt_text::output_metadata_from_literal_json(json).ok())
         .unwrap_or(legacy_metadata);
     Ok(GenerationRecord {
         id: Some(row.get(0)?),
@@ -1241,6 +1242,7 @@ mod tests {
             fps: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: "0.8.1".into(),
             id_image_name: None,
             id_image_sha256: None,
@@ -1275,6 +1277,42 @@ mod tests {
             favorite: false,
             trashed_at_ms: None,
         }
+    }
+
+    #[test]
+    fn stored_gallery_metadata_preserves_literal_prompts_and_full_seed() {
+        let db = MetadataDb::open_in_memory().unwrap();
+        let mut record = rec();
+        record.metadata.prompt = r"a\npath\tframe".into();
+        record.metadata.negative_prompt = Some(r"bad\rtext\n".into());
+        record.metadata.seed = u64::MAX;
+        db.upsert(&record).unwrap();
+        let loaded = db
+            .get(Path::new(&record.output_dir), &record.filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.metadata.prompt, record.metadata.prompt);
+        assert_eq!(
+            loaded.metadata.negative_prompt,
+            record.metadata.negative_prompt
+        );
+        assert_eq!(loaded.metadata.seed, u64::MAX);
+    }
+
+    #[test]
+    fn serialized_gallery_record_preserves_literal_metadata() {
+        let mut record = rec();
+        record.metadata.prompt = r"clip\npath".into();
+        record.metadata.negative_prompt = Some(r"bad\ttext".into());
+        record.metadata.seed = u64::MAX;
+        let loaded: GenerationRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(loaded.metadata.prompt, record.metadata.prompt);
+        assert_eq!(
+            loaded.metadata.negative_prompt,
+            record.metadata.negative_prompt
+        );
+        assert_eq!(loaded.metadata.seed, u64::MAX);
     }
 
     #[test]

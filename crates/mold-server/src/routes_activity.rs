@@ -485,6 +485,70 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
         });
     }
 
+    if let Some(database) = state.metadata_db.as_ref().as_ref() {
+        match mold_db::video_jobs::list_page(database, 256, true, None) {
+            Ok(page) => {
+                if page.has_more {
+                    unavailable_kinds.push("video_job_history".into());
+                }
+                for job in page.jobs {
+                    items.push(ActiveWorkItem {
+                        id: job.id,
+                        kind: "video_job".into(),
+                        execution: Some("video_job".into()),
+                        phase: if job.can_cancel {
+                            match job.state {
+                                mold_core::video_job::VideoJobState::Queued => "queued",
+                                mold_core::video_job::VideoJobState::Paused => "paused",
+                                _ => "running",
+                            }
+                        } else {
+                            match job.state {
+                                mold_core::video_job::VideoJobState::Failed => "failed",
+                                mold_core::video_job::VideoJobState::Interrupted => "interrupted",
+                                _ => "cancelling",
+                            }
+                        }
+                        .into(),
+                        model: Some(job.plan.model),
+                        created_at_unix_ms: nonnegative_ms(job.created_at_ms),
+                        updated_at_unix_ms: nonnegative_ms(job.updated_at_ms),
+                        position: None,
+                        current: Some(job.completed_clips),
+                        total: Some(job.plan.clip_count),
+                        stage: None,
+                        preparation_progress: None,
+                        can_cancel: job.can_cancel,
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error,"Could not project durable video queue");
+                unavailable_kinds.push("video_job".into());
+            }
+        }
+        // Parent and stage ownership is persisted before child admission, so
+        // neither a crash nor missing activity sidecar exposes internal work.
+        items.retain(|item| {
+            if item.kind == "video_job" {
+                return true;
+            }
+            let chain_owned = mold_db::video_job_child_owners::parent_id(database, &item.id);
+            let stage_owned =
+                mold_db::chain_stage_generations::owner_for_generation(database, &item.id);
+            match (chain_owned, stage_owned) {
+                (Ok(owner), Ok(stage)) => owner.is_none() && stage.is_none(),
+                _ => {
+                    unavailable_kinds.push("video_job".into());
+                    unavailable_kinds.push(item.kind.clone());
+                    false
+                }
+            }
+        });
+    } else {
+        unavailable_kinds.push("video_job".into());
+    }
+
     collapse_chain_stage_activity(&mut items, &chain_child_parents);
 
     items.sort_by_key(|item| (item.position.unwrap_or(usize::MAX), item.created_at_unix_ms));
@@ -500,6 +564,27 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
 mod tests {
     use super::*;
     use mold_core::queue_progress::QueueJobProgress;
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn durable_video_parent_is_discoverable_after_failure_without_child_rows() {
+        let mut state = AppState::for_tests();
+        state.metadata_db =
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let mut row = crate::video_job_manifest::tests::fixture();
+        row.job.state = mold_core::video_job::VideoJobState::Failed;
+        row.job.can_cancel = false;
+        mold_db::video_jobs::insert(state.metadata_db.as_ref().as_ref().unwrap(), &row).unwrap();
+        let Json(snapshot) = list_active_work(State(state)).await;
+        let parent = snapshot
+            .items
+            .iter()
+            .find(|item| item.id == row.job.id)
+            .expect("durable parent must remain visible");
+        assert_eq!(parent.kind, "video_job");
+        assert_eq!(parent.phase, "failed");
+        assert!(!parent.can_cancel);
+    }
 
     #[tokio::test]
     async fn failed_and_interrupted_chain_parents_remain_discoverable_for_explicit_recovery() {

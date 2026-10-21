@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
 import type { SourceMediaOwner, SourceMediaSelection } from "@studio/lib/sourceMediaBrowser";
@@ -162,6 +163,7 @@ const props = withDefaults(
   },
 );
 
+const extendVideoAvailable = ref(false);
 const emit = defineEmits<{
   "continue-published": [
     value: { filename: string; owner: import("@studio/api/chainJobs").ChainOwner },
@@ -1831,8 +1833,20 @@ onBeforeUnmount(() => {
           >
             {{ usingSource ? "Loading source…" : "Use as source" }}
           </button>
+          <VideoExtendButton
+            v-if="!trashed && video"
+            :owner="{
+              hostId: (item as { hostId?: string }).hostId ?? cacheKey,
+              label: hostName,
+              instanceId,
+              target,
+            }"
+            :filename="item.filename"
+            :metadata="item.metadata"
+            @available="extendVideoAvailable = $event"
+          />
           <VideoClips
-            v-if="!trashed && item.metadata.chain_job_id"
+            v-if="!extendVideoAvailable && !trashed && item.metadata.chain_job_id"
             :source="{ jobId: item.metadata.chain_job_id, filename: item.filename }"
             :owner="{
               hostId: (item as { hostId?: string }).hostId ?? cacheKey,

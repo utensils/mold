@@ -305,3 +305,32 @@ describe("gallery retained source media API", () => {
     );
   });
 });
+it("protects all legacy reuse scope prompt fields without changing the later literal video body", async () => {
+  const text = String.raw`C:\new\render` + "\r\nActual line";
+  const request = {
+    prompt: text,
+    negative_prompt: text,
+    original_prompt: text,
+    prompt_transform: { source_prompt: text, root_prompt: text },
+  };
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(Response.json({ session_handle: "one-use" }));
+  await createRetainedSourceMediaReuseSession(
+    "original.mp4",
+    ["input"],
+    request,
+    { baseUrl: "http://plato", apiKey: "private" },
+  );
+  const wire = JSON.parse(
+    String(fetchMock.mock.calls[0]![1]!.body),
+  ).target_request;
+  expect(wire.prompt).toBe(text.replaceAll("\\", "\\\\"));
+  expect(wire.negative_prompt).toBe(text.replaceAll("\\", "\\\\"));
+  expect(wire.original_prompt).toBe(text.replaceAll("\\", "\\\\"));
+  expect(wire.prompt_transform).toEqual({
+    source_prompt: text.replaceAll("\\", "\\\\"),
+    root_prompt: text.replaceAll("\\", "\\\\"),
+  });
+  expect(request.prompt_transform.root_prompt).toBe(text);
+});

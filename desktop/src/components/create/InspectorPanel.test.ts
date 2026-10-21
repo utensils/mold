@@ -1393,3 +1393,10 @@ function noteModel(
     },
   } as unknown as ModelEntry;
 }
+it("keeps the clip FPS card but gives duration to the single shared editor", () => {
+  const form = formFor("ltx2");
+  form.model = "ltx-2-19b-distilled:fp8";
+  const wrapper = mount(InspectorPanel, { props: { form, durationActive: true } });
+  expect(wrapper.findComponent(VideoDurationSlider).exists()).toBe(false);
+  expect(wrapper.find('[data-test="clip-fps"]').exists()).toBe(true);
+});

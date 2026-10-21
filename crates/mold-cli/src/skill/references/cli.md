@@ -308,39 +308,87 @@ only for a host with no saved credential. Never paste an API key into a prompt
 or command example; supply one only through the user's existing environment or
 approved secret store at execution time.
 
-## Duration without a script
+## Longer videos
 
-For one continuous prompt, ask the CLI for seconds instead of calculating frames
-or writing an external continuation script. Inspect the selected server first:
+Choose the requested host and a video model from `mold --host HOST list --json`.
+Use one prompt and a duration in seconds; decimal seconds are accepted:
 
 ```bash
-mold list --json --host plato
-mold chain limits minimax-h3-fl2va:fasth3-v2-int8 --json --host plato
-mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a sunlit garden" --duration 45 --dry-run --host plato
-mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a sunlit garden" --duration 45 --host plato --output garden.mp4
+mold --host HOST run MODEL "a paper boat drifts down a sunlit stream" --duration 30
 ```
 
-`--duration` uses the selected model's FPS and frame grid. H3 uses fixed 24 FPS;
-long FL2VA videos automatically use durable server-side continuation and publish
-one stitched MP4 with audio. FL2VA without endpoints is text-to-video; a separate
-`t2va` model name is unnecessary. Opening and closing images apply to the outer
-boundaries. Ref2VA's independent clips require an authored `--script` instead.
-The preview reports delivered frames, duration and each clip; frame grids and
-seam trims may make the delivered duration slightly longer than requested.
-`--dry-run` performs no generation or prompt expansion. Each part remains bounded
-by the server's limits; it is not an unlimited-duration promise. LTX-2 and
-continuation-capable Wan recipes also accept seconds; text-only Wan retains its
-automatic-continuation refusal. Use scripts for changing prompts between clips.
+The CLI prints the model's single-render limit and how many clips will be joined.
+The server renders one clip at a time and publishes one MP4 in its active
+`MOLD_HOME` Library. It carries motion context where the selected recipe supports
+it; independent clips use distinct seeds and a blended join. Duration has no
+fixed overall clip-count limit. The selected model, resolution and available
+memory still determine whether each clip fits. H3 requires an H3-enabled server.
+
+Extend an existing Library movie with a new prompt and **additional** seconds:
+
+```bash
+mold --host HOST run "the boat passes beneath a stone bridge" --extend-library PRINT.mp4 --duration 10
+```
+
+This uses the movie's original model and settings, validates them on that host,
+and publishes the original plus extension as a new movie. The original remains
+in Library. Select a supported model explicitly when a new attempt needs a
+different recipe; never remove required conditioning to force admission.
+
+`--dry-run` validates without submitting. `--detach` returns after acceptance.
+CLI duration jobs publish one Library movie per invocation; batching and skipping
+Library saving are unavailable for this path.
+Use `--duration` with MP4 output; omit frame counts, clip/overlap overrides,
+`--predict-duration`, scripts and post-generation `--upscale`. Arbitrary lengths
+require a server; forced-local H3 keeps its existing bounded single-clip path.
+`--output FILE.mp4` downloads the finished movie onto the **CLI machine**; the
+server publication already goes into the server's active `MOLD_HOME`.
+
+Keep the printed **Video operation** UUID. A lost reply can leave accepted work running:
+inspect that exact UUID before submitting again. `show --json` exposes `state`
+and, once completed, `output_filename`. Download that exact filename, avoiding
+`--latest` when other work may finish concurrently.
+
+```bash
+mold --host HOST jobs show VIDEO_UUID --json
+mold --host HOST jobs resume VIDEO_UUID
+mold --host HOST jobs cancel VIDEO_UUID --video
+mold --host HOST library download PRINT.mp4 --output ./
+```
+
+Resume preserves the frozen model and completed clips. **Start again** uses a
+fresh attempt with the original inputs and the destination's current recipe:
+
+```bash
+mold --host SOURCE jobs restart VIDEO_UUID
+mold --host SOURCE jobs restart VIDEO_UUID --to DESTINATION
+```
+
+Keep the new operation UUID too. To reconcile a lost submission reply, repeat the original duration command
+(or `jobs restart` command) with the same `--operation-id UUID` from the same
+CLI installation. A repeated `run` command still requires `--duration`. Do not invent
+a replacement UUID or retry against another server installation. A pending
+submission can be stopped with `mold --host HOST jobs cancel UUID --video` even
+before it appears in Queue. Machine-local adapters require the original host.
+
+Apps default to one prompt plus **Duration** and show the single-render limit
+and planned clip count. **Define scenes** is optional. Library **Extend video**
+adds a prompt and duration. Discord `/video make` follows the same duration path;
+`/video extend` takes an exact Library filename. Discord recovery commands use
+the complete `UUID@INSTANCE_UUID` receipt printed before submission.
 
 ## Scripted sequences
 
 Use `mold run --script` for several video clips stitched into one output.
-Apps offer Add clip and Library Continue video. For agent workflows, use the CLI below and verify the published output on the requested host. Start with the selected host and model:
+Use scripts when exact per-stage frames and transitions are required. For a
+single prompt and a requested length, use [Longer videos](#longer-videos).
+Start with the selected host and model:
 
 ```bash
 mold host list
 mold ps --host workstation
 mold list --json --host workstation
+mold chain limits MODEL --json --host workstation
 ```
 
 `--host` selects a saved secure pairing. If running the CLI on the server
@@ -414,9 +462,8 @@ If exact Resume refuses an old frozen recipe, start a **new attempt**:
 mold jobs restart JOB_ID --host SOURCE --to DESTINATION
 ```
 
-Omit `--to` for the
-original machine. The destination must advertise safe restart support; update
-older servers first. This revalidates today's destination recipe and keeps the
+Omit `--to` for the original machine. The destination must advertise safe restart
+support; update older servers first. This revalidates today's destination recipe and keeps the
 original job. Keep the printed operation UUID; after a lost reply, inspect that
 UUID on the destination and repeat with `--operation-id UUID` to reconcile it.
 Linked parts explicitly refuse restart, and machine-local adapters refuse Send;

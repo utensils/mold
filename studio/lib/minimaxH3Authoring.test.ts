@@ -1040,3 +1040,30 @@ it("keeps parked fresh video candidates out of other recipes' preparation and es
   expect(hasActiveFreshVideoReferences(state, "single")).toBe(false);
   expect(hasActiveFreshVideoReferences(state, "references")).toBe(false);
 });
+it("uses an authenticated video's incoming boundary and retained references without fabricating media", () => {
+  expect(
+    minimaxH3AuthoringError(
+      "minimax-h3",
+      "minimax-h3-fl2va",
+      emptyMinimaxH3AuthoringState(),
+      true,
+      { incomingBoundary: true },
+    ),
+  ).toBeNull();
+  expect(
+    minimaxH3AuthoringError(
+      "minimax-h3",
+      "minimax-h3-ref2va",
+      emptyMinimaxH3AuthoringState(),
+      false,
+      { retainedReferences: true },
+    ),
+  ).toBeNull();
+  expect(
+    minimaxH3AuthoringError(
+      "minimax-h3",
+      "minimax-h3-ref2va",
+      emptyMinimaxH3AuthoringState(),
+    ),
+  ).toContain("Add at least");
+});

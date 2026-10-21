@@ -1,4 +1,5 @@
 use std::process::Command;
+mod build_git_watch;
 
 /// Keep in sync with `build_info::SHORT_SHA_LENGTH`, which pins the display
 /// width so chrome layouts cannot be shifted by the exact SHA's length.
@@ -73,9 +74,11 @@ fn main() {
     println!("cargo:rustc-env=MOLD_FULL_VERSION={full_version}");
 
     // Rerun when HEAD changes (new commit, branch switch, etc.)
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs");
-    println!("cargo:rerun-if-changed=../../.git/packed-refs");
+    // Linked worktrees have a .git FILE. Missing watched paths cause Cargo to
+    // rerun this script and rebuild every dependent crate on every invocation.
+    for path in build_git_watch::watch_paths(std::path::Path::new(".")) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
     println!("cargo:rerun-if-env-changed=MOLD_GIT_SHA");
     println!("cargo:rerun-if-env-changed=MOLD_BUILD_DATE");
     println!("cargo:rerun-if-env-changed=MOLD_BUILD_CHANNEL");

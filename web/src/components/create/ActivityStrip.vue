@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoJobControl from "@studio/components/VideoJobControl.vue";
 /*
  * Activity strip (Mold Studio Create) — the "Activity" row above the composer,
  * and it is present tense. Active jobs show a shimmer thumb + prompt + mono
@@ -267,6 +268,12 @@ const active = computed(
 
     <template v-for="row in activeRows" :key="row.key">
       <div v-if="row.kind === 'shared'" class="activity__shared">
+        <VideoJobControl
+          v-if="row.shared.kind === 'video_job'"
+          :host-id="row.shared.hostId"
+          :job-id="row.shared.id"
+          :instance-id="row.shared.instanceId"
+        />
         <VideoRestartControl
           :host-id="row.shared.hostId"
           :job-id="row.shared.id"

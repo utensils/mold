@@ -19,7 +19,7 @@ describe("MobileApp prompt requirement", () => {
   it("derives the Develop gate from the shared predicate", () => {
     expect(mobileAppSource).toContain('from "@studio/lib/promptRequirement"');
     expect(mobileAppSource).toMatch(
-      /const promptMissing = computed\(\s*\(\) => promptRequired\(promptConditioning\.value\) && !form\.prompt\.trim\(\),?\s*\);/,
+      /const promptMissing = computed\(\s*\(\) =>\s*!videoDurationRef\.value\?\.scenesActive\.value &&\s*promptRequired\(promptConditioning\.value\) &&\s*!form\.prompt\.trim\(\),?\s*\);/,
     );
   });
 

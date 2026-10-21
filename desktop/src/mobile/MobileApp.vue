@@ -1,10 +1,23 @@
 <script setup lang="ts">
+import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
+import VideoJobHistory from "@studio/components/VideoJobHistory.vue";
+import { takeVideoLibraryExtension } from "@studio/lib/videoLibraryExtensionHandoff";
+import {
+  VIDEO_LIBRARY_EXTENSION_NAVIGATION,
+  pendingVideoLibraryExtension,
+} from "@studio/lib/videoLibraryExtensionHandoff";
+
+import { durationVideoCopies } from "@studio/lib/videoDurationAuthoring";
+import { VIDEO_LIBRARY_NAVIGATION } from "@studio/lib/videoLibraryNavigation";
+import VideoDurationEditor from "@studio/components/VideoDurationEditor.vue";
+import VideoJobControl from "@studio/components/VideoJobControl.vue";
+import { createVideoDurationAuthoring } from "@studio/composables/useVideoDurationAuthoring";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { jobStallLabel, parseQueueCancellationResponse } from "@studio/lib/jobStall";
 import { hasActiveFreshVideoReferences } from "@studio/lib/minimaxH3Authoring";
 import { prepareH3VideoReferences } from "@studio/lib/prepareH3VideoReferences";
 import type { ReferenceUploadLease } from "@studio/api/referenceUploads";
-import { provide } from "vue";
+import { provide, shallowRef } from "vue";
 import {
   SOURCE_ATTACHMENT_CHOICES,
   imageAttachmentChoices,
@@ -948,6 +961,16 @@ watch(
   { deep: true },
 );
 const form = reactive<GenerateForm>(newGenerateForm());
+const incomingVideoBoundary = computed(
+  () =>
+    !!videoDurationRef.value?.draft.value?.extension &&
+    videoDurationRef.value?.planner.plan.value?.join_mode === "continuous",
+);
+const originalVideoReferences = computed(
+  () => !!videoDurationRef.value?.draft.value?.extension?.references.length,
+);
+const videoDurationRef = shallowRef<ReturnType<typeof createVideoDurationAuthoring> | null>(null);
+const videoFormRevision = ref(0);
 const clipsActive = ref(false);
 const clipsPinned = ref<{ hostId: string; model: string } | null>(null);
 const videoClipsRef = ref<InstanceType<typeof VideoClips> | null>(null);
@@ -1424,6 +1447,13 @@ interface HostTelemetry {
 }
 const hostTelemetry = reactive<Record<string, HostTelemetry>>({});
 
+provide(VIDEO_LIBRARY_NAVIGATION, (value) => {
+  void openContinuedVideo(value);
+});
+provide(VIDEO_LIBRARY_EXTENSION_NAVIGATION, (value) => {
+  pendingVideoLibraryExtension.value = value;
+  tab.value = "generate";
+});
 const queueTransfer = provideHeldQueueTransfer(
   computed(() =>
     connectedHosts.value.flatMap((host) =>
@@ -1806,6 +1836,10 @@ const h3AuthoringError = computed(() =>
     form.model,
     form.h3Authoring,
     caps.value.requiresSourceImage,
+    {
+      incomingBoundary: incomingVideoBoundary.value,
+      retainedReferences: originalVideoReferences.value,
+    },
   ),
 );
 const effectiveBatchSize = computed(() =>
@@ -2434,7 +2468,9 @@ const sourceControlsValid = computed(() => !caps.value.supportsImg2img || source
  * dead end. It also covers the case the well cannot report at all: an
  * advertised text-to-video checkpoint hides the well entirely.
  */
-const sourceConditioningError = computed(() => sourceConditioningValidationError(form));
+const sourceConditioningError = computed(() =>
+  sourceConditioningValidationError(form, { incomingVideoBoundary: incomingVideoBoundary.value }),
+);
 /**
  * Face identity (#1224). The well renders on positive capability only, and a
  * photo staged before a capability-losing model switch is PARKED — retained in
@@ -2544,12 +2580,16 @@ const promptConditioning = computed(() =>
   ),
 );
 const promptMissing = computed(
-  () => promptRequired(promptConditioning.value) && !form.prompt.trim(),
+  () =>
+    !videoDurationRef.value?.scenesActive.value &&
+    promptRequired(promptConditioning.value) &&
+    !form.prompt.trim(),
 );
 const promptFieldPlaceholder = computed(() =>
   promptPlaceholder(promptConditioning.value, "Describe the print…"),
 );
 const developBlockerReason = computed<string | null>(() => {
+  if (videoDurationRef.value?.blocker.value) return videoDurationRef.value.blocker.value;
   if (!composerDraftReady.value) return "Restoring your unfinished draft…";
   if (composerDraftError.value) return composerDraftError.value;
   if (composerDraftMissing.value.length)
@@ -2588,6 +2628,7 @@ const developDisabled = computed(
 const estimateRequest = computed(() => {
   if (
     clipsActive.value ||
+    videoDurationRef.value?.visible.value ||
     !form.model ||
     hasActiveFreshVideoReferences(form.h3Authoring, caps.value.sourceImageMode)
   )
@@ -3556,7 +3597,22 @@ function sharedQueueRowActions(row: FleetActiveWork): SwipeRowAction[] {
   return actions.length ? actions : [{ id: "details", label: "Details" }];
 }
 
+const durationQueueSelection = ref<{
+  id: string;
+  hostId: string;
+  instanceId: string | null;
+  token: string;
+} | null>(null);
 function inspectSharedQueueEntry(row: FleetActiveWork): void {
+  if (row.kind === "video_job") {
+    durationQueueSelection.value = {
+      id: row.id,
+      hostId: row.hostId,
+      instanceId: row.instanceId,
+      token: crypto.randomUUID(),
+    };
+    return;
+  }
   inspectQueueEntry(`shared:${row.key}`);
 }
 async function restoreQueueDetailSettings(): Promise<void> {
@@ -3781,6 +3837,11 @@ let mobileLiveWorkSelectionEpoch = 0;
  *  runs as a chain has no client-restorable request, so it opens its machine
  *  instead of pretending to reload settings it never carried. */
 async function openMobileLiveWork(row: FleetActiveWork): Promise<void> {
+  if (row.kind === "video_job") {
+    tab.value = "generate";
+    inspectSharedQueueEntry(row);
+    return;
+  }
   const epoch = ++mobileLiveWorkSelectionEpoch;
   const host = connectedHosts.value.find((candidate) => candidate.id === row.hostId);
   if (!host) {
@@ -7323,6 +7384,8 @@ async function generate(): Promise<void> {
     return;
   clearSelectedQueueRender();
   fileUnderDropNotice.value = "";
+  const capturedVideoRevision = videoFormRevision.value;
+  const capturedDurationStamp = videoDurationRef.value?.stamp.value;
   const prepared = preparedBatch.value;
   if (
     prepared &&
@@ -7477,6 +7540,7 @@ async function generate(): Promise<void> {
     : draftCaps.forcesBatchSizeOne
       ? 1
       : draft.batchSize;
+  if (videoDurationRef.value?.visible.value) durationVideoCopies(draft.batchSize, batchSize);
   const guardedSubmission = !!preparedSubmission || !!quickSubmission || preparingFreshVideo;
   const liveFormIdentity = guardedSubmission ? JSON.stringify(cloneGenerateForm(form)) : "";
   const capturedFreshRoute = preparingFreshVideo
@@ -7714,7 +7778,9 @@ async function generate(): Promise<void> {
     }
   }
 
-  const chainRouting = decideGenerateRequestRouting(request, draft.family, routingModel);
+  const chainRouting = videoDurationRef.value?.visible.value
+    ? { kind: "single" as const }
+    : decideGenerateRequestRouting(request, draft.family, routingModel);
   if (chainRouting.kind === "reject") {
     setGenerationStatus(chainRouting.reason);
     generationAnnouncement.value = chainRouting.reason;
@@ -7879,6 +7945,40 @@ async function generate(): Promise<void> {
       true,
     );
     releasePreparedSubmission();
+    return;
+  }
+  if (videoDurationRef.value?.visible.value) {
+    const duration = videoDurationRef.value;
+    const plans = preparedReferenceLease
+      ? [preparedReferenceLease.request]
+      : planBatchRequests(request, batchSize, resolveBaseSeed(request.seed), requestOptions);
+    const owner = { ...route, target: { ...route.target, apiKey: route.target.apiKey ?? null } };
+    try {
+      for (const plan of plans)
+        await duration.submitPrepared(owner, plan, {
+          referenceUploads: route.referenceUploads,
+          ...(preparedReferenceLease ? { preparedReferenceLease } : {}),
+          signal: submitSignal,
+          isCurrent: () =>
+            submissionAttempt.isCurrent() &&
+            videoFormRevision.value === capturedVideoRevision &&
+            duration.stamp.value === capturedDurationStamp,
+        });
+      preparedLeaseHandedOff = true;
+      retainedSourceAuthority.invalidate();
+      clearSubmittedExpansionWork(
+        preparedSubmission,
+        quickSubmission,
+        preparedSection,
+        preparedSubmissionOwnedFocus,
+      );
+      setGenerationStatus(plans.length === 1 ? "Video queued" : `${plans.length} videos queued`);
+    } catch (cause) {
+      if (duration.run.admission.value) preparedLeaseHandedOff = true;
+      setGenerationStatus(cause instanceof Error ? cause.message : String(cause), true);
+    } finally {
+      releasePreparedSubmission();
+    }
     return;
   }
   const durablePlans = preparedReferenceLease
@@ -8896,6 +8996,7 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     }
     authoritativeReuseApply = true;
     const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
+    requestVideoDurationReset();
     await nextTick();
     authoritativeReuseApply = false;
     // The print's own saved title comes back with its settings; the Library
@@ -12737,6 +12838,59 @@ function setClipsActive(value: boolean) {
   clipsActive.value = value;
   if (!value) clipsPinned.value = null;
 }
+
+watch(
+  form,
+  () => {
+    videoFormRevision.value += 1;
+  },
+  { deep: true, flush: "sync" },
+);
+const videoDuration = createVideoDurationAuthoring({
+  key: "mold.mobile.video-duration.v1",
+  clip: computed(() => selectedOutputKind.value === "clip"),
+  legacyActive: computed(() => clipsActive.value),
+  supported: computed(() => {
+    const host = clipsOwner.value;
+    const capability = host ? serverCapabilities[host.hostId]?.video_jobs : null;
+    return capability?.supported === true && capability.literal_prompts === true;
+  }),
+  owner: computed(() =>
+    clipsOwner.value
+      ? {
+          ...clipsOwner.value,
+          target: { ...clipsOwner.value.target, apiKey: clipsOwner.value.target.apiKey ?? null },
+        }
+      : null,
+  ),
+  frames: computed(() => form.frames),
+  fps: computed(() => form.fps),
+  generation: computed(() => clipsInput.value.request),
+});
+videoDurationRef.value = videoDuration;
+watch(
+  pendingVideoLibraryExtension,
+  async (value) => {
+    if (!value) return;
+    const selection = takeVideoLibraryExtension();
+    if (!selection) return;
+    try {
+      await selectGenerateTarget(selection.owner.hostId);
+      retainedSourceAuthority.begin();
+      applyMobileGalleryMetadata(
+        form,
+        selection.metadata as unknown as OutputMetadata,
+        generationModels.value,
+      );
+      form.seed = "";
+      await nextTick();
+      videoDuration.extend(selection);
+    } catch (cause) {
+      videoDuration.run.error.value = cause instanceof Error ? cause.message : String(cause);
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -12751,6 +12905,15 @@ function setClipsActive(value: boolean) {
   >
     <OriginalMediaHost />
     <HeldQueueTransferDialog :controller="queueTransfer" />
+    <VideoJobControl
+      v-if="durationQueueSelection"
+      :key="durationQueueSelection.token"
+      :host-id="durationQueueSelection.hostId"
+      :job-id="durationQueueSelection.id"
+      :instance-id="durationQueueSelection.instanceId"
+      :auto-open="true"
+      :hide-trigger="true"
+    />
     <section
       v-if="pairingScannerOpen"
       class="mobile-pair-scanner"
@@ -13247,9 +13410,48 @@ function setClipsActive(value: boolean) {
           <p v-if="caps.promptMode === 'ignored'" class="section-note">
             {{ promptFieldPlaceholder }}
           </p>
+          <VideoDurationEditor
+            v-if="videoDuration.visible.value && videoDuration.draft.value"
+            v-model="videoDuration.draft.value"
+            :prompt="form.prompt"
+            :source-title="videoDuration.draft.value.extension?.title"
+            :source-machine="videoDuration.draft.value.extension?.machine"
+            @start-fresh="videoDuration.reset()"
+            :plan="videoDuration.planner.plan.value"
+            :checking="videoDuration.planner.checking.value"
+            :error="
+              videoDuration.blocker.value ??
+              videoDuration.planner.error.value ??
+              videoDuration.run.error.value
+            "
+            :disabled="preparedSubmitting"
+            @single-prompt="onPromptAuthored($event, 'typed')"
+          />
+          <div
+            v-if="videoDuration.run.admission.value && !videoDuration.run.detail.value"
+            role="status"
+          >
+            Confirming this video on its machine…
+            <button type="button" @click="videoDuration.run.refresh()">Check queue</button>
+            <button
+              type="button"
+              :disabled="videoDuration.run.cancelling.value"
+              @click="videoDuration.run.cancel()"
+            >
+              Stop video
+            </button>
+          </div>
+          <VideoJobControl
+            v-if="videoDuration.run.detail.value && videoDuration.run.owner.value"
+            :job-id="videoDuration.run.detail.value.id"
+            :owner="videoDuration.run.owner.value"
+            :auto-open="true"
+          />
           <VideoClips
             ref="videoClipsRef"
-            :enabled="selectedOutputKind === 'clip' && !preparedBatch"
+            :enabled="
+              selectedOutputKind === 'clip' && !videoDuration.visible.value && !preparedBatch
+            "
             :request="clipsInput.request"
             :reference-authoring="
               caps.sourceImageMode === 'ordered-references' ? form.h3Authoring : null
@@ -13275,7 +13477,9 @@ function setClipsActive(value: boolean) {
             @published="openContinuedVideo"
           />
           <label
-            v-show="!clipsActive && caps.promptMode !== 'ignored'"
+            v-show="
+              !clipsActive && !videoDuration.scenesActive.value && caps.promptMode !== 'ignored'
+            "
             class="field mobile-prompt-field"
           >
             <span>Prompt</span>
@@ -13288,7 +13492,9 @@ function setClipsActive(value: boolean) {
             />
           </label>
           <button
-            v-if="!clipsActive && caps.promptMode !== 'ignored'"
+            v-if="
+              !clipsActive && !videoDuration.scenesActive.value && caps.promptMode !== 'ignored'
+            "
             type="button"
             class="secondary-button"
             data-test="edit-prompt"
@@ -13340,7 +13546,9 @@ function setClipsActive(value: boolean) {
             >
           </PromptEditor>
           <details
-            v-show="!clipsActive && caps.promptMode !== 'ignored'"
+            v-show="
+              !clipsActive && !videoDuration.scenesActive.value && caps.promptMode !== 'ignored'
+            "
             class="mobile-prompt-modifiers"
           >
             <summary>Prompt extras</summary>
@@ -13552,6 +13760,7 @@ function setClipsActive(value: boolean) {
               <small>{{ sourceSectionSummary }}</small>
             </summary>
             <MobileSourceControls
+              :incoming-video-boundary="incomingVideoBoundary"
               :form="form"
               :model="selectedGenerationModel"
               :target="generationTarget"
@@ -13634,6 +13843,7 @@ function setClipsActive(value: boolean) {
           </div>
 
           <MobileSharedParams
+            :duration-active="videoDuration.visible.value"
             section="primary"
             :form="form"
             :model="selectedGenerationModel"
@@ -13734,6 +13944,7 @@ function setClipsActive(value: boolean) {
             @reset="resetAdvancedSettings"
           >
             <MobileSharedParams
+              :duration-active="videoDuration.visible.value"
               section="details"
               :form="form"
               :model="selectedGenerationModel"
@@ -13748,6 +13959,7 @@ function setClipsActive(value: boolean) {
               @canvas-intent="setCanvasIntent"
             />
             <MobileGenerateParameters
+              :duration-active="videoDuration.visible.value"
               :form="form"
               :target="generationTarget"
               :upscalers="upscalers"
@@ -14770,6 +14982,16 @@ function setClipsActive(value: boolean) {
         />
       </KeepAlive>
       <section v-show="!settingsOpen && tab === 'queue'" data-test="mobile-queue-view">
+        <VideoJobHistory
+          v-if="!settingsOpen && tab === 'queue'"
+          :existing-keys="
+            mobileActivityRows.flatMap((row) =>
+              row.kind === 'shared'
+                ? [`${row.shared.hostId}:${row.shared.instanceId}:${row.shared.id}`]
+                : [],
+            )
+          "
+        />
         <p class="section-note">Work continues on your machines when you leave this screen.</p>
         <!-- ONE queue: this session's prints and the machines' own live
                work land in the same list (mockup 1c). -->
@@ -14862,6 +15084,12 @@ function setClipsActive(value: boolean) {
                      meter, which made the fleet's work read as a lesser kind
                      of job on the one screen that exists to compare them. -->
                 <div v-else class="mobile-generation-row">
+                  <VideoJobControl
+                    v-if="entry.shared.kind === 'video_job'"
+                    :host-id="entry.shared.hostId"
+                    :job-id="entry.shared.id"
+                    :instance-id="entry.shared.instanceId"
+                  />
                   <VideoRestartControl
                     :host-id="entry.shared.hostId"
                     :job-id="entry.shared.id"

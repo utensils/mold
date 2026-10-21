@@ -704,6 +704,8 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         version: 44,
         kind: MigrationKind::Sql(V44_GALLERY_ARCHIVE_PROJECTION),
     },
+    Migration { version:45, kind:MigrationKind::Sql(V45_VIDEO_JOBS) },
+    Migration { version:46, kind:MigrationKind::Sql("CREATE TABLE chain_stage_generations (generation_id TEXT PRIMARY KEY REFERENCES generation_batch_children(job_id) ON DELETE CASCADE, chain_id TEXT NOT NULL, stage_index INTEGER NOT NULL CHECK(stage_index>=0), video_parent_id TEXT); CREATE INDEX chain_stage_generation_owner ON chain_stage_generations(chain_id,stage_index); CREATE INDEX chain_stage_generation_video_parent ON chain_stage_generations(video_parent_id,generation_id) WHERE video_parent_id IS NOT NULL; CREATE TABLE video_job_child_owners(child_id TEXT PRIMARY KEY,parent_id TEXT NOT NULL); CREATE INDEX video_job_child_owner_parent ON video_job_child_owners(parent_id,child_id); INSERT INTO video_job_child_owners(child_id,parent_id) SELECT child_id,parent_id FROM video_job_parts; CREATE TRIGGER video_child_preoccupied BEFORE INSERT ON video_job_parts WHEN EXISTS(SELECT 1 FROM chain_jobs WHERE id=NEW.child_id) AND NOT EXISTS(SELECT 1 FROM video_job_child_owners WHERE child_id=NEW.child_id AND parent_id=NEW.parent_id) BEGIN SELECT RAISE(ABORT,'video child ID is already occupied'); END; CREATE TRIGGER video_child_owner_conflict BEFORE INSERT ON video_job_parts WHEN EXISTS(SELECT 1 FROM video_job_child_owners WHERE child_id=NEW.child_id AND parent_id!=NEW.parent_id) BEGIN SELECT RAISE(ABORT,'video child belongs to another parent'); END; CREATE TRIGGER video_child_owner_immutable BEFORE UPDATE OF parent_id,child_id ON video_job_parts WHEN NEW.parent_id!=OLD.parent_id OR NEW.child_id!=OLD.child_id BEGIN SELECT RAISE(ABORT,'video child ownership is immutable'); END; CREATE TRIGGER video_child_owner_capture AFTER INSERT ON video_job_parts BEGIN INSERT OR IGNORE INTO video_job_child_owners(child_id,parent_id) VALUES(NEW.child_id,NEW.parent_id); END;") },
 ];
 
 /// v44: the committed-archive generation the gallery change feed's projector
@@ -988,7 +990,7 @@ DELETE FROM settings WHERE key LIKE 'tui.%';
 
 /// The highest migration version this build ships. Exposed publicly so
 /// operators / tests can assert what schema level they're running against.
-pub const SCHEMA_VERSION: i64 = 44;
+pub const SCHEMA_VERSION: i64 = 46;
 
 /// Downloadable files that belong to one gallery print. The generation row
 /// remains the lifecycle authority, so permanent deletion cascades while
@@ -2084,7 +2086,7 @@ mod tests {
             SCHEMA_VERSION,
             "fresh DB must end at the latest SCHEMA_VERSION",
         );
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 46);
         assert!(table_exists(&conn, "device_preferences"));
         assert!(table_exists(&conn, "mesh_workflow_jobs"));
         assert!(table_exists(&conn, "mesh_workflow_stages"));
@@ -2240,7 +2242,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 46);
         assert!(table_exists(&conn, "generation_queue"));
         let columns = column_names(&conn, "generation_queue");
         for expected in [
@@ -2377,7 +2379,7 @@ mod tests {
         apply_pending(&mut conn).unwrap();
 
         assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 46);
         let columns = column_names(&conn, "generations");
         for expected in ["title", "favorite", "trashed_at_ms"] {
             assert!(
@@ -2716,7 +2718,7 @@ mod v9_tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(SCHEMA_VERSION, 44);
+        assert_eq!(SCHEMA_VERSION, 46);
     }
 
     #[test]
@@ -3285,3 +3287,31 @@ CREATE TABLE generation_queue_transfers (
     created_at INTEGER NOT NULL
 );
 "#;
+
+// The scalar parent is bounded; the append-only part ledger grows on disk.
+const V45_VIDEO_JOBS: &str = "
+CREATE TABLE video_jobs (
+ id TEXT PRIMARY KEY,
+ state TEXT NOT NULL CHECK(state IN ('queued','running','paused','completed','failed','interrupted','cancelled')),
+ request_sha256 TEXT NOT NULL,
+ manifest_json TEXT NOT NULL,
+ manifest_sha256 TEXT NOT NULL,
+ job_json TEXT NOT NULL,
+ revision INTEGER NOT NULL DEFAULT 0,
+ cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+ created_at_ms INTEGER NOT NULL,
+ updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX video_jobs_state ON video_jobs(state,created_at_ms);
+CREATE INDEX video_jobs_creation ON video_jobs(created_at_ms DESC,id DESC);
+CREATE INDEX video_jobs_recoverable ON video_jobs(created_at_ms DESC,id DESC) WHERE state IN ('queued','running','paused','failed','interrupted');
+CREATE INDEX video_jobs_runnable ON video_jobs(updated_at_ms,created_at_ms,id) WHERE state IN ('queued','running');
+CREATE TABLE video_job_aborts(id TEXT PRIMARY KEY,created_at_ms INTEGER NOT NULL);
+CREATE TABLE video_job_parts (
+ parent_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+ part_index TEXT NOT NULL,
+ child_id TEXT NOT NULL UNIQUE,
+ part_json TEXT NOT NULL,
+ PRIMARY KEY(parent_id,part_index)
+);
+";

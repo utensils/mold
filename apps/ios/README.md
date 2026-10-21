@@ -32,6 +32,10 @@ Secure connection startup retries brief proxy pressure up to three times within 
 On iPhone, Generate opens as a scrolling form: choose the kind and machine,
 describe the result, then choose a model. Tap **Model** to search installed
 models and recipes; **Get More Models…** opens model management directly.
+On updated machines advertising duration video jobs, clips use one prompt and **Duration**. The initial value follows the selected recipe; changing models preserves a chosen duration. The server reports the single-generation limit and actual number of clips joined into one movie. **Define scenes** optionally supplies separate prompts. Source fitting, opening/closing frames, typed references, audio, batch variations and filing settings use the ordinary preparation path. Generate creates durable parent jobs; Queue shows each movie once with the server’s progress, Stop, Resume and explicit deletion of recovery data. An unanswered submission remains a known attempt to check in Queue before starting another. Saved durations and scenes survive a cold launch in the private draft file. Older machines keep the existing single-generation controls and authored-sequence drafts keep their separate-part behavior.
+
+Library **Extend Video…** prefills the original recipe and **Add duration**, preserving the original movie. Its machine and source identity stay pinned across a cold launch. Original typed references remain visible and are inherited unless replaced; historical opening and closing images are cleared. For continuous extension, the selected video supplies the first frame. An explicitly attached opening image remains visible with an actionable conflict instead of being discarded.
+
 The keyboard’s **Done** dismisses the active ordinary or clip prompt without losing edits, including after scrolling. Options and the expanded prompt editor dismiss their keyboard when closed.
 The prompt stays in one scrollable form as the keyboard and text size change;
 Generate stays visible above the phone tabs. The composer never shows running or finished media: tap the queue count to open live progress and supported previews in Queue. Background queue updates keep attachment browsing open. The prompt has one Expand action.
@@ -506,3 +510,11 @@ Source Media uses the Library’s justified, aspect-preserving rows and two-poin
 In Short clip, choose **Add another clip** to enter ordered prompts and lengths, then **Generate video**. The app validates the draft automatically before submitting it. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
+
+Failed or interrupted video jobs offer **Start again…** when their machine supports recovery. Choose the same machine to start again, or another compatible machine to **Send video**. This creates a new attempt and keeps the original. Saved attempts remain in Queue after relaunch and can be checked or stopped using their original operation identity; unanswered submissions are never silently submitted again. **Delete job…** removes the confirmed job’s recovery data while keeping saved Library videos.
+
+Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
+
+Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.
+
+A refused Library extension remains visible and blocks Generate until acknowledged. **Keep current draft** leaves existing settings and media intact; pending source reads cannot replace that draft after acknowledgement.

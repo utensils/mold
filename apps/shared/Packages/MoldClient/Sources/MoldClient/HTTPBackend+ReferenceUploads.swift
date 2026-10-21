@@ -17,7 +17,7 @@ public extension HTTPBackend {
         var opening = request(caps.sessionPath!)
         opening.httpMethod = "POST"
         opening.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        opening.httpBody = try MoldJSON.encoder.encode(SessionBody(request: scoped, uploadReferences: captured.filter { $0.bytes != nil }.map(\.index)))
+        opening.httpBody = try MoldJSON.encoder.encode(SessionBody(request: literalReferencePrompts ? scoped.protectedForLegacyPromptWire : scoped, uploadReferences: captured.filter { $0.bytes != nil }.map(\.index)))
         let sessionData = try await referenceUploadBytes(opening)
         var cancellation: ReferenceUploadCancellation?
         // Salvage only a syntactically valid credential for best-effort cleanup of malformed replies.

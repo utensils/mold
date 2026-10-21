@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import VideoJobHistory from "@studio/components/VideoJobHistory.vue";
 import ModalPanel from "@ui/components/ModalPanel.vue";
 import QueueEntryDetail from "@studio/components/QueueEntryDetail.vue";
 import { useQueueInspection } from "../composables/useQueueInspection";
@@ -130,6 +131,13 @@ async function act(action: "cancel" | "retry", id: string) {
       {{ unavailableHosts.map((host) => host.label).join(", ") }}. Last-known
       work stays visible until the machine responds.
     </p>
+    <VideoJobHistory
+      :existing-keys="
+        liveActivity.rows.value.map(
+          (row) => `${row.hostId}:${row.instanceId}:${row.id}`,
+        )
+      "
+    />
     <div v-if="hasWork" class="queue-sections">
       <template v-for="section in sections" :key="section.id">
         <section

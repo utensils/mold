@@ -68,7 +68,7 @@ extension PromptPanel {
                 // hundreds of characters: flexible and truncating, so it takes
                 // whatever the buttons leave and never widens the capsule (the
                 // buttons are `fixedSize`, so they are never the ones squeezed).
-                if controller.sequence.draft == nil {
+                if controller.sequence.draft == nil, !controller.usesDuration(on: host, recipe: recipe) {
                 PlacementHint(placement: controller.probe.placementHost == host?.id ? controller.probe.placement : nil,
                               error: controller.probe.errorHost == host?.id ? controller.probe.error : nil, hostName: host?.name)
                     .lineLimit(1)
@@ -106,7 +106,7 @@ extension PromptPanel {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(isEditingPrompt || submitRefusal != nil || controller.submissionFeedback.isPreparing || controller.sequence.preparing)
+                .disabled(isEditingPrompt || submitRefusal != nil || controller.submissionFeedback.isPreparing || controller.sequence.preparing || controller.durationSubmitting || controller.durationSourceLoading)
                 .help(controller.run.isBusy
                       ? "Add another generation to the machine’s queue"
                       : (submitRefusal ?? "Send this prompt and settings to the selected machine"))
@@ -120,6 +120,7 @@ extension PromptPanel {
     /// computed for the caption under the slider and then only discovered
     /// after the press, as a failure on the canvas.
     private var submitRefusal: String? {
+        if let refusal = controller.durationSourceOpeningRefusal ?? controller.durationRecipeRefusal(recipe) { return refusal }
         if let refusal = drafts.recoveryRefusal { return refusal }
         if let refusal = reuse.referenceRefusal(for: draft) { return refusal }
         if controller.sequence.draft != nil, let model {
@@ -127,6 +128,18 @@ extension PromptPanel {
                 maxIdentityPhotos: host.flatMap { controller.hosts.capabilities[$0.id]?.maxIdentityPhotos } ?? 0), limits: chainLimits)
         }
         guard let recipe else { return nil }
+        if controller.usesDuration(on: host, recipe: recipe) {
+            guard let host, controller.hosts.capabilities[host.id]?.canCreateVideoJob == true else {
+                return "Reconnect to an updated machine before generating this video."
+            }
+            if let refusal = controller.durationSourceRefusal { return refusal }
+            if let owner = controller.durationOwner(host), controller.videoJobs.hasUncertainAdmission(on: owner) {
+                return "Check the saved video attempt in Queue before generating another video."
+            }
+            do { _ = try controller.durationRequest(on: host) }
+            catch { return UserFacingError.describe(error) }
+            return nil
+        }
         let retainedFields = model.map {
             reuse.availableFields(for: draft, request: RenderRequest.one(draft, model: $0.name))
         } ?? []

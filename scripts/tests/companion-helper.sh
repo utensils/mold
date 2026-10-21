@@ -18,12 +18,13 @@ done
 if "$root/scripts/companion.sh" invalid > /dev/null 2>&1; then
   echo 'invalid action was accepted' >&2; exit 1
 fi
-"$root/scripts/companion.sh" --help | grep -q companion
+"$root/scripts/companion.sh" --help | grep companion > /dev/null
 # Check the actual Makefile command too, not only the wrapper's argv.
 /usr/bin/make -n -C "$root/apps/ios" build SIM=test-device 'BUILD=/tmp/build with spaces' \
   MARKETING_VERSION=1.0 BUILD_NUMBER=1 | python3 -c '
 import shlex, sys
-command = next(line for line in sys.stdin if line.startswith("xcodebuild -project"))
+commands = sys.stdin.read().splitlines()
+command = next(line for line in commands if line.startswith("xcodebuild -project"))
 args = shlex.split(command)
 assert args[args.index("-derivedDataPath") + 1] == "/tmp/build with spaces/DerivedData"
 '

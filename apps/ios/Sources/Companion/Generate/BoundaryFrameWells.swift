@@ -10,10 +10,12 @@ struct BoundaryFrameWells: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Opening and closing frames").font(.headline)
                 HStack(alignment: .top, spacing: 12) {
-                    frame(first: true, caps: caps)
+                    if !generate.durationUsesSourceEnding || BoundaryFramePolicy.image(first: true, draft: generate.draft, capabilities: caps) != nil {
+                        frame(first: true, caps: caps)
+                    }
                     frame(first: false, caps: caps)
                 }
-                if BoundaryFramePolicy.resolve(capabilities: caps) == "wan-pair" {
+                if BoundaryFramePolicy.resolve(capabilities: caps) == "wan-pair", !generate.durationUsesSourceEnding {
                     Text("Choose both frames, or leave both empty.").font(.caption).foregroundStyle(.secondaryText)
                 }
             }

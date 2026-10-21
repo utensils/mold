@@ -276,3 +276,15 @@ describe("SourceMediaWells — a caller that already titled the group", () => {
     expect(qwen.text()).toContain("Target");
   });
 });
+it("hides only an empty opening well when the authenticated video ending owns that boundary", async () => {
+  const wrapper = factory(
+    { kind: "single", required: true, video: true, endFrame: true },
+    { incomingBoundary: true },
+  );
+  expect(wrapper.find('[data-test="source-well"]').exists()).toBe(false);
+  expect(wrapper.text()).not.toContain("Required");
+  await wrapper.setProps({
+    source: { data: "pixels", filename: "chosen.png" },
+  });
+  expect(wrapper.text()).toContain("Source");
+});

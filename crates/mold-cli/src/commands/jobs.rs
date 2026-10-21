@@ -8,7 +8,11 @@ use crate::{JobsAction, RetakeModeArg};
 pub async fn run(action: JobsAction, host: Option<&str>, _config: &Config) -> Result<()> {
     let client = crate::control::client_for_host(host)?;
     match action {
-        JobsAction::List { json } => jobs_list(&client, json).await,
+        JobsAction::List {
+            json,
+            cursor,
+            limit,
+        } => jobs_list(&client, json, cursor.as_deref(), limit).await,
         JobsAction::Show { id, json, script } => jobs_show(&client, &id, json, script).await,
         JobsAction::Resume { id } => jobs_resume(&client, &id).await,
         JobsAction::Restart {
@@ -83,7 +87,7 @@ pub async fn run(action: JobsAction, host: Option<&str>, _config: &Config) -> Re
             )
             .await
         }
-        JobsAction::Cancel { id } => jobs_cancel(&client, &id).await,
+        JobsAction::Cancel { id, video } => jobs_cancel(&client, &id, video).await,
         JobsAction::Delete { id, yes } => jobs_delete(&client, &id, yes).await,
         JobsAction::Gc => jobs_gc(&client).await,
     }
@@ -96,23 +100,87 @@ struct RetakeArgs {
     prompt: Option<String>,
 }
 
-async fn jobs_list(client: &MoldClient, json: bool) -> Result<()> {
+async fn jobs_list(
+    client: &MoldClient,
+    json: bool,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<()> {
+    let instance = crate::commands::video_jobs::supported_instance(client).await?;
+    anyhow::ensure!(
+        cursor.is_none() || instance.is_some(),
+        "This machine cannot continue a duration-video queue page"
+    );
+    let videos = if let Some(instance) = instance {
+        Some(
+            client
+                .list_video_jobs(&instance, limit, false, cursor)
+                .await?,
+        )
+    } else {
+        None
+    };
     let listing = client.list_chain_jobs().await?;
     // Teach the shell the ids this listing just showed: every other `mold
     // jobs` verb takes one, and a completer cannot ask the server (see
     // `crate::completion_cache`).
     crate::completion_cache::record_reached_host(client.host(), |cache| {
-        cache.record_job_ids(listing.jobs.iter().map(|job| job.id.clone()));
+        cache.record_job_ids(
+            listing.jobs.iter().map(|job| job.id.clone()).chain(
+                videos
+                    .iter()
+                    .flat_map(|page| page.jobs.iter().map(|job| job.id.clone())),
+            ),
+        );
     });
     if json {
-        println!("{}", serde_json::to_string_pretty(&listing)?);
+        let mut value = serde_json::to_value(&listing)?;
+        if let Some(page) = videos {
+            value["video_jobs"] = serde_json::to_value(page)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
+    }
+    if let Some(page) = videos {
+        for job in page.jobs {
+            println!(
+                "{}  {:?}  {}/{} clips{}",
+                job.id,
+                job.state,
+                job.completed_clips,
+                job.plan.clip_count,
+                job.output_filename
+                    .map(|name| format!("  {name}"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some(cursor) = page.next_cursor {
+            println!("More videos: mold jobs list --cursor {cursor}");
+        }
     }
     print_listing(&listing);
     Ok(())
 }
 
 async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> Result<()> {
+    if let Some((job, _)) = crate::commands::video_jobs::lookup(client, id).await? {
+        anyhow::ensure!(!script, "This is a duration video; use --json to inspect its plan. Authored TOML export applies to script jobs");
+        if json {
+            println!("{}", serde_json::to_string_pretty(&job)?);
+        } else {
+            println!(
+                "{}: {:?}, {}/{} clips",
+                job.id, job.state, job.completed_clips, job.plan.clip_count
+            );
+            if let Some(name) = job.output_filename {
+                println!("Library: {name}");
+            }
+            if let Some(error) = job.error_detail.or(job.error) {
+                println!("{error}");
+            }
+        }
+        return Ok(());
+    }
     let detail = if script {
         client.get_chain_job_with_media(id).await?
     } else {
@@ -141,6 +209,11 @@ fn render_job_script(detail: &ChainJobDetail) -> Result<String> {
 }
 
 async fn jobs_resume(client: &MoldClient, id: &str) -> Result<()> {
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.resume_video_job(id, &instance).await?;
+        println!("resumed {id}");
+        return Ok(());
+    }
     let summary = client.resume_chain_job(id).await?;
     print_summary_action("resumed", &summary);
     Ok(())
@@ -152,6 +225,16 @@ async fn jobs_restart(
     id: &str,
     operation_id: Option<String>,
 ) -> Result<()> {
+    if let Some(operation) = operation_id.as_deref() {
+        let operation = uuid::Uuid::parse_str(operation)
+            .context("--operation-id must be a UUID")?
+            .to_string();
+        return crate::commands::video_restart::reconcile(destination, &operation).await;
+    }
+    if let Some((_, source_instance)) = crate::commands::video_jobs::lookup(source, id).await? {
+        return crate::commands::video_restart::restart(source, destination, id, &source_instance)
+            .await;
+    }
     let operation_id = match operation_id {
         Some(value) => uuid::Uuid::parse_str(&value)
             .context("--operation-id must be a UUID")?
@@ -195,6 +278,11 @@ async fn jobs_restart(
             && exported.destination_instance_id == target_instance,
         "Source changed while exporting; nothing was submitted"
     );
+    crate::commands::video_receipt::store_chain(
+        &operation_id,
+        destination.host(),
+        &target_instance,
+    )?;
     // Emit before POST so a disconnected terminal retains the reconciliation identity.
     println!("New attempt operation: {operation_id}");
     std::io::Write::flush(&mut std::io::stdout())?;
@@ -406,7 +494,30 @@ fn render_amend_plan(id: &str, req: &mold_core::chain_job::AmendRequest) -> Stri
     out
 }
 
-async fn jobs_cancel(client: &MoldClient, id: &str) -> Result<()> {
+async fn jobs_cancel(client: &MoldClient, id: &str, video: bool) -> Result<()> {
+    if video {
+        anyhow::ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id,
+            "Video operation must be a canonical UUID"
+        );
+        let instance = crate::commands::video_jobs::supported_instance(client)
+            .await?
+            .context("Update this machine before stopping a duration-video admission")?;
+        if let Some(receipt) = crate::commands::video_receipt::read_optional(id, client.host())? {
+            anyhow::ensure!(
+                receipt.instance_id == instance,
+                "The original machine was replaced"
+            );
+        }
+        client.cancel_video_job(id, &instance).await?;
+        println!("cancel requested {id}; inspect with mold jobs show {id}");
+        return Ok(());
+    }
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.cancel_video_job(id, &instance).await?;
+        println!("cancel requested {id}");
+        return Ok(());
+    }
     let summary = client.cancel_chain_job(id).await?;
     print_summary_action("cancel requested", &summary);
     Ok(())
@@ -414,14 +525,18 @@ async fn jobs_cancel(client: &MoldClient, id: &str) -> Result<()> {
 
 async fn jobs_delete(client: &MoldClient, id: &str, yes: bool) -> Result<()> {
     if !yes {
-        eprint!("Delete chain job {id}? Type the job id to confirm: ");
+        eprint!("Delete job {id} and its recovery data? Saved Library videos remain. Type the job id to confirm: ");
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if input.trim() != id {
             bail!("delete aborted");
         }
     }
-    client.delete_chain_job(id).await?;
+    if let Some((_, instance)) = crate::commands::video_jobs::lookup(client, id).await? {
+        client.delete_video_job(id, &instance).await?;
+    } else {
+        client.delete_chain_job(id).await?;
+    }
     println!("{} {}", "deleted".green(), id);
     Ok(())
 }
@@ -866,5 +981,48 @@ frames = 49
         assert!(error.contains("new sequence"), "{error}");
 
         refuse_unamendable_edits(&current, &script(vec![stage("edited", 49)])).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod video_operation_tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    #[tokio::test]
+    async fn explicit_video_cancel_stops_unknown_admission_without_protocol_lookup() {
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let caps = mold_core::ServerCapabilities {
+            video_jobs: Some(mold_core::video_job::VideoJobCapabilities {
+                supported: true,
+                literal_prompts: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(caps))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/status")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"version":"test","models_loaded":[],"gpu_info":null,"uptime_secs":1,"instance_id":"captured"}))).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/video-jobs/{id}/cancel")))
+            .and(header("x-mold-destination-instance", "captured"))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(serde_json::json!({"accepted":true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        jobs_cancel(&MoldClient::new(&server.uri()), &id, true)
+            .await
+            .unwrap();
+        assert!(!server.received_requests().await.unwrap().iter().any(|r| r
+            .url
+            .path()
+            .contains("chain-jobs")
+            || r.url.path() == format!("/api/video-jobs/{id}")));
     }
 }

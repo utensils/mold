@@ -187,7 +187,9 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
             | "/api/upscale"
             | "/api/upscale/stream"
             | "/api/gallery/upscale"
-            | "/api/video-upscale-jobs",
+            | "/api/video-upscale-jobs"
+            | "/api/video-jobs"
+            | "/api/video-jobs/validate",
         ) => Some(RouteTier::Generation),
         ("POST", "/api/models/load" | "/api/models/pull") => Some(RouteTier::Generation),
         // Re-queues real GPU work and restores the dispatch budget, so it
@@ -211,6 +213,13 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
         {
             Some(RouteTier::Generation)
         }
+        ("POST", path)
+            if (path.starts_with("/api/video-jobs/")
+                && (path.ends_with("/restart-export") || path.ends_with("/resume")))
+                || path.starts_with("/api/video-source-uploads/") =>
+        {
+            Some(RouteTier::Generation)
+        }
         // A retention sweep walks the held rows and unlinks encrypted media.
         // Cheap per call, but it takes DB write transactions and filesystem
         // work, so it does not belong in the read bucket.
@@ -227,6 +236,25 @@ pub fn classify_route(path: &str, method: &axum::http::Method) -> Option<RouteTi
     }
 }
 
+fn classify_request(uri: &axum::http::Uri, method: &axum::http::Method) -> Option<RouteTier> {
+    #[derive(serde::Deserialize)]
+    struct PlanningQuery {
+        #[serde(default)]
+        planning_only: bool,
+    }
+    // Scalar length previews neither hydrate media nor enqueue GPU work. Use
+    // the same boolean parser as the handler, so malformed/duplicate values
+    // cannot accidentally move full admission into the cheaper bucket.
+    if method == axum::http::Method::POST
+        && uri.path() == "/api/video-jobs/validate"
+        && axum::extract::Query::<PlanningQuery>::try_from_uri(uri)
+            .is_ok_and(|query| query.planning_only)
+    {
+        return Some(RouteTier::Read);
+    }
+    classify_route(uri.path(), method)
+}
+
 /// Axum middleware that enforces per-IP rate limiting.
 pub async fn rate_limit_middleware(
     connect_info: ConnectInfo<SocketAddr>,
@@ -241,7 +269,7 @@ pub async fn rate_limit_middleware(
     };
 
     let ip = connect_info.0.ip();
-    let tier = classify_route(request.uri().path(), request.method());
+    let tier = classify_request(request.uri(), request.method());
 
     let tier = match tier {
         Some(t) => t,
@@ -296,6 +324,53 @@ pub async fn inject_rate_limit_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_parent_mutations_and_source_sealing_use_generation_tier() {
+        use axum::http::Method;
+        for path in [
+            "/api/video-jobs",
+            "/api/video-jobs/validate",
+            "/api/video-jobs/job/resume",
+            "/api/video-jobs/job/restart-export",
+            "/api/video-source-uploads/upload",
+            "/api/video-source-uploads/upload/complete",
+        ] {
+            assert_eq!(
+                classify_route(path, &Method::POST),
+                Some(RouteTier::Generation),
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/video-jobs",
+            "/api/video-jobs/job/restart-source",
+            "/api/video-source-uploads/upload",
+        ] {
+            assert_eq!(classify_route(path, &Method::GET), Some(RouteTier::Read));
+        }
+    }
+
+    #[test]
+    fn scalar_duration_previews_do_not_drain_admission_budget() {
+        use axum::http::{Method, Uri};
+        let uri: Uri = "/api/video-jobs/validate?planning_only=true"
+            .parse()
+            .unwrap();
+        assert_eq!(classify_request(&uri, &Method::POST), Some(RouteTier::Read));
+        for query in [
+            "",
+            "?planning_only=false",
+            "?planning_only=invalid",
+            "?planning_only=true&planning_only=false",
+        ] {
+            let uri: Uri = format!("/api/video-jobs/validate{query}").parse().unwrap();
+            assert_eq!(
+                classify_request(&uri, &Method::POST),
+                Some(RouteTier::Generation)
+            );
+        }
+    }
 
     #[test]
     fn transfer_protocol_mutations_use_generation_tier() {

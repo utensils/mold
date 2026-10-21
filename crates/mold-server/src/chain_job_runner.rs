@@ -539,6 +539,11 @@ impl ChainJobRunnerHandle {
             .is_some()
     }
 
+    #[cfg(feature = "mp4")]
+    pub(crate) fn blocking_lock_job(&self, job_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.job_locks.blocking_lock(job_id)
+    }
+
     pub async fn lock_job(&self, job_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.job_locks.lock(job_id).await
     }
@@ -722,7 +727,7 @@ pub(crate) fn create_job_with_params(
     let layout = JobDirLayout::new(job_dir.clone());
     layout.ensure_root()?;
 
-    if params.request.continue_from.is_some() {
+    if params.request.has_incoming_boundary() {
         let frozen = params
             .frozen_model
             .as_ref()
@@ -1050,6 +1055,9 @@ pub(crate) fn run_gc_pass(
     };
 
     for row in chain_jobs::list_jobs(db)? {
+        if mold_db::video_job_child_owners::parent_id(db, &row.id)?.is_some() {
+            continue;
+        }
         let manifest = ChainJobManifest::read_from_dir(&row.job_dir).ok();
         if manifest.as_ref().is_some_and(|manifest| manifest.ephemeral) {
             if deps.claims.is_claimed(&row.id) {
@@ -1128,6 +1136,9 @@ pub(crate) fn startup_gc_sweep(db: &MetadataDb, jobs_root: &Path) -> anyhow::Res
         pruned_artifact_dirs: 0,
     };
     for row in chain_jobs::list_jobs(db)? {
+        if mold_db::video_job_child_owners::parent_id(db, &row.id)?.is_some() {
+            continue;
+        }
         let job_dir = if row.job_dir.is_absolute() {
             row.job_dir.clone()
         } else {
@@ -1496,6 +1507,31 @@ fn settle_execution_authority(
     Ok(())
 }
 
+/// Register first, then recheck durable parent intent: Stop may have landed
+/// before a cancellation token existed. No store or model work starts here.
+fn register_execution_cancel(deps: &RunnerDeps, id: &str) -> anyhow::Result<bool> {
+    deps.cancel.register(id);
+    let db = deps
+        .db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| anyhow!("chain database unavailable"))?;
+    if !mold_db::video_job_child_owners::execution_allowed(db, id)? {
+        deps.cancel.request(id);
+        chain_jobs::try_transition(
+            db,
+            id,
+            &[ChainJobState::Running],
+            ChainJobState::Interrupted,
+            Some("Video parent is not running; resume its parent video."),
+            now_ms_i64(),
+        )?;
+        deps.cancel.unregister(id);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 async fn claim_for_execution_async(deps: &RunnerDeps, job: &ChainJobRow) -> anyhow::Result<bool> {
     let db = deps
         .db
@@ -1505,9 +1541,9 @@ async fn claim_for_execution_async(deps: &RunnerDeps, job: &ChainJobRow) -> anyh
     let _guard = deps.job_locks.lock(&job.id).await;
     let claimed = chain_jobs::claim_job(db, &job.id)?;
     if claimed {
-        deps.cancel.register(&job.id);
+        return register_execution_cancel(deps, &job.id);
     }
-    Ok(claimed)
+    Ok(false)
 }
 
 async fn handle_runner_cmd(deps: Arc<RunnerDeps>, cmd: RunnerCmd) -> bool {
@@ -1557,13 +1593,38 @@ fn claim_for_execution(deps: &RunnerDeps, job: &ChainJobRow) -> anyhow::Result<b
     let _guard = deps.job_locks.blocking_lock(&job.id);
     let claimed = chain_jobs::claim_job(db, &job.id)?;
     if claimed {
-        deps.cancel.register(&job.id);
+        return register_execution_cancel(deps, &job.id);
     }
-    Ok(claimed)
+    Ok(false)
 }
 
 fn execute_job(deps: &RunnerDeps, job: &ChainJobRow, start_stage: u32) -> anyhow::Result<()> {
-    execute_job_inner(deps, job, start_stage, false, None)
+    execute_job_inner(deps, job, start_stage, false, None)?;
+    let db = deps
+        .db
+        .as_ref()
+        .as_ref()
+        .ok_or_else(|| anyhow!("chain database unavailable"))?;
+    if chain_jobs::get_job(db, &job.id)?.is_some_and(|row| settled(row.state)) {
+        // Legacy execution has no V2 actor turn to publish its final write
+        // barrier. Mark it only after all artifact/finalize writes returned.
+        let mut authority = match ChainExecutionAuthority::read_for_parent(&job.job_dir, &job.id) {
+            Ok(authority) => authority,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                ChainExecutionAuthority::dormant(&job.id)
+            }
+            Err(error) => return Err(error),
+        };
+        if authority.state != ChainExecutionState::Settled {
+            authority.transition(ChainExecutionState::Settled)?;
+            authority.persist_atomic(&job.job_dir)?;
+        }
+    }
+    Ok(())
 }
 
 fn execute_job_inner(
@@ -1589,7 +1650,9 @@ fn execute_job_inner(
             }
         }
         ChainJobState::Running => {
-            deps.cancel.register(&job.id);
+            if !register_execution_cancel(deps, &job.id)? {
+                return Ok(());
+            }
         }
         other => bail!(
             "chain job '{}' is not executable from state {}",
@@ -2231,7 +2294,7 @@ fn write_stage_artifacts(
     write_preview_jpeg(&layout.preview_path(stage_idx), frames.last().unwrap())?;
 
     let contributed = stage_contributed_frames(
-        if stage_idx == 0 && effective.continue_from.is_some() {
+        if stage_idx == 0 && effective.has_incoming_boundary() {
             1
         } else {
             stage_idx as usize
@@ -2271,7 +2334,7 @@ fn resume_carry_from_disk(
 ) -> anyhow::Result<Option<ChainTail>> {
     if stage_idx == 0 {
         let request = effective_request(manifest)?;
-        return if request.continue_from.is_some() {
+        return if request.has_incoming_boundary() {
             crate::chain_continuation::load(
                 job_dir,
                 &request,
@@ -2357,7 +2420,7 @@ fn finalize_job(
     // retake prompt/seed overlays retain the canonical media revision.
     let effective = effective_request_with_media(manifest, &job.job_dir)?;
     let layout = JobDirLayout::new(job.job_dir.clone());
-    if effective.continue_from.is_some() {
+    if effective.has_incoming_boundary() {
         crate::chain_continuation::load(
             &job.job_dir,
             &effective,
@@ -2445,7 +2508,7 @@ fn finalize_job(
         let incoming_fade_tail = pending_fade_tail.take();
 
         if stage_status.raw_segment {
-            if idx > 0 || effective.continue_from.is_some() {
+            if idx > 0 || effective.has_incoming_boundary() {
                 match stage.transition {
                     TransitionMode::Smooth => {
                         let drop = effective.motion_tail_frames as usize;
@@ -2610,7 +2673,9 @@ fn finalize_job(
     // swept, so `sequenceReuse` would offer a clip rail for a job nobody can
     // load. Stage seeds are still recorded, because they describe how these
     // pixels were made regardless of who authored the split.
-    {
+    // A duration parent's internal children retain their private MP4 only;
+    // the parent publishes the one complete movie after streamed assembly.
+    if effective.generation_controls.is_none() {
         if let Some(output_dir) = deps.output_dir.as_ref() {
             let _gallery_writer = deps.gallery_publication_gate.blocking_write();
             let stage_seeds: Vec<u64> = manifest
@@ -3142,7 +3207,7 @@ pub fn apply_amend(
     let candidate = amend_candidate_request(&old_effective, req)
         .normalise()
         .map_err(|e| anyhow!("{CHAIN_JOB_AMEND_INVALID}: {e}"))?;
-    if candidate.continue_from.is_some() {
+    if candidate.has_incoming_boundary() {
         crate::chain_continuation::load(
             &job_dir,
             &candidate,
@@ -4019,7 +4084,7 @@ pub(crate) fn build_stage_generate_request(
     stage_seed: u64,
     idx: usize,
 ) -> GenerateRequest {
-    GenerateRequest {
+    let mut request = GenerateRequest {
         offload: chain.offload,
         mesh: None,
         video_only: None,
@@ -4106,7 +4171,11 @@ pub(crate) fn build_stage_generate_request(
         true_cfg: None,
         cfg_start_step: None,
         transparent_background: None,
+    };
+    if let Some(controls) = &chain.generation_controls {
+        controls.apply_to(&mut request);
     }
+    request
 }
 
 /// Re-blend a completed LEGACY Fade successor after the stage before it was
@@ -5060,6 +5129,8 @@ mod tests {
     fn request(transitions: Vec<TransitionMode>) -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -5612,6 +5683,48 @@ mod tests {
     }
 
     #[test]
+    fn parent_stop_before_cancel_registration_interrupts_child_without_model_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO video_jobs(id,state,request_sha256,manifest_json,manifest_sha256,job_json,cancel_requested,created_at_ms,updated_at_ms) VALUES('video','running','sha','{}','sha','{}',1,0,0)",[])?;
+            conn.execute("INSERT INTO video_job_parts(parent_id,part_index,child_id,part_json) VALUES('video','0','child','{}')",[])?;
+            Ok(())
+        }).unwrap();
+        let req = request(vec![TransitionMode::Smooth]);
+        let row = persist_job(
+            &db,
+            &dir.path().join("child"),
+            "child",
+            &req,
+            ChainJobState::Running,
+        );
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor.clone(),
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        assert!(
+            !deps.cancel.request("child"),
+            "Stop arrived before any child token"
+        );
+        execute_job(&deps, &row, 0).unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), "child")
+                .unwrap()
+                .unwrap()
+                .state,
+            ChainJobState::Interrupted
+        );
+    }
+
+    #[test]
     fn corrupt_manifest_marks_job_failed_without_rendering() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -5885,6 +5998,13 @@ mod tests {
 
         execute_job(&deps, &row, 0).unwrap();
 
+        assert_eq!(
+            ChainExecutionAuthority::read_for_parent(&job_dir, &row.id)
+                .unwrap()
+                .state,
+            ChainExecutionState::Settled,
+            "legacy output must release its last write authority before parent cleanup"
+        );
         let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
         let db = deps.db.as_ref().as_ref().unwrap();
         let job_after = chain_jobs::get_job(db, &row.id).unwrap().unwrap();
@@ -7037,6 +7157,47 @@ mod tests {
     /// id, the joined distinct clip prompts, and the structured chain
     /// block carrying each stage's effective seed.
     #[test]
+    fn internal_video_child_keeps_private_artifact_without_publishing_a_library_print() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut req = request(vec![TransitionMode::Smooth]);
+        req.generation_controls = Some(mold_core::chain::ChainGenerationControls::default());
+        let job_dir = dir.path().join("job");
+        let row = persist_job(&db, &job_dir, "video-child", &req, ChainJobState::Queued);
+        let executor = Arc::new(FakeExecutor {
+            calls: AtomicUsize::new(0),
+            cancel_on_progress: AtomicBool::new(false),
+        });
+        let mut deps = deps(
+            db,
+            dir.path().join("jobs"),
+            executor,
+            Arc::new(FakeProbe(AtomicUsize::new(0))),
+        );
+        deps.output_dir = Some(dir.path().join("gallery"));
+        execute_job(&deps, &row, 0).unwrap();
+        let manifest = ChainJobManifest::read_from_dir(&job_dir).unwrap();
+        assert_eq!(
+            chain_jobs::get_job(deps.db.as_ref().as_ref().unwrap(), "video-child")
+                .unwrap()
+                .unwrap()
+                .state,
+            ChainJobState::Completed
+        );
+        let output = manifest.finalizes.last().unwrap();
+        assert!(job_dir.join(&output.output).is_file());
+        assert!(output.gallery_filename.is_none());
+        assert!(deps
+            .db
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn finalize_records_summed_generation_time_and_chain_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let db = db();
@@ -7746,6 +7907,33 @@ mod tests {
         new.offload = Some(true);
         assert_eq!(preserved_stage_prefix(&old, &new), 0);
         assert_eq!(preserved_stage_prefix(&new, &new), 1);
+    }
+
+    #[test]
+    fn parent_scalar_controls_reach_actual_stage_request_including_lora_expert() {
+        let mut chain = request(vec![TransitionMode::Smooth]);
+        chain.generation_controls = Some(mold_core::chain::ChainGenerationControls {
+            sample_shift: Some(7.0),
+            pipeline: Some(mold_core::Ltx2PipelineMode::TwoStage),
+            loras: vec![mold_core::LoraWeight {
+                path: "adapter.safetensors".into(),
+                scale: 0.5,
+                expert: Some(mold_core::LoraExpert::Low),
+            }],
+            ..Default::default()
+        });
+        let request = build_stage_generate_request(&chain.stages[0], &chain, 42, 0);
+        assert_eq!(request.sample_shift, Some(7.0));
+        assert_eq!(
+            request.pipeline,
+            Some(mold_core::Ltx2PipelineMode::TwoStage)
+        );
+        assert_eq!(
+            request.loras.unwrap()[0].expert,
+            Some(mold_core::LoraExpert::Low)
+        );
+        assert_eq!(request.seed, Some(42));
+        assert_eq!(request.frames, Some(chain.stages[0].frames));
     }
 
     #[test]

@@ -440,6 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn parent_camera_materialization_keeps_scalar_control_adapters() {
+        let mut chain: mold_core::ChainRequest = serde_json::from_value(serde_json::json!({
+            "model":"ltx-2-19b-distilled:fp8","width":512,"height":512,"steps":4,"guidance":1,
+            "stages":[{"prompt":"walk","frames":97}]}))
+        .unwrap();
+        let controls = mold_core::chain::ChainGenerationControls {
+            loras: vec![mold_core::LoraWeight {
+                path: "camera-control:pan-left".into(),
+                scale: 0.5,
+                expert: None,
+            }],
+            ..Default::default()
+        };
+        chain.generation_controls = Some(controls);
+        assert_eq!(
+            crate::routes::chain_camera_control_request(&chain)
+                .loras
+                .unwrap()[0]
+                .path,
+            "camera-control:pan-left"
+        );
+    }
+
+    #[test]
     fn generation_fixture_ignores_process_output_override() {
         let _env = env_lock();
         let previous = std::env::var_os("MOLD_OUTPUT_DIR");
@@ -653,6 +677,8 @@ mod tests {
     fn route_chain_request() -> ChainRequest {
         ChainRequest {
             source_fit: None,
+            generation_controls: None,
+            incoming_source: None,
             continue_from: None,
             offload: None,
             collection: None,
@@ -1285,6 +1311,7 @@ mod tests {
             temporal_upscale: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             frames: None,
             fps: None,
             version: "test".into(),
@@ -18523,6 +18550,7 @@ mod tests {
             fps: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: "test".into(),
             id_image_name: None,
             id_image_sha256: None,
@@ -19506,6 +19534,7 @@ mod tests {
             fps: None,
             chain_job_id: None,
             chain: None,
+            video_job: None,
             version: "t".into(),
             id_image_name: None,
             id_image_sha256: None,

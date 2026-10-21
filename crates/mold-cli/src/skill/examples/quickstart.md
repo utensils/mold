@@ -24,7 +24,15 @@ For a remote host, pick a saved one from `mold host list` and pass
 `--host NAME`; its saved credential is used, so nothing secret goes on the
 command line. Run `mold <command> --help` for anything not covered here.
 
-For video sequences, copy the complete `shot.toml` from
+For a longer video, use one prompt and seconds:
+
+```bash
+mold list --json --host workstation
+mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 30
+```
+
+Keep the printed video UUID and inspect it before retrying after a disconnect.
+For exact per-stage video scripts, copy the complete `shot.toml` from
 [Scripted sequences](../references/cli.md#scripted-sequences), inspect the
 selected model, then validate and run it:
 

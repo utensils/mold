@@ -15,6 +15,10 @@ extension GeneratePane {
     /// `licenceSettled` skips the licence gate once the machine could not
     /// answer the fresh probe it asked for (`GeneratePane+Licence.swift`).
     func startRun(accepted: Set<String>, licenceSettled: Bool = false) {
+        if let refusal = controller.durationSourceOpeningRefusal ?? controller.durationRecipeRefusal(recipe) {
+            controller.submissionFeedback.begin(refusal, phase: .refused)
+            return
+        }
         if let refusal = drafts.recoveryRefusal {
             controller.submissionFeedback.begin(refusal, phase: .refused)
             return
@@ -54,6 +58,11 @@ extension GeneratePane {
                     return NativeSequenceSession.baseRequest(fitted, model: model,
                         maxIdentityPhotos: hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0)
                 })
+            return
+        }
+        if controller.usesDuration(on: host, recipe: recipe) {
+            controller.submitDuration(on: host, recipe: recipe,
+                retained: reuse.take(for: controller.draft).map { RetainedMediaHydration(authority: $0, hosts: hosts) })
             return
         }
         let routing = recipe.flatMap {
@@ -120,6 +129,7 @@ extension GeneratePane {
     func cancelRun() { controller.stop() }
 
     func refreshPlacement() {
+        guard !controller.usesDuration(on: host, recipe: recipe) else { return }
         host.map(controller.refreshPlacement(on:))
     }
 }

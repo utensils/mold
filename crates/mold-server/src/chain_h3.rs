@@ -148,12 +148,14 @@ async fn verify_or_admit_child(
     state: &AppState,
     client_id: &str,
     request: &GenerateRequest,
+    job_id: &str,
+    stage_idx: u32,
 ) -> anyhow::Result<String> {
     Ok(state
         .queue_journal
         .queue_media_admission()
         .context("H3 chain requires durable generation admission")?
-        .admit_batch(
+        .admit_batch_owned(
             state,
             None,
             Some(crate::reference_uploads::ReferenceIdentity::AuthDisabled {
@@ -165,6 +167,10 @@ async fn verify_or_admit_child(
             },
             None,
             SseCompletionPayload::MetadataOnly,
+            Some(mold_db::chain_stage_generations::ChainStageOwner {
+                chain_id: job_id.to_string(),
+                stage_index: stage_idx,
+            }),
         )
         .await
         .map_err(|error| anyhow!(error.error))?
@@ -220,7 +226,8 @@ pub(crate) async fn render(
             // Admission verifies the expected request's owner-bound receipt.
             // If GC raced the lookup, the returned batch is a newly admitted,
             // owned child and must be followed rather than orphaned.
-            let verified = verify_or_admit_child(&state, &client_id, &request).await?;
+            let verified =
+                verify_or_admit_child(&state, &client_id, &request, job_id, stage_idx).await?;
             let detail = state
                 .queue_journal
                 .durable_generation_batch(&verified)
@@ -258,7 +265,7 @@ pub(crate) async fn render(
     let batch_id = if let Some(detail) = existing.1 {
         detail.batch.id
     } else {
-        verify_or_admit_child(&state, &expected_client_id, &request).await?
+        verify_or_admit_child(&state, &expected_client_id, &request, job_id, stage_idx).await?
     };
     let mut child_activity_recorded = false;
     let outcome = async {

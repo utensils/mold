@@ -221,6 +221,12 @@ export interface MeshServerCapabilities {
 }
 
 export interface ServerCapabilities {
+  /** Durable requested-duration movies; absence is an older host. */
+  video_jobs?: {
+    supported?: boolean;
+    literal_prompts?: boolean;
+    library_extend?: boolean;
+  } | null;
   catalog?: { available: boolean; families: string[] } | null;
   generation_profile_v1?: boolean;
   /** 3-D mesh support (additive; absent on servers that predate it):

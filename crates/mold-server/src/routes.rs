@@ -430,6 +430,11 @@ use crate::queue::clean_error_message;
         crate::routes_chain_jobs::preview_chain_job_placement,
         crate::routes_chain_jobs::list_chain_jobs,
         crate::routes_chain_jobs::get_chain_job,
+        crate::video_source_upload_routes::begin,
+        crate::video_source_upload_routes::status,
+        crate::video_source_upload_routes::append,
+        crate::video_source_upload_routes::complete,
+        crate::video_source_upload_routes::remove,
         crate::chain_restart::options,
         crate::chain_restart::export,
         crate::chain_restart::discard,
@@ -668,6 +673,7 @@ pub fn create_router(state: AppState) -> Router {
     // Stateful routes (need AppState) are added first, then .with_state() converts
     // Router<AppState> → Router<()>. Stateless routes (OpenAPI, docs) are merged after.
     Router::new()
+        .merge(crate::video_jobs::router())
         .route("/api/generate", post(generate))
         .route("/api/generate/estimate", post(generate_estimate))
         .route(
@@ -757,6 +763,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/generate/chain/validate",
             post(crate::routes_chain::validate_chain)
                 .layer(DefaultBodyLimit::max(CHAIN_PART_REQUEST_BODY_BYTES)),
+        )
+        .route(
+            "/api/video-source-uploads/:id",
+            post(crate::video_source_upload_routes::begin)
+                .get(crate::video_source_upload_routes::status)
+                .delete(crate::video_source_upload_routes::remove)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
+        .route(
+            "/api/video-source-uploads/:id/chunks",
+            put(crate::video_source_upload_routes::append).layer(DefaultBodyLimit::max(
+                crate::video_source_upload::MAX_CHUNK_BYTES,
+            )),
+        )
+        .route(
+            "/api/video-source-uploads/:id/complete",
+            post(crate::video_source_upload_routes::complete),
         )
         .route(
             "/api/chain-jobs",
@@ -2104,26 +2127,35 @@ pub(crate) async fn materialize_chain_camera_controls(
     config: &mold_core::Config,
     request: &mold_core::ChainRequest,
 ) -> Result<(), ApiError> {
+    let generate = chain_camera_control_request(request);
+    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
+    materialize_builtin_ltx2_camera_controls(state, &planned).await
+}
+
+pub(crate) fn chain_camera_control_request(
+    request: &mold_core::ChainRequest,
+) -> mold_core::GenerateRequest {
     let mut generate = request.synthetic_generate_request(
         mold_core::OutputFormat::Mp4,
         request.estimated_total_frames(),
         request.fps,
     );
-    generate.loras = Some(
-        request
-            .stages
-            .iter()
-            .flat_map(|stage| stage.loras.iter())
-            .map(|lora| mold_core::LoraWeight {
-                path: lora.path.clone(),
-                scale: lora.scale,
+    if request.generation_controls.is_none() {
+        generate.loras = Some(
+            request
+                .stages
+                .iter()
+                .flat_map(|stage| stage.loras.iter())
+                .map(|lora| mold_core::LoraWeight {
+                    path: lora.path.clone(),
+                    scale: lora.scale,
 
-                expert: None,
-            })
-            .collect(),
-    );
-    let planned = plan_builtin_ltx2_camera_controls_in_config(config, &generate)?;
-    materialize_builtin_ltx2_camera_controls(state, &planned).await
+                    expert: None,
+                })
+                .collect(),
+        );
+    }
+    generate
 }
 
 async fn materialize_builtin_ltx2_camera_controls(
@@ -3448,6 +3480,7 @@ async fn cancel_generation_batch(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<mold_core::GenerationBatchStatus>, ApiError> {
+    crate::video_job_child_authority::require_public_batch(&state, &id).await?;
     cancel_generation_batch_children(&state, &id).await?;
     let journal = state.queue_journal.clone();
     let detail = spawn_queue_read(move || {
@@ -7159,6 +7192,10 @@ async fn list_queue(
         schedulable_offset,
     )?;
 
+    crate::video_job_child_authority::suppress_owned_generations(&state, &mut entries).await?;
+    let mut live_only_entries = live_only_entries;
+    crate::video_job_child_authority::suppress_owned_generations(&state, &mut live_only_entries)
+        .await?;
     enrich_queue_model_downloads(&state, &mut entries).await?;
     let page = mold_core::QueuePage {
         limit,
@@ -7445,7 +7482,13 @@ where
     tokio::task::spawn_blocking(mutation)
         .await
         .map_err(|error| ApiError::internal(format!("queue mutation task failed: {error}")))?
-        .map_err(|error| ApiError::internal(format!("queue mutation failed: {error:#}")))
+        .map_err(|error| {
+            if error.is::<mold_db::video_job_child_owners::OwnedChildMutation>() {
+                crate::video_job_child_authority::owned()
+            } else {
+                ApiError::internal(format!("queue mutation failed: {error:#}"))
+            }
+        })
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -7709,6 +7752,7 @@ async fn patch_queue_job(
     Path(id): Path<String>,
     Json(req): Json<QueuePatchRequest>,
 ) -> Result<Json<crate::job_registry::JobEntry>, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     if let Some(Some(target)) = req.target_gpu {
         let available = state
             .gpu_pool
@@ -7893,6 +7937,7 @@ async fn cancel_queue_job(
     Path(id): Path<String>,
     Query(query): Query<CancelQueueJobQuery>,
 ) -> Result<Response, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     // Serialize the durable probe, bounded registry revocation, and durable
     // cancellation with feeder publication and PATCH. SQLite can block behind
     // another connection, so the scheduler fence is acquired only for the
@@ -7952,7 +7997,7 @@ struct CancelQueueJobQuery {
 /// What one row's cancellation did, so the single-job route can answer 404
 /// while the batch route simply skips a child nobody can cancel any more.
 #[derive(Debug, PartialEq, Eq)]
-enum QueueJobCancelOutcome {
+pub(crate) enum QueueJobCancelOutcome {
     Pending,
     Cancelled,
     Completing,
@@ -7963,7 +8008,7 @@ enum QueueJobCancelOutcome {
 /// `lock_durable_transition`, which is what serializes this against feeder
 /// publication and PATCH — it is deliberately not taken here so a batch can
 /// cancel every child under one transition.
-async fn cancel_one_queue_job(
+pub(crate) async fn cancel_one_queue_job(
     state: &AppState,
     id: &str,
 ) -> Result<QueueJobCancelOutcome, ApiError> {
@@ -8094,6 +8139,7 @@ async fn export_held_queue_job(
     Path(id): Path<String>,
     Json(authority): Json<TransferAuthority>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     {
         let _transition = state.queue_journal.lock_durable_transition().await;
         validate_held_transfer(&state, &id, &authority).await?;
@@ -8130,6 +8176,7 @@ async fn complete_held_queue_transfer(
     Path(id): Path<String>,
     Json(authority): Json<TransferAuthority>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     let _transition = state.queue_journal.lock_durable_transition().await;
     validate_held_transfer(&state, &id, &authority).await?;
     // Never stop a job another client has resumed while bytes were travelling.
@@ -8158,6 +8205,7 @@ async fn retry_queue_job(
     Path(id): Path<String>,
     Json(authority): Json<mold_core::GenerationRetryRequest>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     if authority.job_id != id {
         return Err(ApiError::with_code(
             "retry job authority does not match the route",
@@ -8207,6 +8255,7 @@ async fn pause_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     set_one_queue_job_paused(&state, &id, true).await
 }
 
@@ -8225,6 +8274,7 @@ async fn resume_queue_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    crate::video_job_child_authority::require_public_generation(&state, &id).await?;
     set_one_queue_job_paused(&state, &id, false).await
 }
 
@@ -8362,6 +8412,7 @@ async fn pause_queue(State(state): State<AppState>) -> Result<Json<QueuePauseRes
     )
 )]
 async fn resume_queue(State(state): State<AppState>) -> Result<Json<QueuePauseResponse>, ApiError> {
+    crate::video_job_child_authority::require_no_owned_waiting_generations(&state, true).await?;
     let v2_authoritative = state.scheduled_work.v2_authoritative();
     let changed = if v2_authoritative {
         state
@@ -8408,6 +8459,7 @@ async fn cancel_all_queue(
     State(state): State<AppState>,
 ) -> Result<Json<QueueCancelAllResponse>, ApiError> {
     let _durable_transition = state.queue_journal.lock_durable_transition().await;
+    crate::video_job_child_authority::require_no_owned_waiting_generations(&state, false).await?;
     let journal = state.queue_journal.clone();
     if spawn_queue_read(move || journal.any_transfer_reserved()).await? {
         return Err(ApiError::with_code(
@@ -8654,6 +8706,7 @@ async fn server_capabilities(
         ),
     };
     Json(mold_core::ServerCapabilities {
+        video_jobs: None,
         generation_profile_v1: true,
         licenses: true,
         gallery,
@@ -12195,10 +12248,16 @@ async fn delete_model_placement(
 
 // ── /api/openapi.json ─────────────────────────────────────────────────────────
 
-async fn openapi_json() -> impl IntoResponse {
+pub(crate) fn api_document() -> utoipa::openapi::OpenApi {
     let mut doc = ApiDoc::openapi();
+    #[cfg(feature = "mp4")]
+    doc.merge(crate::video_job_openapi::VideoJobApiDoc::openapi());
     doc.info.version = mold_core::build_info::VERSION.to_string();
-    Json(doc)
+    doc
+}
+
+async fn openapi_json() -> impl IntoResponse {
+    Json(api_document())
 }
 
 // ── /api/docs ─────────────────────────────────────────────────────────────────

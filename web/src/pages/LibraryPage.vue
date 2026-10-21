@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import { LibraryVisit } from "@studio/lib/libraryUnreadLedger";
 import { useSourceMediaVisibility } from "@studio/lib/sourceMediaVisibility";
 import { viewerAfterRemoval } from "@studio/lib/viewerRemoval";
@@ -2422,6 +2423,7 @@ async function onReuse(item: GalleryImage) {
     height: form.state.value.height,
     sourceFit: JSON.stringify(form.state.value.sourceFitPolicy),
   };
+  requestVideoDurationReset();
   closeLightbox();
   await router.push({ name: "create" });
   if (epoch !== reuseEpoch) return;
