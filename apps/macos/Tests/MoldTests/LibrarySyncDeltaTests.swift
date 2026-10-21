@@ -285,7 +285,8 @@ struct LibrarySyncDeltaTests {
         let library = bench.library()
         await library.syncAllLocally()
         #expect(bench.target.importedNames.isEmpty)
-        #expect(bench.source.callCount("retainedMediaTransferOffer") <= 1, "no retained input moved after the failure")
+        #expect(bench.source.callCount("retainedSourceMediaBytes") == 0, "no retained input moved after the failure")
+        #expect(bench.target.callCount("importRetainedMedia") == 0)
         #expect(library.localSaveFailures.contains { $0.contains("a.png") })
     }
 

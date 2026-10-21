@@ -4,15 +4,15 @@ import Foundation
 extension RetainedSourceMedia {
     /// Only the exact offered output may corroborate facts omitted from an
     /// older archive. Never use a filename or unverified embedded recipe.
-    static func mirrorRecipeMatches(_ destination: OutputMetadata?, source: TransferOffer,
+    static func mirrorRecipeMatches(_ destination: TransferOffer, source: TransferOffer,
                                     filename: String, origin: any MoldBackend, downloadedOutput: URL? = nil) async throws -> Bool {
-        if mirrorMetadataMatches(destination, source.metadata) { return true }
+        if mirrorMetadataMatches(destination.canonicalMetadataJSON, source.canonicalMetadataJSON) { return true }
         let suffix = URL(fileURLWithPath: filename).pathExtension.lowercased()
         guard ["png", "jpg", "jpeg", "gif"].contains(suffix),
               source.outputSizeBytes > 0, source.outputSizeBytes <= ResponseCeiling.media,
-              let metadata = source.metadata, let destination else { return false }
-        let missingScheduler = (metadata.scheduler == nil) != (destination.scheduler == nil)
-        let missingTransparency = (metadata.transparentBackground == nil) != (destination.transparentBackground == nil)
+              let metadata = source.metadata, let destinationMetadata = destination.metadata else { return false }
+        let missingScheduler = (metadata.scheduler == nil) != (destinationMetadata.scheduler == nil)
+        let missingTransparency = (metadata.transparentBackground == nil) != (destinationMetadata.transparentBackground == nil)
         guard missingScheduler || missingTransparency else { return false }
         let file: URL
         if let downloadedOutput { file = downloadedOutput }
@@ -33,8 +33,8 @@ extension RetainedSourceMedia {
         guard count == source.outputSizeBytes, hash == source.outputSha256,
               let embedded = try EmbeddedPrintMetadata.json(in: file, named: filename,
                                                             metadataCeiling: 2 * 1_024 * 1_024) else { return false }
-        return mirrorMetadataMatches(try MoldJSON.encoder.encode(metadata),
-                                     try MoldJSON.encoder.encode(destination),
+        return mirrorMetadataMatches(source.canonicalMetadataJSON,
+                                     destination.canonicalMetadataJSON,
                                      verifiedEmbeddedRecipe: embedded)
     }
 }
