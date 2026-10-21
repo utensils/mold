@@ -404,8 +404,7 @@ export async function inspectLegacyVideoSettings(
     };
   });
   if (
-    (metadata.source_image_sha256 != null ||
-      Boolean(metadata.source_image_name)) &&
+    metadata.source_image_sha256 != null &&
     !rows.some((row) => row.kind === "source" && row.stage === 0)
   )
     throw new Error(

@@ -374,3 +374,17 @@ it("allows a historical no-input H3 source label without inventing a missing fir
   ).toBeUndefined();
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("allows a name-only no-input H3 label in an available empty archive too", async () => {
+  const m = { ...metadata, source_image_name: "text-to-video" };
+  json.mockImplementation(async (_t, path) =>
+    path === "/api/status"
+      ? { instance_id: "installation" }
+      : { metadata: m, archive_identity_sha256: "a".repeat(64), members: [] },
+  );
+  expect(
+    (await inspectLegacyVideoSettings(owner, "movie.mp4", m)).request.stages[0]
+      ?.source_image,
+  ).toBeUndefined();
+  expect(fetch).not.toHaveBeenCalled();
+});
