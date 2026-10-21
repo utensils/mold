@@ -7,6 +7,27 @@ import Testing
 
 @MainActor
 struct PromptPanelLayoutTests {
+    @Test func incompleteDurationPlanCannotAdvertiseAnUnqualifiedRecipeMaximum() async throws {
+        let planner = VideoPlanController(debounceNanoseconds: 0)
+        let editor = NativeDurationEditor(draft: .constant(.init(seconds: "6")), planner: planner,
+            prompt: "bird", retry: {}, startFresh: {})
+        #expect(editor.singleGenerationSeconds == nil,
+            "An absent/invalid qualified plan must not fall back to 345/24 = 14.38 seconds; this H3 recipe qualified at 124/24 = 5.17 seconds.")
+        let plan = try MoldJSON.decoder.decode(VideoJobPlan.self, from: Data("""
+        {"validation_revision":"","model":"h3","width":768,"height":768,"fps":24,"single_clip_max_frames":124,"overlap_frames":1,"join_mode":"continuous","clip_count":"2","part_count":"2","added_frames":"144","source_frames":"0","total_frames":"144","added_duration_ms":"6000","total_duration_ms":"6000","warnings":[]}
+        """.utf8))
+        struct PlannedVideo: MoldVideoBackend {
+            let plan: VideoJobPlan
+            func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan { plan }
+        }
+        let backend = PlannedVideo(plan: plan)
+        let request = VideoJobRequest(generation: .init(prompt: "bird", model: "h3", width: 768, height: 768, steps: 3, guidance: 0), durationMs: 6000)
+        await planner.update(request, backend: backend, current: { true }).value
+        #expect(editor.singleGenerationSeconds == Double(124) / 24)
+        planner.clear()
+        #expect(editor.singleGenerationSeconds == nil, "An invalidated preview must not retain the old limit or invent a recipe maximum")
+    }
+
     @Test func sourceOpeningFailureBlocksOrdinaryPromptUntilExplicitAcknowledgement() {
         let hosts = HostStore(hosts: []) { _ in FakeBackend(host: MoldHost(name: "test", baseURL: URL(string: "http://test")!)) }
         let controller = GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))

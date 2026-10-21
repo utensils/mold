@@ -8,8 +8,6 @@ struct NativeDurationEditor: View {
     @Binding var draft: VideoDurationDraft
     @Bindable var planner: VideoPlanController
     let prompt: String
-    let singleClipMaxFrames: Int?
-    let fps: Int
     var reuseNotice: String? = nil
     var sourceTitle: String? = nil
     var sourceMachine: String? = nil
@@ -21,6 +19,11 @@ struct NativeDurationEditor: View {
     var retrySource: () -> Void = {}
     let retry: () -> Void
     let startFresh: () -> Void
+
+    var singleGenerationSeconds: Double? {
+        guard let plan = planner.plan else { return nil }
+        return Double(plan.singleClipMaxFrames) / Double(max(1, plan.fps))
+    }
 
     private var scenesActive: Bool { draft.scenesEnabled && !draft.scenes.isEmpty }
     var body: some View {
@@ -89,9 +92,8 @@ struct NativeDurationEditor: View {
                     draft.updateDurationFromScenes()
                 }.frame(minHeight: 44).accessibilityIdentifier("duration-define-scenes")
             }
-            if let maximum = planner.plan?.singleClipMaxFrames ?? singleClipMaxFrames {
-                let rate = max(1, planner.plan?.fps ?? fps)
-                Text("Single generation: up to \(Double(maximum) / Double(rate), format: .number.precision(.fractionLength(0 ... 2))) seconds")
+            if let seconds = singleGenerationSeconds {
+                Text("Single generation: up to \(seconds, format: .number.precision(.fractionLength(0 ... 2))) seconds")
                     .font(.caption).foregroundStyle(.secondaryText)
                     .accessibilityIdentifier("duration-single-limit")
             }
