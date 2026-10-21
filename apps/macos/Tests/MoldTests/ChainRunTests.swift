@@ -8,6 +8,22 @@ import Testing
 /// **Fails today**: the app admitted a batch whatever the length was.
 @MainActor
 struct ChainRunTests {
+    @Test func cancellationSnapshotsStayValidWhileAsyncRequestsComplete() async throws {
+        let backend = FakeBackend(host: machine())
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for index in 0..<256 {
+                group.addTask {
+                    try await backend.cancelChainJob(id: "chain-\(index)")
+                    let snapshot = backend.cancelledChainJobIds
+                    #expect(snapshot.allSatisfy { $0.hasPrefix("chain-") })
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(backend.cancelledChainJobIds.count == 256)
+        #expect(Set(backend.cancelledChainJobIds).count == 256)
+    }
+
     private func machine(_ name: String = "workstation") -> MoldHost {
         MoldHost(name: name, baseURL: URL(string: "http://\(name)")!)
     }
