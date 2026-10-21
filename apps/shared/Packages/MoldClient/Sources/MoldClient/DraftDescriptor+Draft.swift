@@ -25,6 +25,7 @@ public extension DraftDescriptor {
         prefersAutomaticDuration = draft.prefersAutomaticDuration
         fps = draft.fps
         pipeline = draft.pipeline
+        spatialUpscale = draft.spatialUpscale; temporalUpscale = draft.temporalUpscale
         enableAudio = draft.enableAudio
         preferredAudio = draft.preferredAudio
         hasAudioPreference = draft.preferredAudio != nil
@@ -71,6 +72,7 @@ public extension DraftDescriptor {
         draft.prefersAutomaticDuration = prefersAutomaticDuration ?? false
         draft.fps = fps
         draft.pipeline = pipeline
+        draft.spatialUpscale = spatialUpscale; draft.temporalUpscale = temporalUpscale
         if hasAudioPreference == nil {
             // A descriptor from before capability and preference were split.
             // Its one bool is the only user-state evidence available. In

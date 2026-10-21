@@ -5,7 +5,7 @@ public extension VideoRestartController {
                 current: @escaping @MainActor () -> Bool) async {
         guard var record = admission, record.matches(destination), !isCancelling,
               current(), backend.host == destination.host,
-              detail.map({ ChainJobRecoveryPolicy.canCancel(state: $0.state) }) ?? true else { return }
+              ((record.protocolKind ?? .chain) == .videoJob ? parentDetail?.canCancel ?? true : detail.map({ ChainJobRecoveryPolicy.canCancel(state: $0.state) }) ?? true) else { return }
         do {
             record.cancelRequested = true
             try save(record); admission = record
@@ -24,11 +24,16 @@ extension VideoRestartController {
         try await verify(destination, backend: backend, current: current)
         let capabilities = try await backend.capabilities()
         guard current() else { throw changed() }
-        guard capabilities.canControlRestartedChain else {
-            throw SequenceDraftError.invalid("Update the destination machine before stopping this video attempt.")
+        if (record.protocolKind ?? .chain) == .videoJob {
+            guard capabilities.canCreateVideoJob else { throw SequenceDraftError.invalid("Update the destination machine before stopping this video attempt.") }
+            try await backend.cancelVideoJob(id: record.operationId, destinationInstanceId: record.destinationInstanceId)
+        } else {
+            guard capabilities.canControlRestartedChain else {
+                throw SequenceDraftError.invalid("Update the destination machine before stopping this video attempt.")
+            }
+            try await backend.cancelChainOperation(id: record.operationId, operationId: record.operationId,
+                                                  destinationInstanceId: record.destinationInstanceId)
         }
-        try await backend.cancelChainOperation(id: record.operationId, operationId: record.operationId,
-                                              destinationInstanceId: record.destinationInstanceId)
         var acknowledged = record
         acknowledged.cancelAcknowledged = true
         try save(acknowledged)

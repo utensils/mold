@@ -1079,3 +1079,9 @@ On updated machines advertising duration video jobs, use one prompt and **Durati
 Library **Extend Video…** opens the original recipe and adds duration to its ending, producing a longer movie while keeping the original. The original machine and source identity stay pinned; original typed references are shown and inherited unless replaced. Historical opening and closing images are cleared. For continuous extension, the original ending supplies the first frame; a newly attached opening image remains visible and must be removed before generating. Older machines retain the existing single-generation controls, while saved authored-sequence drafts keep their separate-part **Continue video** behavior.
 
 The editor uses the selected host’s frame grid and validates delivered duration before admission. Reconnect recovers the same operation; Queue shows parent progress and supports applicable resume/cancel actions. Reference restoration is explicit after relaunch; drafts do not persist input bytes or credentials.
+
+Failed or interrupted video jobs offer **Start again…** when their machine supports recovery. Choose the same machine to start again, or another compatible machine to **Send video**. This creates a new attempt and keeps the original. Saved attempts remain in Queue after relaunch and can be checked or stopped using their original operation identity; unanswered submissions are never silently submitted again. **Delete job…** removes the confirmed job’s recovery data while keeping saved Library videos.
+
+Extend preserves compatible original spatial and temporal upscaling, shows the inherited recipe, and starts new footage with a fresh random seed unless one is explicitly chosen.
+
+Historical IC-LoRA/ControlNet recipes that this native editor cannot faithfully preserve show an explicit refusal; use the saved job’s **Start again** when available, or the CLI with the original retained controls. These settings are never silently removed.

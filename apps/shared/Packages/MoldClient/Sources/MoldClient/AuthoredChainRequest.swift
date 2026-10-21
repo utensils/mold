@@ -206,7 +206,7 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
         if request.sampleShift != nil { unsupported.append("sample shift") }
         if request.distillStrengthHigh != nil || request.distillStrengthLow != nil { unsupported.append("distillation overrides") }
         if request.transparentBackground == true { unsupported.append("transparency") }
-        if request.upscaleModel != nil { unsupported.append("upscaling") }
+        if request.upscaleModel != nil || request.spatialUpscale != nil || request.temporalUpscale != nil { unsupported.append("upscaling") }
         if request.videoOnly == true { unsupported.append("video-only override") }
         if request.referenceWeight != nil { unsupported.append("reference-weight override") }
         if request.saveToGallery == false { unsupported.append("saving outside the Library") }

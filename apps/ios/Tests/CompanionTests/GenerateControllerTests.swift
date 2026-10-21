@@ -13,6 +13,23 @@ import UIKit
 /// switch adopting its recipe.
 @MainActor
 struct GenerateControllerTests {
+    @Test func orphanedRestartReceiptKeepsQueueRecoveryVisibleWithoutMachines() async throws {
+        let (original, _) = try await setUp()
+        let host = try #require(original.hosts.hosts.first)
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let record: [String:Any] = ["operation_id":"pending", "destination_host_id":host.id.uuidString,
+            "destination_origin":host.baseURL.absoluteString, "destination_instance_id":"installation",
+            "destination_mode":host.connectionMode.rawValue, "source_host_id":UUID().uuidString,
+            "source_job_id":"source", "source_instance_id":"original", "source_revision":"revision",
+            "protocol_kind":"videoJob", "cancel_requested":false, "cancel_acknowledged":false]
+        defaults.set(try JSONSerialization.data(withJSONObject: [record]), forKey: VideoRestartController.journalKey)
+        let restored = GenerateController(hosts: original.hosts, ledger: original.ledger, drafts: original.drafts,
+            videoRestarts: VideoRestartController(defaults: defaults))
+        original.hosts.setHosts([])
+        #expect(original.hosts.hosts.isEmpty)
+        #expect(restored.hasVideoQueueContent)
+    }
+
     @Test func pinnedSourceUsesItsOwnInstalledModelContract() async throws {
         let (generate, _) = try await setUp()
         let first = try #require(generate.hosts.hosts.first)

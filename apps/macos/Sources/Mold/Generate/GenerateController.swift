@@ -8,6 +8,7 @@ import MoldClient
 final class GenerateController {
     let sequence = NativeSequenceSession(defaults: AppStorageSuite.defaults)
     let videoJobs = VideoJobCoordinator(defaults: AppStorageSuite.defaults)
+    let videoRestarts = VideoRestartController(defaults: AppStorageSuite.defaults)
     let videoPlanner = VideoPlanController()
     var videoDuration: VideoDurationAuthoring?
     var durationSubmitting = false

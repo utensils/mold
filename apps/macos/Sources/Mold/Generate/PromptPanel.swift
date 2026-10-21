@@ -79,6 +79,7 @@ struct PromptPanel: View {
                                     sourceMachine: host?.name, busy: controller.durationSubmitting,
                                     originalReferencesReplaced: !controller.draft.media.generationReferences.isEmpty,
                     originalReferences: controller.durationSource?.originalReferences,
+                    inheritedRecipeNotes: controller.durationSource?.inheritedRecipeNotes ?? [],
                                     sourceNotice: controller.durationSourceError,
                                     retrySource: { Task { await controller.restoreDurationSource() } },
                                     retry: { controller.planDuration(on: host, recipe: recipe) },

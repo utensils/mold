@@ -48,6 +48,8 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
     public var prefersAutomaticDuration: Bool?
     public var fps: Int?
     public var pipeline: String?
+    public var spatialUpscale: String?
+    public var temporalUpscale: String?
     public var enableAudio: Bool
     /// New descriptors carry the parked preference and whether it was ever
     /// authored. Both are optional so v1 files written before the split still
@@ -83,7 +85,7 @@ public struct DraftDescriptor: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case version, localInputsSHA256, model, family, recipeID, videoDuration, prompt, negativePrompt, width, height
-        case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline, prefersAutomaticDuration
+        case steps, guidance, batchSize, seed, locksSeed, frames, fps, pipeline, spatialUpscale, temporalUpscale, prefersAutomaticDuration
         case enableAudio, preferredAudio, hasAudioPreference, videoOnly, strength, title, tags,
              collectionName, autoTagTitle
         case outputFormat, transparentBackground, upscaleModel, savesToGallery, canvasIntent,

@@ -51,4 +51,12 @@ struct VideoDurationPersistenceTests {
         #expect(authoring.openingConflict(plan: plan, generation: generation) == nil)
     }
 
+    @Test func durationProjectionRetainsClosingFrameLocatorWithoutChangingAutomaticPreference() {
+        var draft = RenderDraft(); draft.frames = 121; draft.fps = 24
+        draft.supportsDurationPrediction = true; draft.prefersAutomaticDuration = true
+        #expect(RenderRequest.one(draft, model: "video").frames == nil)
+        #expect(RenderRequest.one(draft.durationGenerationDraft, model: "video").frames == 121)
+        #expect(draft.prefersAutomaticDuration)
+    }
+
 }

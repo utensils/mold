@@ -3,6 +3,12 @@ import MoldClient
 import UIKit
 
 extension GenerateController {
+    var hasVideoQueueContent: Bool {
+        !sequence.jobs.isEmpty || sequence.historyNotice != nil
+            || !videoJobs.jobs.isEmpty || !videoJobs.pending.isEmpty || videoJobs.error != nil
+            || !videoRestarts.pending.isEmpty || videoRestarts.error != nil
+    }
+
     /// Authored sequence drafts keep their original separate-part semantics.
     var canAuthorVideoDuration: Bool {
         kind == .clip && sequence.draft == nil
@@ -35,7 +41,7 @@ extension GenerateController {
         }
         if videoJobs.hasUncertainAdmission(on: owner) { return "Check the saved video attempt in Queue before making another video." }
         do {
-            _ = try authoring.request(generation: RenderRequest.one(draft, model: modelName,
+            _ = try authoring.request(generation: RenderRequest.one(draft.durationGenerationDraft, model: modelName,
                 maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0), owner: owner)
             return nil
         } catch { return UserFacingError.describe(error) }
@@ -43,7 +49,7 @@ extension GenerateController {
 
     func durationRequests(from prepared: RenderDraft, authoring: VideoDurationAuthoring,
                           owner: VideoJobOwner, model: String, copies: Int, randomBase: UInt64) throws -> [VideoJobRequest] {
-        try RenderRequest.batch(prepared, model: model, copies: copies, randomBase: randomBase,
+        try RenderRequest.batch(prepared.durationGenerationDraft, model: model, copies: copies, randomBase: randomBase,
             maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0)
             .map { try authoring.request(generation: $0, owner: owner) }
     }
@@ -134,7 +140,7 @@ extension GenerateController {
             videoPlanner.clear(); return
         }
         let snapshot = draft
-        guard let request = try? authoring.request(generation: RenderRequest.one(snapshot, model: modelName,
+        guard let request = try? authoring.request(generation: RenderRequest.one(snapshot.durationGenerationDraft, model: modelName,
             maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0), owner: owner) else {
             videoPlanner.clear(); return
         }

@@ -9,6 +9,9 @@ public final class VideoRestartController {
     public private(set) var pending: [VideoRestartAdmission] = []
     public internal(set) var admission: VideoRestartAdmission?
     public internal(set) var detail: ChainJobDetail?
+    public internal(set) var parentDetail: VideoJob?
+    public internal(set) var protocolKind: VideoRestartProtocol = .chain
+    public internal(set) var progress: String?
     public internal(set) var options: ChainRestartOptions?
     public internal(set) var error: String?
     public internal(set) var notice: String?
@@ -37,17 +40,19 @@ public final class VideoRestartController {
         }
     }
 
-    public func open(source: VideoRestartTarget, jobId: String, backend: any MoldBackend,
+    public func open(source: VideoRestartTarget, jobId: String, protocolKind: VideoRestartProtocol = .chain, backend: any MoldBackend,
                      current: @escaping @MainActor () -> Bool) async {
+        guard !isBusy else { return }
         revision += 1
+        self.protocolKind = protocolKind
         let mine = revision
         self.source = source; sourceJobId = jobId; sourceBackend = backend; sourceCurrent = current
         isLoading = false
-        options = nil; detail = nil; error = journalError; notice = nil; admission = nil
+        options = nil; detail = nil; parentDetail = nil; progress = nil; error = journalError; notice = nil; admission = nil
         cancelledBeforeAdmission = false
         guard journalError == nil else { return }
         if let saved = pending.last(where: { $0.sourceHostId == source.host.id && $0.sourceJobId == jobId
-            && $0.sourceInstanceId == source.instanceId }) {
+            && $0.sourceInstanceId == source.instanceId && ($0.protocolKind ?? .chain) == protocolKind }) {
             admission = saved
             return
         }
@@ -56,13 +61,28 @@ public final class VideoRestartController {
         do {
             try await verify(source, backend: backend, current: current)
             guard mine == revision, current() else { return }
-            let loaded = try await backend.chainRestartOptions(id: jobId)
+            let loaded: ChainRestartOptions
+            if protocolKind == .videoJob { loaded = try await backend.videoRestartOptions(id: jobId, sourceInstanceId: source.instanceId) }
+            else { loaded = try await backend.chainRestartOptions(id: jobId) }
             guard mine == revision, current() else { return }
             guard loaded.sourceInstanceId == source.instanceId else { throw changed() }
             options = loaded
         } catch {
             if mine == revision { self.error = UserFacingError.describe(error) }
         }
+    }
+
+    /// Reconcile a saved operation even when its original source was removed.
+    /// This deliberately restores no source/export authority and cannot create.
+    @discardableResult public func restorePending(_ record: VideoRestartAdmission) -> Bool {
+        guard !isBusy, journalError == nil, pending.contains(record) else { return false }
+        revision += 1
+        protocolKind = record.protocolKind ?? .chain
+        admission = record
+        source = nil; sourceJobId = nil; sourceBackend = nil; sourceCurrent = { false }
+        detail = nil; parentDetail = nil; options = nil; progress = nil
+        error = nil; notice = nil; isLoading = false; cancelledBeforeAdmission = false
+        return true
     }
 
     public func close() { revision += 1; isLoading = false; options = nil }
@@ -74,7 +94,7 @@ public final class VideoRestartController {
         guard current(), status.instanceId == target.instanceId else { throw changed() }
         let capabilities = try await backend.capabilities()
         guard current() else { throw changed() }
-        guard capabilities.canRestartChain else {
+        guard protocolKind == .videoJob ? capabilities.canRestartVideoJob : capabilities.canRestartChain else {
             throw SequenceDraftError.invalid("Update this machine before restarting a saved video job.")
         }
     }
@@ -105,6 +125,6 @@ public final class VideoRestartController {
         if case .unauthorized = error { return true }
         guard case let .http(status, code, _) = error else { return false }
         return [400, 401, 403, 404, 413, 415, 422, 451].contains(status)
-            || (status == 409 && code == "CHAIN_DESTINATION_CHANGED")
+            || (status == 409 && ["CHAIN_DESTINATION_CHANGED", "VIDEO_DESTINATION_CHANGED"].contains(code ?? ""))
     }
 }

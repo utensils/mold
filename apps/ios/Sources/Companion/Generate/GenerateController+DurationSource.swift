@@ -17,7 +17,7 @@ extension GenerateController {
         }
         if let modelName {
             return authoring.openingConflict(plan: videoPlanner.plan,
-                generation: RenderRequest.one(draft, model: modelName, maxIdentityPhotos: 0))
+                generation: RenderRequest.one(draft.durationGenerationDraft, model: modelName, maxIdentityPhotos: 0))
         }
         return nil
     }

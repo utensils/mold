@@ -1,7 +1,7 @@
 import Foundation
 
 /// Duration parents own clip planning, one final Library print and recovery.
-public protocol MoldVideoBackend: Sendable {
+public protocol MoldVideoBackend: MoldParentRestartBackend {
     func prepareVideoJob(_ request: VideoJobRequest) async throws -> PreparedVideoJob
     func planVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan
     func validateVideoJob(_ request: VideoJobRequest) async throws -> VideoJobPlan

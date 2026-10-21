@@ -1,5 +1,7 @@
 import Foundation
 
+public enum VideoRestartProtocol: String, Codable, Hashable, Sendable { case chain, videoJob }
+
 public struct VideoRestartTarget: Hashable, Sendable {
     public let host: MoldHost
     public let instanceId: String
@@ -19,6 +21,7 @@ public struct VideoRestartAdmission: Codable, Hashable, Sendable, Identifiable {
     public let sourceJobId: String
     public let sourceInstanceId: String
     public let sourceRevision: String
+    public var protocolKind: VideoRestartProtocol? = nil
     public var cancelRequested = false
     public var cancelAcknowledged = false
 

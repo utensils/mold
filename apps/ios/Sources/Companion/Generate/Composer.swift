@@ -155,6 +155,7 @@ struct Composer: View {
                     busy: generate.durationTask != nil,
                     originalReferencesReplaced: !generate.draft.media.generationReferences.isEmpty,
                     originalReferences: generate.durationSource?.originalReferences,
+                    inheritedRecipeNotes: generate.durationSource?.inheritedRecipeNotes ?? [],
                     sourceNotice: generate.durationSourceError,
                     retrySource: { Task { await generate.restoreDurationSource() } }, retry: { generate.refreshDurationPlan() },
                     startFresh: { generate.videoDuration?.startFresh(); generate.durationSource = nil; generate.durationSourceError = nil; generate.saveDraft() })

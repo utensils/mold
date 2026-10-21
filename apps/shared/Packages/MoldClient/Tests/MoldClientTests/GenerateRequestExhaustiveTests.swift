@@ -63,6 +63,8 @@ import Testing
         request.outputFormat = "png"
         request.transparentBackground = true
         request.upscaleModel = "real-esrgan-x4plus:fp16"
+        request.spatialUpscale = "2x"
+        request.temporalUpscale = "2x"
         request.title = "Robots"
         request.tags = ["metal"]
         request.collection = .named("Robots")

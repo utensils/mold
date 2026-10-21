@@ -102,7 +102,7 @@ public extension HTTPBackend {
         return try await bytes(for: http)
     }
 
-    private func videoDestination(_ instance: String, request: inout URLRequest) throws {
+    internal func videoDestination(_ instance: String, request: inout URLRequest) throws {
         guard !instance.isEmpty, videoDestinationInstance == nil || videoDestinationInstance == instance else {
             throw SequenceDraftError.invalid("Reconnect to verify this machine before changing a video job.")
         }

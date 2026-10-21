@@ -90,4 +90,22 @@ import MoldClientTesting
         #expect(backend.count("retainedSourceMedia(for:)") == 0)
     }
 
+    @Test func inheritedUpscalingAndAdvancedRecipeSurviveDraftPersistenceAndWireProjection() throws {
+        let metadata = try MoldJSON.decoder.decode(OutputMetadata.self, from: Data(#"{"model":"video","prompt":"tail","width":1536,"height":864,"generation_width":768,"generation_height":432,"fps":24,"spatial_upscale":"x2","temporal_upscale":"x2","sample_shift":1.25,"guidance_overrides":{"stg_scale":0.5}}"#.utf8))
+        let host = MoldHost(name: "Workstation", baseURL: URL(string: "http://workstation:7680")!)
+        let source = VideoLibraryExtensionSource(source: .init(filename: "original.mp4"), owner: .init(host: host, instanceId: "installation"), title: "Original", metadata: metadata, inventory: .init(availability: .unavailableLegacy, members: []))
+        let fresh = source.prefilledDraft
+        #expect(fresh.width == 768 && fresh.height == 432)
+        #expect(fresh.spatialUpscale == "x2" && fresh.temporalUpscale == "x2")
+        let saved = DraftDescriptor(fresh, model: "video", family: nil, recipeID: nil)
+        let descriptor = try MoldJSON.localDecoder.decode(DraftDescriptor.self, from: MoldJSON.localEncoder.encode(saved))
+        var restored = RenderDraft(); descriptor.apply(to: &restored)
+        let request = RenderRequest.one(restored, model: "video")
+        #expect(request.spatialUpscale == "x2" && request.temporalUpscale == "x2")
+        #expect(request.sampleShift == 1.25)
+        let wire = try #require(JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(request)) as? [String: Any])
+        #expect(wire["spatial_upscale"] as? String == "x2")
+        #expect(wire["temporal_upscale"] as? String == "x2")
+    }
+
 }

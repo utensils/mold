@@ -15,6 +15,7 @@ struct NativeDurationEditor: View {
     var busy = false
     var originalReferencesReplaced = false
     var originalReferences: [VideoOriginalReference]? = nil
+    var inheritedRecipeNotes: [String] = []
     var sourceNotice: String? = nil
     var retrySource: () -> Void = {}
     let retry: () -> Void
@@ -31,6 +32,9 @@ struct NativeDurationEditor: View {
                     .font(.caption).foregroundStyle(.secondaryText)
                 Text("Previous opening and closing frames are not reused for the new footage.")
                     .font(.caption).foregroundStyle(.secondaryText)
+                ForEach(inheritedRecipeNotes, id: \.self) { note in
+                    Text(note).font(.caption).foregroundStyle(.secondaryText)
+                }
                 if let originalReferences {
                     if !originalReferences.isEmpty {
                         Text(originalReferencesReplaced ? "Original references · replaced by your current references" : "Original references")

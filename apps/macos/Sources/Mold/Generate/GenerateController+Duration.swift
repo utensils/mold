@@ -26,7 +26,7 @@ extension GenerateController {
         guard let owner = durationOwner(host), let modelName, let videoDuration else {
             throw SequenceDraftError.invalid("Reconnect to the selected machine before generating this video.")
         }
-        let generation = RenderRequest.one(draft, model: modelName,
+        let generation = RenderRequest.one(draft.durationGenerationDraft, model: modelName,
             maxIdentityPhotos: hosts.capabilities[owner.host.id]?.maxIdentityPhotos ?? 0)
         let request = try videoDuration.request(generation: generation, owner: owner)
         return planning ? request.planningProjection : request
@@ -57,14 +57,14 @@ extension GenerateController {
         let snapshot = draft
         let caps = hosts.capabilities(of: host)
         let batchLimit = ReferenceUploadPolicy.batchLimit(
-            requests: [RenderRequest.one(snapshot, model: modelName)], apiKey: host.apiKey,
+            requests: [RenderRequest.one(snapshot.durationGenerationDraft, model: modelName)], apiKey: host.apiKey,
             capabilities: caps?.referenceUploads, batchLimit: caps?.maxBatchOutputs ?? snapshot.batchSize)
         guard snapshot.batchSize >= 1, snapshot.batchSize <= batchLimit else {
             submissionFeedback.begin("Batch exceeds this machine’s current limit. Choose a smaller batch before generating.", phase: .refused)
             return
         }
         let maxPhotos = hosts.capabilities[host.id]?.maxIdentityPhotos ?? 0
-        do { _ = try authoring.request(generation: RenderRequest.one(snapshot, model: modelName, maxIdentityPhotos: maxPhotos), owner: owner) }
+        do { _ = try authoring.request(generation: RenderRequest.one(snapshot.durationGenerationDraft, model: modelName, maxIdentityPhotos: maxPhotos), owner: owner) }
         catch { submissionFeedback.begin(UserFacingError.describe(error), phase: .refused); return }
         durationSubmitting = true
         submissionFeedback.begin("Preparing video…")
@@ -77,7 +77,7 @@ extension GenerateController {
                 // provenance and gives every resulting parent batch_size 1.
                 let fitted = try await snapshot.fittingSource(recipe: recipe)
                 guard current(), unchanged() else { throw SequenceDraftError.invalid("The draft or machine changed. Press Generate again.") }
-                let requests = RenderRequest.batch(fitted, model: modelName, copies: snapshot.batchSize, randomBase: UInt64.random(in: 0 ... UInt64(UInt32.max)),
+                let requests = RenderRequest.batch(fitted.durationGenerationDraft, model: modelName, copies: snapshot.batchSize, randomBase: UInt64.random(in: 0 ... UInt64(UInt32.max)),
                     maxIdentityPhotos: maxPhotos)
                 for generation in requests {
                     guard current(), unchanged() else { throw SequenceDraftError.invalid("The draft or machine changed. Check the video queue before trying again.") }

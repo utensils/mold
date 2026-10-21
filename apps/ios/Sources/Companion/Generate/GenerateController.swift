@@ -15,6 +15,7 @@ final class GenerateController {
     var videoDuration: VideoDurationAuthoring?
     let videoPlanner = VideoPlanController()
     let videoJobs: VideoJobCoordinator
+    let videoRestarts: VideoRestartController
     var durationError: String?
     var durationSource: VideoLibraryExtensionSource?
     var durationSourceLoading = false
@@ -77,7 +78,9 @@ final class GenerateController {
     init(hosts: HostStore, ledger: PendingLedger = .shared,
          drafts: DraftStore = DraftStore(directory: URL.applicationSupportDirectory.appending(path: "io.utensils.mold.companion")),
          initialMachine: MachineChoice? = nil, sequence: NativeSequenceSession = NativeSequenceSession(),
-         videoJobs: VideoJobCoordinator = VideoJobCoordinator()) {
+         videoJobs: VideoJobCoordinator = VideoJobCoordinator(),
+         videoRestarts: VideoRestartController = VideoRestartController()) {
+        self.videoRestarts = videoRestarts
         self.videoJobs = videoJobs
         self.sequence = sequence
         self.hosts = hosts

@@ -51,9 +51,13 @@ public struct VideoJobCapabilities: Codable, Hashable, Sendable {
     public let supported: Bool
     public let literalPrompts: Bool
     public let libraryExtend: Bool
+    public let sourceTransfer: Bool?
+    public let restart: Bool?
 }
 
 public extension Capabilities {
     var canCreateVideoJob: Bool { videoJobs?.supported == true && videoJobs?.literalPrompts == true }
+    var canRestartVideoJob: Bool { canCreateVideoJob && videoJobs?.restart == true }
+    var canTransferVideoSource: Bool { canCreateVideoJob && videoJobs?.sourceTransfer == true }
     var canExtendLibraryVideo: Bool { canCreateVideoJob && videoJobs?.libraryExtend == true }
 }

@@ -41,6 +41,7 @@ public enum RenderRequest {
         request.frames = draft.usesAutomaticDuration ? nil : draft.frames
         request.fps = draft.fps
         request.pipeline = draft.pipeline
+        request.spatialUpscale = draft.spatialUpscale; request.temporalUpscale = draft.temporalUpscale
         // A controllable video recipe receives BOTH choices explicitly:
         // omission resolves to audio-on at the server, so an authored OFF
         // must travel as false. Fixed-audio H3 and t2a recipes omit the flag;

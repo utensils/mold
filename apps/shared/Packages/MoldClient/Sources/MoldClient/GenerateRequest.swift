@@ -26,6 +26,8 @@ public struct GenerateRequest: Codable, Hashable, Sendable {
     /// Which of LTX-2's pipelines to run -- echoed from the recipe's own
     /// `request_selector.pipeline` string, never spelled `"auto"`.
     public var pipeline: String?
+    public var spatialUpscale: String?
+    public var temporalUpscale: String?
     /// A controllable video's audio choice. Fixed-audio and unsupported
     /// recipes omit it; ordinary capable recipes send either true or false.
     public var enableAudio: Bool?

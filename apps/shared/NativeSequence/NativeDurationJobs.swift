@@ -7,6 +7,8 @@ struct NativeDurationJobs: View {
     let backend: (VideoJobOwner) -> (any MoldBackend)?
     let current: (VideoJobOwner) -> Bool
     var open: ((MoldHost, String) -> Void)?
+    var restart: ((ObservedVideoJob) -> Void)?
+    var canRestart: (ObservedVideoJob) -> Bool = { _ in false }
     @State private var deleting: ObservedVideoJob?
 
     var body: some View {
@@ -87,6 +89,10 @@ struct NativeDurationJobs: View {
         }
         if job.detail?.canResume == true {
             Button("Resume") { Task { await coordinator.resume(job, backend: backend, current: { current(job.owner) }) } }.frame(minHeight: 44)
+        }
+        if let restart, canRestart(job), let state=job.detail?.state,
+           state == .failed || state == .interrupted || state == .paused {
+            Button("Start again…") { restart(job) }.frame(minHeight:44)
         }
         if job.detail?.canDelete == true {
             Button("Delete job…", role: .destructive) { deleting = job }.frame(minHeight: 44)

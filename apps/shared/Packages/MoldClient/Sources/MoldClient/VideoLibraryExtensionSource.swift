@@ -11,15 +11,29 @@ public struct VideoLibraryExtensionSource: Hashable, Sendable {
 
     public var originalReferences: [VideoOriginalReference] { VideoOriginalReference.ordered(metadata: metadata, inventory: inventory) }
 
+    public var inheritedRecipeNotes: [String] {
+        [metadata.spatialUpscale.map { "Original recipe: spatial upscaling \($0)" },
+         metadata.temporalUpscale.map { "Original recipe: temporal upscaling \($0)" }].compactMap { $0 }
+    }
+
     public var prefilledDraft: RenderDraft {
         var draft = RenderDraft(reusing: metadata)
-        let loras = draft.media.loras, fit = draft.media.sourceFit
+        let loras = draft.media.loras, weight = draft.media.referenceWeight
         // Historical boundary images must not become the NEW movie's end.
         // Required original typed references are hydrated by source authority.
         draft.media = DraftMedia()
-        draft.media.loras = loras; draft.media.sourceFit = fit
+        draft.media.loras = loras; draft.media.referenceWeight = weight
         draft.batchSize = 1
-        draft.seed = nil
+        draft.seed = nil; draft.locksSeed = false
+        draft.frames = nil; draft.prefersAutomaticDuration = false
+        draft.originalPrompt = nil; draft.promptTransform = nil; draft.upscaleModel = nil
+        draft.title = ""; draft.tags = []; draft.collectionName = nil
+        // Keep the generation canvas only when the retained spatial recipe
+        // itself will reproduce the delivered size. Otherwise extend at the
+        // visible output canvas; the server validates and conforms the prefix.
+        if metadata.spatialUpscale == nil {
+            draft.width = metadata.width ?? draft.width; draft.height = metadata.height ?? draft.height
+        }
         return draft
     }
 
@@ -87,12 +101,14 @@ public struct VideoLibraryExtensionSource: Hashable, Sendable {
                       inventory.members.contains { $0.memberId == member.memberId
                           && $0.sizeBytes == member.sizeBytes && $0.role == member.role }
                   }) else { throw changed() }
+            try requireSupportedControls(recipe)
             try await verifyInstallation()
             return .init(source: .init(filename: filename, expectedArchiveIdentitySha256: offer.archiveIdentitySha256),
                          owner: owner, title: title, metadata: recipe, inventory: inventory)
         case .unavailableLegacy:
             // An affirmative legacy inventory can open an editor. It does not
             // promise prefix eligibility; full server validation decides it.
+            try requireSupportedControls(metadata)
             try await verifyInstallation()
             return .init(source: .init(filename: filename), owner: owner, title: title, metadata: metadata, inventory: inventory)
         case .unavailableAuth:
@@ -101,6 +117,12 @@ public struct VideoLibraryExtensionSource: Hashable, Sendable {
             throw SequenceDraftError.invalid("This video's original input archive is missing or corrupt. Restore it before extending the video.")
         case .unknown:
             throw SequenceDraftError.invalid("This machine returned an unknown source state. Update or reconnect before extending the video.")
+        }
+    }
+
+    private static func requireSupportedControls(_ metadata: OutputMetadata) throws {
+        guard metadata.icLoraControl == nil, metadata.controlModel == nil, metadata.controlScale == nil else {
+            throw SequenceDraftError.invalid("This video uses original conditioning controls this editor cannot preserve. Use Start again from its saved job when available, or the CLI with its retained controls.")
         }
     }
 

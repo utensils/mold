@@ -353,6 +353,13 @@ final class NativeSequenceSession {
         jobs.removeAll { $0.id == job.id }
         authorities[job.id] = nil; stopped.remove(job.id)
     }
+    func removeDiscarded(_ job: Job) {
+        guard let index=jobs.firstIndex(where:{$0.id==job.id && $0.host==job.host && $0.installation==job.installation}) else {return}
+        tasks[job.id]?.cancel();tasks[job.id]=nil;followTokens[job.id]=nil
+        authorities[job.id]=nil;stopped.remove(job.id)
+        forget(job.jobId,host:job.host.id)
+        jobs.remove(at:index)
+    }
     func resume(_ job: Job, backend: any MoldChainBackend) {
         guard let isCurrent = authorities[job.id], isCurrent() else { return }
         Task {
