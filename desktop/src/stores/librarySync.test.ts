@@ -329,3 +329,31 @@ it("retains private output quarantine through completion until fresh physical hi
   expect(mocks.gallery.provisionalCopyPrivacy).toEqual([]);
   sync.stop();
 });
+it("quarantines pending hidden auto-cache copies received through the shared journal event", async () => {
+  const sync = useLibrarySyncStore();
+  const source = sync.machines.find((row) => row.id === "source")!;
+  const destination = sync.machines.find((row) => row.id === "destination")!;
+  const receipt = {
+    version: 1,
+    source: copyMachineIdentity(source),
+    destination: copyMachineIdentity(destination),
+    sourceFilename: "private.mp4",
+    destinationFilename: "private-copy.mp4",
+    digest: "a".repeat(64),
+    size: 1,
+    recipe: "b".repeat(64),
+    stage: "output",
+    sourceOrganization: {
+      item: {},
+      collections: [{ id: "private", name: "Private", slug: "private", count: 1, hidden: true }],
+    },
+  };
+  window.dispatchEvent(
+    new CustomEvent("mold:library-sync-document", {
+      detail: { version: 1, receipts: { edge: receipt }, keep: {} },
+    }),
+  );
+  expect(mocks.gallery.provisionalCopyPrivacy).toHaveLength(1);
+  expect(mocks.gallery.provisionalCopyPrivacy[0].destinationFilename).toBe("private-copy.mp4");
+  sync.$dispose();
+});

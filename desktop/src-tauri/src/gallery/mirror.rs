@@ -138,6 +138,16 @@ fn chain_position(role: &str) -> Option<&'static str> {
     }
     parts.next().is_none().then_some(position)
 }
+fn require_shared_movie_copy(metadata: Option<&mold_core::OutputMetadata>) -> Result<(), String> {
+    if metadata
+        .and_then(|value| value.video_job.as_ref())
+        .and_then(|job| job.artifacts.as_ref())
+        .is_some()
+    {
+        return Err("Use Library Copy or Sync to save this video's audio and clip history. This older copy command cannot save all video data.".into());
+    }
+    Ok(())
+}
 fn valid_slot(member: &Member) -> bool {
     if let Some(position) = chain_position(&member.role) {
         return member.position == position;
@@ -205,6 +215,15 @@ fn same_output(left: &Offer, right: &Offer) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_mirror_refuses_declared_video_artifacts_before_output_copy() {
+        let request=serde_json::from_value::<mold_core::GenerateRequest>(serde_json::json!({"prompt":"fixture","model":"fixture","width":8,"height":8,"steps":4,"guidance":1.0,"batch_size":1})).unwrap();
+        let mut metadata =
+            mold_core::OutputMetadata::from_generate_request(&request, 1, None, "fixture");
+        assert!(require_shared_movie_copy(Some(&metadata)).is_ok());
+        metadata.video_job=Some(serde_json::from_value(serde_json::json!({"id":"aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa","manifest_sha256":"a".repeat(64),"clip_count":"1","part_count":"1","added_frames":"24","source_frames":"0","total_frames":"24","join_mode":"continuous","artifacts":{"version":1,"bundle_id":"b".repeat(64),"provenance":{"size_bytes":"3","sha256":"c".repeat(64)}}})).unwrap());
+        assert!(require_shared_movie_copy(Some(&metadata)).is_err());
+    }
     #[test]
     fn authored_chain_role_slots_match_server_and_refuse_malformed_evidence() {
         let member = |role: &str, position: &str| Member {
@@ -931,6 +950,8 @@ async fn mirror_to_local(
         metadata,
         origin.as_ref().and_then(|offer| offer.metadata.as_deref()),
     )?;
+    require_shared_movie_copy(metadata.as_deref())?;
+    require_shared_movie_copy(origin.as_ref().and_then(|offer| offer.metadata.as_deref()))?;
     if let Some(origin) = &origin {
         same_output(origin, origin)?;
         if !origin.output_sha256.as_deref().is_some_and(valid_digest)

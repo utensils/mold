@@ -12,7 +12,7 @@ import {
   type SyncDocumentStorage,
   type LibrarySyncDocument,
 } from "@studio/lib/galleryCopyJournal";
-import { LIBRARY_SYNC_FORGET } from "../lib/librarySyncEvents";
+import { LIBRARY_SYNC_FORGET, LIBRARY_SYNC_DOCUMENT } from "../lib/librarySyncEvents";
 import { ipc, inTauri, nativeLibraryCopyHooks } from "../lib/ipc";
 import { useGalleryStore, type MergedPrint } from "./gallery";
 import { useHostsStore } from "./hosts";
@@ -375,10 +375,20 @@ export const useLibrarySyncStore = defineStore("librarySync", () => {
       error.value = String(failure);
     });
   };
-  if (typeof window !== "undefined") window.addEventListener(LIBRARY_SYNC_FORGET, forgotten);
+  const journalUpdated = (event: Event) => {
+    lastPrivacyDocument = (event as CustomEvent<LibrarySyncDocument>).detail;
+    publishCopyPrivacy(lastPrivacyDocument);
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener(LIBRARY_SYNC_FORGET, forgotten);
+    window.addEventListener(LIBRARY_SYNC_DOCUMENT, journalUpdated);
+  }
   onScopeDispose(() => {
     stop();
-    if (typeof window !== "undefined") window.removeEventListener(LIBRARY_SYNC_FORGET, forgotten);
+    if (typeof window !== "undefined") {
+      window.removeEventListener(LIBRARY_SYNC_FORGET, forgotten);
+      window.removeEventListener(LIBRARY_SYNC_DOCUMENT, journalUpdated);
+    }
   });
   return {
     machines,

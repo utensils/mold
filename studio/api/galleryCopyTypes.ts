@@ -78,6 +78,8 @@ export interface CopyOptions {
   destination: CopyMachine;
   filename: string;
   current(): boolean;
+  /** Optional immutable listing/recipe fence, checked before any destination write. */
+  verifySourceOffer?(offer: CopyOffer): void;
   journal: CopyJournal;
   signal?: AbortSignal;
   deliberate?: boolean;

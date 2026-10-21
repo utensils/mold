@@ -8,6 +8,7 @@ import { apiFetchTo, currentTarget, type ApiTarget, apiJsonTo } from "../lib/api
 import { sseStream } from "../lib/api/sse";
 import { evictMedia, galleryMediaPath, streamableMediaUrl } from "../lib/gallery/media";
 import { ipc } from "../lib/ipc";
+import { captureMirrorSource } from "../lib/mirrorGalleryCopy";
 import { notifyGenerated, notifyGenerationFailed } from "../lib/notify";
 import { describeTransportError } from "../lib/api/errors";
 import {
@@ -1191,7 +1192,19 @@ export const useGenerationStore = defineStore("generation", {
               const origin = await originGalleryRow(target, filename);
               const metadata = origin?.metadata ?? null;
               if (metadata && result.filename === filename) result.metadata = metadata;
-              await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
+              await ipc.mirrorGalleryPrint(
+                target,
+                filename,
+                metadata,
+                origin?.timestamp,
+                captureMirrorSource(
+                  record.tracker.hostId,
+                  record.tracker.expectedInstanceId,
+                  target,
+                  () => useHostsStore().all.find((row) => row.id === record.tracker.hostId),
+                  (message) => useToastStore().push(message, "warning"),
+                ),
+              );
               void useGalleryStore().refreshHost("local");
             } catch (error) {
               console.warn("local save of remote durable output failed:", error);
@@ -2122,9 +2135,21 @@ export const useGenerationStore = defineStore("generation", {
         return;
       }
       try {
+        const sourceHost = useHostsStore().all.find((row) => row.id === originHostId);
+        if (originHostId && !sourceHost)
+          throw new Error("Reconnect the source machine before saving this print.");
+        const sourceContext = sourceHost
+          ? captureMirrorSource(
+              sourceHost.id,
+              sourceHost.instanceId,
+              target,
+              () => useHostsStore().all.find((row) => row.id === originHostId),
+              (message) => useToastStore().push(message, "warning"),
+            )
+          : undefined;
         const origin = await originGalleryRow(target, filename);
         const metadata = origin?.metadata ?? null;
-        await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp);
+        await ipc.mirrorGalleryPrint(target, filename, metadata, origin?.timestamp, sourceContext);
         void useGalleryStore().refreshHost("local");
       } catch (error) {
         console.warn("local save of remote sequence output failed:", error);

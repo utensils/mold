@@ -1,5 +1,6 @@
 import type { CopyMachine, CopyOffer, CopyOptions } from "@studio/api/galleryCopy";
-import { LIBRARY_SYNC_FORGET } from "./librarySyncEvents";
+import { LIBRARY_SYNC_FORGET, LIBRARY_SYNC_DOCUMENT } from "./librarySyncEvents";
+import { mirrorGalleryCopy, type MirrorSourceContext } from "./mirrorGalleryCopy";
 import {
   CONNECTION_MODE_HEADER,
   forgetConnectionMode,
@@ -9,10 +10,6 @@ import { forgetRegularConnection } from "@studio/api/directConnection";
 import type { SecureBinding, SecureHostProfile } from "@studio/api/secureCrypto";
 import { listSecureHosts, forgetSecureHost } from "@studio/api/secureStore";
 import { relayFetch } from "@studio/api/relayTransport";
-import {
-  captureMirrorOrganization,
-  applyMirrorOrganization,
-} from "@studio/api/galleryMirrorOrganization";
 import type {
   RunPodCreateInput,
   RunPodNetworkVolume,
@@ -673,28 +670,34 @@ export const ipc = {
       signal,
     );
   },
-  /** Mirror a library print together with its authoritative retained sources. */
+  /** Mirror a print only after all saved data and organization are confirmed. */
   async mirrorGalleryPrint(
     source: ApiTarget,
     filename: string,
     metadata?: OutputMetadata | null,
-    timestamp?: number | null,
+    _timestamp?: number | null,
+    context?: MirrorSourceContext,
   ): Promise<string> {
     if (!inTauri()) throw new Error("Local saves require the desktop app.");
-    const local = await ipc.ensureLocalServer();
-    const organization = await captureMirrorOrganization(source, filename);
-    const copied = await invoke<string>("mirror_gallery_print", {
+    return mirrorGalleryCopy(
       source,
       filename,
-      metadata: metadata ?? null,
-      timestamp: timestamp ?? null,
-    });
-    await applyMirrorOrganization(
-      { baseUrl: local.baseUrl, apiKey: local.apiKey },
-      copied,
-      organization,
+      metadata,
+      {
+        ensureLocal: () => ipc.ensureLocalServer(),
+        nativeHooks: nativeLibraryCopyHooks,
+        storage: {
+          read: () => ipc.librarySyncRead(),
+          async write(document) {
+            // The existing privacy projection sees pending imported copies before
+            // an organization write or receipt persistence can fail.
+            window.dispatchEvent(new CustomEvent(LIBRARY_SYNC_DOCUMENT, { detail: document }));
+            await ipc.librarySyncWrite(document);
+          },
+        },
+      },
+      context,
     );
-    return copied;
   },
   /** Write encoded output bytes (base64) into this Mac's output dir. */
   saveOutputBytes(

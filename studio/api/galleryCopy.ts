@@ -102,6 +102,8 @@ async function transfer(options: CopyOptions): Promise<CopyReceipt> {
     options.nativeLegacyOffer,
   );
   check();
+  options.verifySourceOffer?.(origin);
+  check();
   const artifacts = declaredVideoArtifacts(origin.metadata);
   if (artifacts) {
     await requireVideoArtifactTransfer(source, destination, check, signal);

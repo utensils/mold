@@ -857,3 +857,27 @@ it("imports authenticated raw video recipe bytes without rounding u64 or normali
     ),
   ).toBe(rawRecipe);
 });
+it("checks the captured listing recipe before any destination mutation or intent receipt", async () => {
+  await existingFixture();
+  await expect(
+    copyGalleryPrint({
+      source,
+      destination,
+      filename: "print.png",
+      current: () => true,
+      journal,
+      verifySourceOffer() {
+        throw new Error("clicked recipe changed");
+      },
+    }),
+  ).rejects.toThrow("clicked recipe changed");
+  expect(journal.write).not.toHaveBeenCalled();
+  expect(
+    api.fetch.mock.calls.some(
+      ([, path, init]) =>
+        path.includes("/import/") ||
+        init?.method === "PUT" ||
+        init?.method === "POST",
+    ),
+  ).toBe(false);
+});

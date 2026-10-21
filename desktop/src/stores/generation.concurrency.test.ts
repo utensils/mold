@@ -1255,6 +1255,11 @@ describe("submitBatch connection cap", () => {
       "finished.png",
       originMetadata,
       1,
+      expect.objectContaining({
+        id: "hal9000",
+        instanceId: "instance-1",
+        current: expect.any(Function),
+      }),
     );
     expect(submitted.jobs[0]!.result?.metadata).toEqual(originMetadata);
     // The badge counts the print on the machine that made it; the local

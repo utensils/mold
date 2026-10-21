@@ -4,7 +4,12 @@ vi.mock("@studio/api/galleryMirrorOrganization", () => ({
   captureMirrorOrganization: vi.fn(async () => ({ item: {}, collections: [] })),
   applyMirrorOrganization: vi.fn(async () => undefined),
 }));
-const { open, invoke } = vi.hoisted(() => ({ open: vi.fn(), invoke: vi.fn() }));
+const { open, invoke, mirror } = vi.hoisted(() => ({
+  open: vi.fn(),
+  invoke: vi.fn(),
+  mirror: vi.fn(),
+}));
+vi.mock("./mirrorGalleryCopy", () => ({ mirrorGalleryCopy: mirror }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open }));
 
 import { ipc } from "./ipc";
@@ -17,6 +22,11 @@ describe("ipc.pickSourceImages", () => {
     });
     open.mockReset();
     invoke.mockReset();
+    mirror.mockReset();
+    mirror.mockImplementation(async (_source, _filename, _metadata, deps) => {
+      await deps.ensureLocal();
+      return "actual.png";
+    });
   });
 
   afterEach(() => {
@@ -24,17 +34,24 @@ describe("ipc.pickSourceImages", () => {
   });
 
   it("starts the local authority before mirroring a print and its retained sources", async () => {
-    invoke
-      .mockResolvedValueOnce({ baseUrl: "http://localhost:7680" })
-      .mockResolvedValueOnce("actual.png");
-    const source = { baseUrl: "http://hal9000:7680", apiKey: "test-key" };
-    await expect(ipc.mirrorGalleryPrint(source, "remote.png", null, 42)).resolves.toBe(
+    invoke.mockResolvedValueOnce({ baseUrl: "http://localhost:7680", apiKey: "local-private" });
+    const source = { baseUrl: "http://source.invalid:7680", apiKey: "test-key" };
+    const context = { id: "source", instanceId: "captured" };
+    await expect(ipc.mirrorGalleryPrint(source, "remote.mp4", null, 42, context)).resolves.toBe(
       "actual.png",
     );
-    expect(invoke.mock.calls.map(([command, args]) => [command, args])).toEqual([
-      ["ensure_local_server", {}],
-      ["mirror_gallery_print", { source, filename: "remote.png", metadata: null, timestamp: 42 }],
-    ]);
+    expect(mirror).toHaveBeenCalledWith(
+      source,
+      "remote.mp4",
+      null,
+      expect.objectContaining({
+        ensureLocal: expect.any(Function),
+        nativeHooks: expect.any(Function),
+        storage: expect.any(Object),
+      }),
+      context,
+    );
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["ensure_local_server"]);
   });
 
   it("does not copy when the local authority cannot start", async () => {
