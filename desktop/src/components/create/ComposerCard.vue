@@ -353,6 +353,7 @@ defineExpose({ focus, expand, record, isEditingPrompt: () => promptEditorOpen.va
           </button>
         </div>
       </div>
+      <slot name="duration" />
       <div class="ms-composer__controls">
         <!-- The Style chip IS the picker (StylePicker.vue, filled by the view);
              it opens its menu in place rather than being a door to a second

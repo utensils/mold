@@ -1,3 +1,4 @@
+import { reactive } from "vue";
 import { beforeEach, expect, it, vi } from "vitest";
 const json = vi.hoisted(() => vi.fn());
 const ownerCheck = vi.hoisted(() => vi.fn());
@@ -270,4 +271,11 @@ it("keeps original compatible scalar pipeline controls while clearing historical
   expect(source.metadata.height).toBe(768);
   expect(source.metadata.seed).toBeUndefined();
   expect(source.metadata.source_image).toBeUndefined();
+});
+
+it("accepts a reactive Gallery row without cloning its Vue proxy", async () => {
+  const row = reactive({ ...metadata, keyframes: [...metadata.keyframes] });
+  const result = await inspectVideoLibraryExtension(owner, "original.mp4", row);
+  expect(result.metadata.prompt).toBe(metadata.prompt);
+  expect(row.keyframes[0]?.image).toBe("old-end");
 });

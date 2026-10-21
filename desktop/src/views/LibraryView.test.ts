@@ -930,11 +930,7 @@ describe("LibraryView Use these settings retained source media", () => {
     keyed.wrapper.unmount();
   });
 
-  // Scene-by-scene authoring is retired, but the prints it made — and every
-  // auto-chained long clip the host stitches — still carry `metadata.chain`.
-  // They are ordinary prints here: one reuse door, down the retained-source
-  // road, with no authoring re-entry left on the row.
-  it("reuses a chain-stitched print down the ordinary road", async () => {
+  it("refuses incomplete legacy clip settings before replacing the current draft", async () => {
     const stitched: GalleryImage = {
       ...prints[0]!,
       filename: "remote-stitched.mp4",
@@ -954,8 +950,7 @@ describe("LibraryView Use these settings retained source media", () => {
         },
       },
     };
-    const inventory = { availability: "unavailable_legacy" as const, members: [] };
-    retainedInventoryMock.mockResolvedValueOnce(inventory);
+
     const { wrapper, router } = await mountView(stitched);
 
     const tile = wrapper.findAll("button").find((button) => button.text().includes("seed 9"));
@@ -969,12 +964,10 @@ describe("LibraryView Use these settings retained source media", () => {
 
     await reuseFromContextMenu(wrapper);
 
-    // The same road any other print takes: retained authority attached, the
-    // print named on the prefill, and Create is where it lands.
-    expect(retainedInventoryMock).toHaveBeenCalledWith("remote-stitched.mp4", plato);
-    expect(useComposerStore().retainedSource?.inventory).toEqual(inventory);
-    expect(useComposerStore().prefill).toMatchObject({ metadata: stitched.metadata });
-    expect(router.currentRoute.value.path).toBe("/create");
+    expect(useComposerStore().prefill).toBeNull();
+    expect(router.currentRoute.value.path).not.toBe("/create");
+    expect(useToastStore().items.length).toBeGreaterThan(0);
+    expect(retainedInventoryMock).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

@@ -9,9 +9,8 @@ import type { OutputFormat } from "../generated/generationProfileV1";
  *
  * These mirror the Rust types in `mold-core` (`chain.rs`, `chain_job.rs`)
  * with additive compatibility for older hosts; per-surface `types.ts` files
- * re-export from here rather than keeping divergent copies. `ChainRequest` seeds are
- * JSON numbers; full-range u64 values in job metadata, retakes, amendments,
- * and TOML projections use decimal strings where noted below.
+ * re-export from here rather than keeping divergent copies. `ChainRequest` seeds accept checked decimal strings as well as safe JSON
+ * numbers; decimal strings preserve full-range u64 values in browser clients.
  */
 
 /**

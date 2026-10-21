@@ -179,8 +179,8 @@ function runMeta(img: GalleryImage): string {
  * dropped the photo the print was made from, because it invalidates
  * retained-source authority.
  */
-function useRun(entry: MergedPrint) {
-  reuseStillPrint(entry);
+async function useRun(entry: MergedPrint) {
+  if (!(await reuseStillPrint(entry))) return;
   emit("close");
   void router.push("/create");
 }

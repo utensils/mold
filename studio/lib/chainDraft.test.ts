@@ -154,3 +154,42 @@ describe("authored video clips", () => {
     expect(result.stages[0]?.source_image).toBe("AAAA");
   });
 });
+
+it("preserves restored per-clip controls and inputs while editing prompts and endpoint length", () => {
+  const saved = {
+    prompt: "old",
+    frames: 97,
+    transition: "fade" as const,
+    fade_frames: 8,
+    seed_offset: "18446744073709551615",
+    loras: [{ path: "adapter", scale: 0.75 }],
+    keyframes: [{ frame: 96, image: "YQ==" }],
+    source_image: "Yg==",
+  };
+  const r = buildClipsRequest(
+    { ...base, seed: "18446744073709551615" },
+    [{ id: "saved", prompt: " literal\\n ", frames: 121, restored: saved }],
+    17,
+  );
+  expect(r.stages[0]).toEqual({
+    ...saved,
+    prompt: " literal\\n ",
+    frames: 121,
+    keyframes: [{ frame: 120, image: "YQ==" }],
+  });
+  expect(r.seed).toBe("18446744073709551615");
+  expect(() =>
+    buildClipsRequest(
+      base,
+      [
+        {
+          id: "saved",
+          prompt: "new",
+          frames: 10,
+          restored: { ...saved, keyframes: [{ frame: 20, image: "YQ==" }] },
+        },
+      ],
+      17,
+    ),
+  ).toThrow(/keyframe/);
+});

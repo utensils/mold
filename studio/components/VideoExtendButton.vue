@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { inject, onBeforeUnmount, ref, watch } from "vue";
+import { captureChainOwner } from "../api/chainJobs";
 import { apiJsonTo } from "../api/client";
 import type { VideoJobOwner } from "../api/videoJobs";
 import { inspectVideoLibraryExtension } from "../api/videoLibraryExtension";
@@ -25,6 +26,8 @@ function identity() {
     o?.target.apiKey,
     o?.target.connectionMode,
     props.filename,
+    JSON.stringify(props.metadata),
+    props.title,
   ];
 }
 watch(
@@ -61,16 +64,23 @@ async function extend() {
     token = epoch;
   if (!owner || !navigate || busy.value || !available.value) return;
   const captured = { ...owner, target: { ...owner.target } },
-    filename = props.filename;
+    filename = props.filename,
+    metadata = JSON.parse(JSON.stringify(props.metadata)) as Record<
+      string,
+      unknown
+    >,
+    title = props.title ?? undefined;
   busy.value = true;
   error.value = "";
   try {
+    const resolved = await captureChainOwner(captured);
+    if (token !== epoch) return;
     const result = await inspectVideoLibraryExtension(
-      captured,
+      resolved,
       filename,
-      props.metadata as Record<string, unknown>,
+      metadata,
       () => token === epoch,
-      props.title ?? undefined,
+      title,
     );
     if (token === epoch) await navigate(result);
   } catch (cause) {

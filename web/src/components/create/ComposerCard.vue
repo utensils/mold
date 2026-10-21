@@ -266,6 +266,7 @@ watch(
     >
       Edit prompt
     </button>
+    <slot name="duration" />
     <div class="composer__chips" data-test="composer-chips">
       <slot name="style" />
       <slot name="shape" />

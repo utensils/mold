@@ -1,7 +1,12 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, expect, it, vi } from "vitest";
 import { VIDEO_LIBRARY_EXTENSION_NAVIGATION } from "../lib/videoLibraryExtensionHandoff";
-const api = vi.hoisted(() => ({ caps: vi.fn(), inspect: vi.fn() }));
+const api = vi.hoisted(() => ({
+  caps: vi.fn(),
+  inspect: vi.fn(),
+  capture: vi.fn(),
+}));
+vi.mock("../api/chainJobs", () => ({ captureChainOwner: api.capture }));
 vi.mock("../api/client", () => ({ apiJsonTo: api.caps }));
 vi.mock("../api/videoLibraryExtension", () => ({
   inspectVideoLibraryExtension: api.inspect,
@@ -15,6 +20,10 @@ const owner = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  api.capture.mockImplementation(async (owner) => ({
+    ...owner,
+    instanceId: owner.instanceId || "captured-install",
+  }));
   api.caps.mockResolvedValue({
     video_jobs: {
       supported: true,
@@ -89,4 +98,43 @@ it("keeps a pending Extend inspection alive across an equivalent polled owner ob
   expect(api.caps).toHaveBeenCalledTimes(1);
   expect(navigate).toHaveBeenCalledWith(selected);
   wrapper.unmount();
+});
+
+it("captures a Library origin installation before opening Extend", async () => {
+  const w = mount(VideoExtendButton, {
+    props: {
+      owner: { ...owner, instanceId: "" },
+      filename: "ordinary.mp4",
+      metadata: {},
+    },
+    global: {
+      provide: { [VIDEO_LIBRARY_EXTENSION_NAVIGATION as symbol]: vi.fn() },
+    },
+  });
+  await flushPromises();
+  await w.get("button").trigger("click");
+  await flushPromises();
+  expect(api.capture).toHaveBeenCalledTimes(1);
+  expect(api.inspect.mock.calls[0]?.[0].instanceId).toBe("captured-install");
+  w.unmount();
+});
+
+it("does not inspect or navigate a replaced recipe while installation capture is pending", async () => {
+  let finish!: (v: typeof owner) => void;
+  api.capture.mockReturnValue(new Promise((r) => (finish = r)));
+  const navigate = vi.fn();
+  const w = mount(VideoExtendButton, {
+    props: { owner, filename: "same.mp4", metadata: { prompt: "clicked" } },
+    global: {
+      provide: { [VIDEO_LIBRARY_EXTENSION_NAVIGATION as symbol]: navigate },
+    },
+  });
+  await flushPromises();
+  await w.get("button").trigger("click");
+  await w.setProps({ metadata: { prompt: "replacement" } });
+  finish(owner);
+  await flushPromises();
+  expect(api.inspect).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
+  w.unmount();
 });

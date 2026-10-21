@@ -127,3 +127,13 @@ export function seedFromInput(value: string): number | string | null {
     return Number(value);
   return value;
 }
+
+/** Prefer retained decimal authority; never present an already-rounded JSON u64 as exact. */
+export function publishedSeed(metadata: object): number | string | null {
+  const m = metadata as Record<string, unknown>;
+  const job = m.video_job as { authoring?: { seed?: unknown } } | undefined;
+  const chain = m.chain as { stages?: Array<{ seed?: unknown }> } | undefined;
+  for (const value of [job?.authoring?.seed, chain?.stages?.[0]?.seed, m.seed])
+    if (exactSeed(value)) return value;
+  return null;
+}

@@ -54,6 +54,8 @@ export interface TimeRange {
 }
 
 export interface OutputMetadata {
+  /** Published duration authoring is validated by videoSettingsForReuse. */
+  video_job?: Record<string, unknown> | null;
   output_mode?: "one-shot" | "sequence" | null;
   chain_job_id?: string | null;
   prefix_cache?: "retained" | "recomputed" | null;

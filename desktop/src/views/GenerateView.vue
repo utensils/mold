@@ -884,8 +884,8 @@ const recentPrints = computed(() => hostGallery.merged.slice(0, RECENT_PRINTS_CA
  * door that opens this tab promises those settings, so it must be the same
  * path, not a prompt-only shortcut.
  */
-function reuseRecentPrint(entry: MergedPrint) {
-  reuseStillPrint(entry);
+async function reuseRecentPrint(entry: MergedPrint) {
+  if (!(await reuseStillPrint(entry))) return;
   inspectorTab.value = "settings";
   void nextTick(() => composerRef.value?.focus?.());
 }
@@ -5331,25 +5331,28 @@ watch(
                 @canvas-intent="setCanvasIntent"
               />
             </template>
+            <template #duration>
+              <VideoDurationEditor
+                v-if="!clipsActive && videoDuration.visible.value && videoDuration.draft.value"
+                v-model="videoDuration.draft.value"
+                :prompt="form.prompt"
+                :source-title="videoDuration.draft.value.extension?.title"
+                :source-machine="videoDuration.draft.value.extension?.machine"
+                @start-fresh="videoDuration.reset()"
+                :plan="videoDuration.planner.plan.value"
+                :checking="videoDuration.planner.checking.value"
+                :error="
+                  videoDuration.blocker.value ??
+                  videoDuration.planner.error.value ??
+                  videoDuration.run.error.value
+                "
+                :disabled="composerSubmitting"
+                @single-prompt="onPromptAuthored($event, 'typed')"
+              />
+            </template>
           </ComposerCard>
         </div>
-        <VideoDurationEditor
-          v-if="videoDuration.visible.value && videoDuration.draft.value"
-          v-model="videoDuration.draft.value"
-          :prompt="form.prompt"
-          :source-title="videoDuration.draft.value.extension?.title"
-          :source-machine="videoDuration.draft.value.extension?.machine"
-          @start-fresh="videoDuration.reset()"
-          :plan="videoDuration.planner.plan.value"
-          :checking="videoDuration.planner.checking.value"
-          :error="
-            videoDuration.blocker.value ??
-            videoDuration.planner.error.value ??
-            videoDuration.run.error.value
-          "
-          :disabled="composerSubmitting"
-          @single-prompt="onPromptAuthored($event, 'typed')"
-        />
+
         <div
           v-if="videoDuration.run.admission.value && !videoDuration.run.detail.value"
           role="status"

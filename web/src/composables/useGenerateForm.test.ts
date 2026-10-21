@@ -3,6 +3,7 @@ import { nextTick, toRaw } from "vue";
 import { IDBFactory } from "fake-indexeddb";
 import {
   applyMetadataToForm,
+  applyLegacyAutomaticMedia,
   normalizeLegacyNegativeFormState,
   cloneTemplateForm,
   sanitizePersistedForm,
@@ -3629,4 +3630,46 @@ it("reuses exact parent seed and authored input frames without rounding", () => 
   expect(next.seed).toBe("18446744073709551615");
   expect(next.frames).toBe(107);
   expect(next.prompt).toBe(" literal\\n\r\n ");
+});
+
+it("keeps authenticated automatic legacy first-frame and typed references in the actual ordinary request", () => {
+  const form = useGenerateForm();
+  form.state.value.model = "minimax-h3-fl2va:official-bf16";
+  form.state.value.modelFamily = "minimax-h3";
+  const base = {
+    model: form.state.value.model,
+    prompt: "literal",
+    width: 768,
+    height: 768,
+    steps: 9,
+    guidance: 0,
+    frames: 107,
+    fps: 24,
+    output_format: "mp4" as const,
+    seed: "18446744073709551615",
+    source_image: "YQ==",
+    source_image_name: "original.png",
+  };
+  form.state.value = applyLegacyAutomaticMedia(form.state.value, base);
+  expect(form.toRequest()).toMatchObject({
+    source_image: "YQ==",
+    source_image_name: "original.png",
+  });
+  const reference = {
+    kind: "image" as const,
+    media: { authority: "inline" as const, data: "Yg==" },
+    mime_type: "image/png",
+    width: 768,
+    height: 768,
+    provenance: { name: "reference.png", sha256: "a".repeat(64) },
+  };
+  form.state.value.model = "minimax-h3-ref2va:official-bf16";
+  const { source_image: _source, source_image_name: _name, ...refBase } = base;
+  form.state.value = applyLegacyAutomaticMedia(form.state.value, {
+    ...refBase,
+    model: form.state.value.model,
+    references: [reference],
+  });
+  expect(form.toRequest().references).toEqual([reference]);
+  expect(form.state.value.h3Authoring?.references[0]?.crop).toBeUndefined();
 });

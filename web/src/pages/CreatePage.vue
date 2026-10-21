@@ -6249,25 +6249,32 @@ watch(
                 @update:model-value="form.state.value.batchSize = $event"
               />
             </template>
+            <template #duration>
+              <VideoDurationEditor
+                v-if="
+                  !clipsActive &&
+                  videoDuration.visible.value &&
+                  videoDuration.draft.value
+                "
+                v-model="videoDuration.draft.value"
+                :prompt="form.state.value.prompt"
+                :source-title="videoDuration.draft.value.extension?.title"
+                :source-machine="videoDuration.draft.value.extension?.machine"
+                @start-fresh="videoDuration.reset()"
+                :plan="videoDuration.planner.plan.value"
+                :checking="videoDuration.planner.checking.value"
+                :error="
+                  videoDuration.blocker.value ??
+                  videoDuration.planner.error.value ??
+                  videoDuration.run.error.value
+                "
+                :disabled="submitInFlight"
+                @single-prompt="onPromptAuthored($event, 'typed')"
+              />
+            </template>
           </ComposerCard>
         </div>
-        <VideoDurationEditor
-          v-if="videoDuration.visible.value && videoDuration.draft.value"
-          v-model="videoDuration.draft.value"
-          :prompt="form.state.value.prompt"
-          :source-title="videoDuration.draft.value.extension?.title"
-          :source-machine="videoDuration.draft.value.extension?.machine"
-          @start-fresh="videoDuration.reset()"
-          :plan="videoDuration.planner.plan.value"
-          :checking="videoDuration.planner.checking.value"
-          :error="
-            videoDuration.blocker.value ??
-            videoDuration.planner.error.value ??
-            videoDuration.run.error.value
-          "
-          :disabled="submitInFlight"
-          @single-prompt="onPromptAuthored($event, 'typed')"
-        />
+
         <div
           v-if="
             videoDuration.run.admission.value && !videoDuration.run.detail.value

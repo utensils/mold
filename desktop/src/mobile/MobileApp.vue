@@ -1,4 +1,10 @@
 <script setup lang="ts">
+import {
+  inspectLegacyVideoSettings,
+  legacyAutomaticRequest,
+} from "@studio/api/legacyVideoSettings";
+import { captureChainOwner } from "@studio/api/chainJobs";
+import { pendingLegacyVideoSettings } from "@studio/lib/videoLibraryExtensionHandoff";
 import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import VideoJobHistory from "@studio/components/VideoJobHistory.vue";
@@ -8940,12 +8946,30 @@ async function loadMoreGalleryPage(): Promise<void> {
 
 async function reusePrint(print: GalleryPrint): Promise<void> {
   if (reusingPrint.value || print.metadata_synthetic) return;
+  let legacy: Awaited<ReturnType<typeof inspectLegacyVideoSettings>> | null = null;
+  const preflight = ++reusePrintEpoch;
   try {
+    if (print.metadata.chain && !print.metadata.video_job) {
+      const owner = await captureChainOwner({
+        hostId: print.hostId,
+        label: print.hostName,
+        instanceId: "",
+        target: print.target,
+      });
+      legacy = await inspectLegacyVideoSettings(
+        owner,
+        print.filename,
+        print.metadata,
+        () => preflight === reusePrintEpoch,
+      );
+      if (preflight !== reusePrintEpoch) return;
+    }
     videoSettingsForReuse(print.metadata);
   } catch (error) {
     reusePrintError.value = error instanceof Error ? error.message : String(error);
     return;
   }
+  pendingLegacyVideoSettings.value = null;
   const retainedVersion = retainedSourceAuthority.begin();
   clearSelectedQueueRender();
   const epoch = ++reusePrintEpoch;
@@ -9002,8 +9026,28 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       return;
     }
     authoritativeReuseApply = true;
-    const reuse = applyMobileGalleryMetadata(form, print.metadata, reuseModels);
+    const restoreMetadata = legacy
+      ? {
+          ...print.metadata,
+          seed: legacy.request.seed!,
+          frames: legacy.request.stages[0]!.frames,
+          prompt: legacy.request.stages[0]!.prompt,
+        }
+      : print.metadata;
+    const reuse = applyMobileGalleryMetadata(form, restoreMetadata, reuseModels);
+    if (legacy?.automaticDuration)
+      applyRequestToForm(
+        form,
+        {
+          ...legacyAutomaticRequest(legacy),
+          title: organizationOf(print)?.title ?? reuse.title,
+          ...(print.metadata.tags ? { tags: print.metadata.tags } : {}),
+          ...(print.metadata.collection ? { collection: { name: print.metadata.collection } } : {}),
+        },
+        reuseModels,
+      );
     requestVideoDurationReset(print.metadata);
+    if (legacy) pendingLegacyVideoSettings.value = legacy;
     await nextTick();
     authoritativeReuseApply = false;
     // The print's own saved title comes back with its settings; the Library
@@ -9018,21 +9062,25 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
       print.metadata.tags,
       print.metadata.collection,
     );
-    const sourceRestoreNotice = await restoreOrdinaryReusedSource(
-      print,
-      controller.signal,
-      () => !cancelledReuse(epoch, controller),
-      retainedVersion,
-    );
+    const sourceRestoreNotice = legacy
+      ? null
+      : await restoreOrdinaryReusedSource(
+          print,
+          controller.signal,
+          () => !cancelledReuse(epoch, controller),
+          retainedVersion,
+        );
     if (cancelledReuse(epoch, controller)) return;
     // Independent of the source restore above: identity is its own partition,
     // and a print may carry a face photo on a checkpoint that takes no source
     // image at all — the source restore's own early-outs must not skip it.
-    const identityRestoreNotice = await restoreReusedIdentityPhoto(
-      print.metadata,
-      () => !cancelledReuse(epoch, controller),
-      retainedVersion,
-    );
+    const identityRestoreNotice = legacy
+      ? null
+      : await restoreReusedIdentityPhoto(
+          print.metadata,
+          () => !cancelledReuse(epoch, controller),
+          retainedVersion,
+        );
     if (cancelledReuse(epoch, controller)) return;
     const notes: string[] = [];
     if (usedCachedPresentationAt !== null) {
@@ -9074,7 +9122,10 @@ async function reusePrint(print: GalleryPrint): Promise<void> {
     // FL2VA reuse leaves bytes-less boundary descriptors; when the original
     // was a gallery image its bytes are still on the print's host — fetch
     // them so the wells fill instead of demanding a reattach.
-    if (retainedSourceAuthority.snapshot()?.value.inventory.availability !== "available") {
+    if (
+      !legacy &&
+      retainedSourceAuthority.snapshot()?.value.inventory.availability !== "available"
+    ) {
       await restoreReusedH3BoundaryMedia(
         print,
         controller.signal,
@@ -13418,7 +13469,7 @@ watch(
             {{ promptFieldPlaceholder }}
           </p>
           <VideoDurationEditor
-            v-if="videoDuration.visible.value && videoDuration.draft.value"
+            v-if="!clipsActive && videoDuration.visible.value && videoDuration.draft.value"
             v-model="videoDuration.draft.value"
             :prompt="form.prompt"
             :source-title="videoDuration.draft.value.extension?.title"

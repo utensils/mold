@@ -1,4 +1,11 @@
 <script setup lang="ts">
+import {
+  inspectLegacyVideoSettings,
+  legacyAutomaticRequest,
+} from "@studio/api/legacyVideoSettings";
+import { captureChainOwner } from "@studio/api/chainJobs";
+import { pendingLegacyVideoSettings } from "@studio/lib/videoLibraryExtensionHandoff";
+import { setGenerateTargetId } from "../lib/hostRegistry";
 import { videoSettingsForReuse } from "@studio/lib/videoSettingsReuse";
 import { requestVideoDurationReset } from "@studio/lib/videoLibraryExtensionHandoff";
 import { LibraryVisit } from "@studio/lib/libraryUnreadLedger";
@@ -105,6 +112,7 @@ import {
 } from "../lib/toasts";
 import {
   applyMetadataToForm,
+  applyLegacyAutomaticMedia,
   useGenerateForm,
 } from "../composables/useGenerateForm";
 import {
@@ -2414,18 +2422,55 @@ async function restoreLibraryIdentity(
 }
 
 async function onReuse(item: GalleryImage) {
+  let legacy: Awaited<ReturnType<typeof inspectLegacyVideoSettings>> | null =
+    null;
+  const preflight = ++reuseEpoch;
   try {
+    if (item.metadata.chain && !item.metadata.video_job) {
+      const host = hostForEntry(item);
+      if (!host) throw missingHostError(item);
+      const owner = await captureChainOwner({
+        hostId: host.id,
+        label: host.name,
+        instanceId: host.instanceId ?? "",
+        target: hostApiTarget(host),
+      });
+      legacy = await inspectLegacyVideoSettings(
+        owner,
+        item.filename,
+        item.metadata,
+        () => preflight === reuseEpoch,
+      );
+      if (preflight !== reuseEpoch) return;
+      setGenerateTargetId(host.id);
+    }
     videoSettingsForReuse(item.metadata);
   } catch (error) {
     toast("error", error instanceof Error ? error.message : String(error));
     return;
   }
+  pendingLegacyVideoSettings.value = null;
   const epoch = ++reuseEpoch;
   const retainedVersion = beginRetainedSourceReuseIntent();
-  form.state.value = applyMetadataToForm(form.state.value, item.metadata, {
+  const restoreMetadata = legacy
+    ? {
+        ...item.metadata,
+        seed: legacy.request.seed!,
+        frames: legacy.request.stages[0]!.frames,
+        prompt: legacy.request.stages[0]!.prompt,
+      }
+    : item.metadata;
+  let restoredForm = applyMetadataToForm(form.state.value, restoreMetadata, {
     format: item.format,
     models: models.value,
   });
+  if (legacy?.automaticDuration)
+    restoredForm = applyLegacyAutomaticMedia(
+      restoredForm,
+      legacyAutomaticRequest(legacy),
+      models.value.find((model) => model.name === legacy.request.model),
+    );
+  form.state.value = restoredForm;
   // The gallery row's editable title wins over the creation-time one.
   form.state.value.title = item.title ?? item.metadata.title ?? null;
   const expected = {
@@ -2435,10 +2480,14 @@ async function onReuse(item: GalleryImage) {
     sourceFit: JSON.stringify(form.state.value.sourceFitPolicy),
   };
   requestVideoDurationReset(item.metadata);
+  if (legacy) {
+    pendingLegacyVideoSettings.value = legacy;
+  }
   closeLightbox();
   await router.push({ name: "create" });
   if (epoch !== reuseEpoch) return;
-  await restoreLibrarySource(item, epoch, retainedVersion, expected);
+  if (!legacy)
+    await restoreLibrarySource(item, epoch, retainedVersion, expected);
 }
 
 async function setAsSource(item: GalleryImage): Promise<boolean> {

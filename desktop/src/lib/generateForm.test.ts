@@ -3892,3 +3892,57 @@ it("refuses incomplete duration provenance before changing the existing form", (
   ).toThrow(/older video/);
   expect(JSON.stringify(f)).toBe(before);
 });
+
+it("preserves literal whitespace in a restored legacy clip prompt", () => {
+  const form = newGenerateForm();
+  applyMetadataToForm(form, {
+    prompt: "summary",
+    model: "model",
+    seed: 1,
+    steps: 1,
+    guidance: 0,
+    width: 768,
+    height: 768,
+    chain: {
+      stage_count: 1,
+      motion_tail_frames: 1,
+      stages: [{ prompt: "  literal\\n\r\n ", frames: 107, transition: "smooth" }],
+    },
+  } as never);
+  expect(form.prompt).toBe("  literal\\n\r\n ");
+});
+
+it("restores automatic legacy conditioning into the ordinary request including full seed", () => {
+  const form = newGenerateForm();
+  const base = {
+    model: "minimax-h3-fl2va:official-bf16",
+    prompt: "literal",
+    width: 768,
+    height: 768,
+    steps: 9,
+    guidance: 0,
+    frames: 107,
+    fps: 24,
+    output_format: "mp4" as const,
+    seed: "18446744073709551615",
+    source_image: "YQ==",
+    source_image_name: "original.png",
+  };
+  applyRequestToForm(form, base, []);
+  expect(buildRequest(form)).toMatchObject({ source_image: "YQ==", seed: "18446744073709551615" });
+  const reference = {
+    kind: "image" as const,
+    media: { authority: "inline" as const, data: "Yg==" },
+    mime_type: "image/png",
+    width: 768,
+    height: 768,
+    provenance: { name: "reference.png", sha256: "a".repeat(64) },
+  };
+  const { source_image: _source, source_image_name: _name, ...refBase } = base;
+  applyRequestToForm(
+    form,
+    { ...refBase, model: "minimax-h3-ref2va:official-bf16", references: [reference] },
+    [],
+  );
+  expect(buildRequest(form).references).toEqual([reference]);
+});

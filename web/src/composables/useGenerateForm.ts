@@ -1755,3 +1755,71 @@ export const __testing__ = {
   /** A pristine form, for tests of pure form-shaped helpers. */
   defaultForm,
 };
+
+/** Apply authenticated automatic-chain media, without a second archive lookup. */
+export function applyLegacyAutomaticMedia(
+  state: GenerateFormState,
+  request: ReturnType<
+    typeof import("@studio/api/legacyVideoSettings").legacyAutomaticRequest
+  >,
+  model?: ModelInfoExtended,
+): GenerateFormState {
+  const next = { ...state };
+  const image = (data: string, filename = "Original first frame") => ({
+    kind: "upload" as const,
+    filename,
+    base64: data,
+  });
+  next.loras = (request.loras ?? []).map((lora) => ({
+    path: lora.path,
+    scale: lora.scale,
+  }));
+  const task = minimaxH3TaskForModel(request.model);
+  const opening =
+    request.source_image ??
+    request.keyframes?.find((k) => k.frame === 0)?.image;
+  if (task) {
+    next.h3Authoring = {
+      ...emptyMinimaxH3AuthoringState(),
+      references: (request.references ?? []).map((reference) => ({
+        reference: JSON.parse(JSON.stringify(reference)),
+      })),
+      firstFrame: opening
+        ? {
+            filename: request.source_image_name ?? "Original first frame",
+            mimeType: "image/*",
+            width: 0,
+            height: 0,
+            data: opening,
+          }
+        : null,
+    };
+    next.imageAttachments = [];
+    next.keyframes = [];
+  } else {
+    if (request.references?.length)
+      throw new Error(
+        "This style's original references cannot be represented by this composer. Use Start again from its saved job.",
+      );
+    const capabilities = generationCapabilitiesForFamily(
+      selectedFamily(next),
+      next.model,
+      next.pipeline,
+      next.guidanceCapabilities,
+      next.sourceImageCapability,
+      model ? effectiveGenerationRecipe(model, next.pipeline) : null,
+    );
+    next.imageAttachments = request.source_image
+      ? [image(request.source_image, request.source_image_name)]
+      : [];
+    next.keyframes = (request.keyframes ?? []).map((k) => ({
+      frame: k.frame,
+      image: image(k.image, k.name ?? "Original first frame"),
+    }));
+    if (!capabilities.supportsKeyframes && opening) {
+      next.imageAttachments = [image(opening)];
+      next.keyframes = [];
+    }
+  }
+  return next;
+}

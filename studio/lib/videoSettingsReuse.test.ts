@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { videoSettingsForReuse } from "./videoSettingsReuse";
+import { publishedSeed, videoSettingsForReuse } from "./videoSettingsReuse";
 it("restores requested added time, literal scenes and exact seed without linking the original", () => {
   const value = videoSettingsForReuse({
     frames: 480,
@@ -79,4 +79,21 @@ it("bounds scene bytes and the complete serialized authoring record without trim
       video_job: { authoring: { ...a, duration_ms: "20000", scenes } },
     }),
   ).toThrow(/size/);
+});
+
+it("displays authoritative decimal seeds instead of rounded JSON numbers", () => {
+  expect(
+    publishedSeed({
+      seed: 11110663010851220000,
+      video_job: { authoring: { seed: "11110663010851218914" } },
+    }),
+  ).toBe("11110663010851218914");
+  expect(
+    publishedSeed({
+      seed: 18446744073709552000,
+      chain: { stages: [{ seed: "18446744073709551615" }] },
+    }),
+  ).toBe("18446744073709551615");
+  expect(publishedSeed({ seed: 42 })).toBe(42);
+  expect(publishedSeed({ seed: 18446744073709552000 })).toBeNull();
 });

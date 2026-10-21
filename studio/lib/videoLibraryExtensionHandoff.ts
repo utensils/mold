@@ -37,3 +37,8 @@ export function requestVideoDurationReset(metadata?: object) {
     : null;
   videoDurationResetPending.value = true;
 }
+
+/** Full retained clip inputs are intentionally memory-only. */
+export const pendingLegacyVideoSettings = shallowRef<
+  import("../api/legacyVideoSettings").LegacyVideoSettings | null
+>(null);

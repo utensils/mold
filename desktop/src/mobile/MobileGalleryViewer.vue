@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { publishedSeed } from "@mold/studio/lib/videoSettingsReuse";
 import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import SourceMediaPanel from "@studio/components/SourceMediaPanel.vue";
@@ -2116,7 +2117,7 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <dt>Seed</dt>
-            <dd>{{ item.metadata.seed }}</dd>
+            <dd>{{ publishedSeed(item.metadata) ?? "Unavailable" }}</dd>
           </div>
           <div>
             <dt>Dimensions</dt>

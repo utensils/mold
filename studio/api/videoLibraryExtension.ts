@@ -142,7 +142,11 @@ export async function inspectVideoLibraryExtension(
   expectedArchiveIdentity?: string,
 ): Promise<VideoLibraryExtension> {
   const captured = { ...owner, target: { ...owner.target } };
-  const clicked = structuredClone(clickedMetadata);
+  // Gallery rows may be reactive Vue proxies; snapshot their JSON wire value.
+  const clicked = JSON.parse(JSON.stringify(clickedMetadata)) as Record<
+    string,
+    unknown
+  >;
   const check = () => {
     if (!isCurrent() || JSON.stringify(owner) !== JSON.stringify(captured))
       throw changed();

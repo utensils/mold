@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { publishedSeed } from "@mold/studio/lib/videoSettingsReuse";
 import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { currentTarget } from "../../lib/api/client";
@@ -191,7 +192,7 @@ const modelLabel = computed(() =>
 // ⇧⌘C copies the seed while the lightbox is open.
 watch(
   () => ui.copySeedTick,
-  () => void copy(String(props.item.metadata.seed)),
+  () => void copy(String(publishedSeed(props.item.metadata) ?? "Unavailable")),
 );
 
 /** The open print's bytes live in the trash: resolve media, file paths,
@@ -444,7 +445,10 @@ function imageMenu(): MenuEntry[] {
     },
     { label: "Copy File Name", action: () => void copy(props.item.filename) },
     { label: "Copy prompt", action: () => void copy(meta.value.prompt) },
-    { label: "Copy seed", action: () => void copy(String(meta.value.seed)) },
+    {
+      label: "Copy seed",
+      action: () => void copy(String(publishedSeed(meta.value) ?? "Unavailable")),
+    },
     { separator: true },
     { label: "Reveal in file manager", disabled: !props.canReveal, action: () => void reveal() },
   ];
@@ -977,9 +981,10 @@ const clipsOwner = computed(() => {
                   type="button"
                   class="font-mono hover:text-accent"
                   title="Copy seed"
-                  @click="copy(String(meta.seed))"
+                  :disabled="publishedSeed(meta) == null"
+                  @click="copy(String(publishedSeed(meta) ?? 'Unavailable'))"
                 >
-                  seed {{ meta.seed }} ⧉
+                  seed {{ publishedSeed(meta) ?? "Unavailable" }} ⧉
                 </button>
               </dd>
             </div>

@@ -828,10 +828,10 @@ async function transitionUpscale(action: "pause" | "resume" | "cancel") {
 // restores exactly like any other print — this is the ONLY path that attaches
 // retained source-media authority (`composer.set` invalidates it).
 
-function reuseSettings(entry: MergedPrint) {
+async function reuseSettings(entry: MergedPrint) {
   // Full metadata → full-fidelity restore (negative prompt, LoRAs,
   // scheduler, video params, …) via `applyPrefillToForm`.
-  if (!reuseStillPrint(entry)) return;
+  if (!(await reuseStillPrint(entry))) return;
   lightboxOpen.value = false;
   void router.push("/create");
 }

@@ -20,12 +20,10 @@ export interface MobileGalleryReuseResult {
  * capability-aware request behavior. Binary media still clears in the shared
  * mapper because output metadata cannot carry those bytes.
  *
- * A STITCHED print restores as an ordinary one-shot — model, canvas, fps, seed
- * and clip 1's prompt. There is no clip rail to reload on any surface any
- * more, and a stitched print is never refused: whatever the host recorded is
- * handed back as a single render the user can run again. The prompt rule
- * (`chain.stages[0].prompt` over the newline-joined `metadata.prompt`) lives
- * in `applyMetadataToForm`, so the phone and desktop cannot disagree about it.
+ * Full saved-chain restoration is preflighted by the caller against the
+ * original authenticated archive. This mapper supplies its scalar recipe;
+ * automatic legacy requests then apply their inspected first-stage media,
+ * while authored clips open the shared clip editor without flattening them.
  */
 export function applyMobileGalleryMetadata(
   form: GenerateForm,

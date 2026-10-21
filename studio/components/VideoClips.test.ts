@@ -1,3 +1,4 @@
+import { pendingLegacyVideoSettings } from "../lib/videoLibraryExtensionHandoff";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import VideoClips from "./VideoClips.vue";
@@ -60,6 +61,7 @@ const limits = {
 let wrapper: ReturnType<typeof mount>;
 beforeEach(() => {
   localStorage.clear();
+  pendingLegacyVideoSettings.value = null;
   Object.values(api).forEach((mock) => mock.mockReset());
   api.owner.mockResolvedValue(undefined);
   api.limits.mockResolvedValue(limits);
@@ -862,4 +864,102 @@ it("does not revive an aborted attempt when the owner changes away and back duri
   expect(
     wrapper.get('textarea[aria-label="Clip 2 prompt"]').attributes("disabled"),
   ).toBeUndefined();
+});
+
+it("restores authenticated legacy clips with exact private per-stage inputs, never text-only persistence", async () => {
+  const stages = [
+    {
+      prompt: "old A",
+      frames: 107,
+      transition: "smooth" as const,
+      seed_offset: "0",
+      source_image: "YQ==",
+    },
+    {
+      prompt: "old B",
+      frames: 124,
+      transition: "fade" as const,
+      fade_frames: 4,
+      seed_offset: "1",
+      loras: [{ path: "kept", scale: 0.5 }],
+    },
+  ];
+  pendingLegacyVideoSettings.value = {
+    owner,
+    request: {
+      ...request,
+      seed: "18446744073709551615",
+      motion_tail_frames: 1,
+      output_format: "mp4",
+      stages,
+    },
+    notice: "Original inputs restored",
+  };
+  wrapper = mount(VideoClips, { props: { enabled: false, request, owner } });
+  await flushPromises();
+  expect(wrapper.findAll("textarea")).toHaveLength(2);
+  expect(wrapper.text()).toContain("Original inputs restored");
+  expect(api.validate.mock.calls.at(-1)?.[1]).toMatchObject({
+    seed: "18446744073709551615",
+    stages,
+  });
+  await wrapper
+    .get('textarea[aria-label="Clip 2 prompt"]')
+    .setValue("edited B");
+  const check = wrapper
+    .findAll("button")
+    .find((b) => b.text() === "Check length")!;
+  await check.trigger("click");
+  await flushPromises();
+  expect(api.validate.mock.calls.at(-1)?.[1].stages[1]).toMatchObject({
+    ...stages[1],
+    prompt: "edited B",
+  });
+  await wrapper
+    .findAll("button")
+    .find((b) => b.text() === "Add clip")!
+    .trigger("click");
+  await wrapper
+    .get('textarea[aria-label="Clip 3 prompt"]')
+    .setValue("new scene");
+  await check.trigger("click");
+  await flushPromises();
+  expect(api.validate.mock.calls.at(-1)?.[1].stages[2]).toMatchObject({
+    prompt: "new scene",
+    transition: "smooth",
+    seed_offset: "1",
+    loras: [{ path: "kept", scale: 0.5 }],
+  });
+  expect(
+    api.validate.mock.calls.at(-1)?.[1].stages[2].source_image,
+  ).toBeUndefined();
+  expect(localStorage.getItem("mold.video-clips.drafts.v1")).toBeNull();
+});
+
+it("refuses a restored automatic draft after the same route changes installation", async () => {
+  const { videoDurationReusePending } =
+    await import("../lib/videoLibraryExtensionHandoff");
+  videoDurationReusePending.value = null;
+  pendingLegacyVideoSettings.value = {
+    owner,
+    request: {
+      ...request,
+      output_format: "mp4",
+      stages: [{ prompt: "saved", frames: 107 }],
+      motion_tail_frames: 1,
+    },
+    notice: "saved",
+    automaticDuration: { durationMs: "4000", scenesEnabled: false, scenes: [] },
+  };
+  wrapper = mount(VideoClips, {
+    props: {
+      enabled: false,
+      owner: { ...owner, instanceId: "replacement" },
+      request,
+    },
+  });
+  await flushPromises();
+  expect(videoDurationReusePending.value).toBeNull();
+  expect(wrapper.text()).toMatch(/installation changed/i);
+  expect(api.validate).not.toHaveBeenCalled();
 });

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { publishedSeed } from "@mold/studio/lib/videoSettingsReuse";
 import VideoExtendButton from "@studio/components/VideoExtendButton.vue";
 import VideoClips from "@studio/components/VideoClips.vue";
 import { originAuthenticatedFetch as fetch } from "../../lib/originAuth";
@@ -530,7 +531,9 @@ const modelLabel = computed(() =>
 const dimensions = computed(() =>
   props.item ? formatResolution(props.item.metadata) : "",
 );
-const seed = computed(() => props.item?.metadata.seed ?? null);
+const seed = computed(() =>
+  props.item ? publishedSeed(props.item.metadata) : null,
+);
 const steps = computed(() => props.item?.metadata.steps ?? null);
 const guidance = computed(() => props.item?.metadata.guidance ?? null);
 const pipeline = computed(() =>
