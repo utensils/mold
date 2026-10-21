@@ -101,8 +101,9 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   Apps offer **Duration**, optional **Define scenes**, and Library **Extend video**.
   Discord offers `/video make` and `/video extend`. Keep the printed video UUID;
   inspect it before retrying after a disconnect. Longer videos require an updated
-  server, including MiniMax H3. The selected model determines continuous or
-  blended joins. For explicit frame-level scripts and separate linked parts,
+  server, including MiniMax H3. Model-guide timing and `max_runtime_seconds`
+  describe one clip, not the joined movie. The selected model determines
+  continuous or blended joins. For explicit frame-level scripts and separate linked parts,
   read [Scripted sequences]({{reference_prefix}}/cli.md#scripted-sequences).
 - For ordinary CLI, queue, server, library, and remote-host workflows, read
   [`{{reference_prefix}}/cli.md`]({{reference_prefix}}/cli.md).

@@ -30,7 +30,8 @@ and `<Audio n>` keep one meaning across every section.
 
 ## Generation context
 
-Match the described duration to the requested four to fifteen seconds.
+For one model clip, match the described action to that clip’s duration; upstream
+prompting examples describe four to fifteen seconds.
 `overall_soundscape` is one to four sentences of ambience, action sounds, and
 non-verbal sounds, never repeating dialogue or music. `non_diegetic_music`
 covers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.
@@ -60,6 +61,9 @@ Expansion produces this grammar when given the H3 route. Check live runtime
 availability before promising speech.
 
 ## CLI
+
+Mold’s `--duration` can join many clips into a longer movie. Single-clip timing
+guidance and `max_runtime_seconds` do not cap that movie’s total duration.
 
 Read exactly one direct task leaf from `SKILL.md`: base modes for FL2VA
 identities, or Ref2VA for reference-conditioned identities.

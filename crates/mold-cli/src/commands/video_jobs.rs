@@ -267,6 +267,15 @@ async fn admit_with_receipt(
         !plan.validation_revision.is_empty(),
         "Machine returned no video validation proof"
     );
+    status!(
+        "Output: {}x{} at {} FPS; {} frames; {}.{:03} seconds total",
+        plan.width,
+        plan.height,
+        plan.fps,
+        plan.total_frames,
+        plan.total_duration_ms / 1000,
+        plan.total_duration_ms % 1000
+    );
     status!("{} clips joined into one video; single-generation limit: {} frames at {} FPS; overlap: {} frames ({:?})",
         plan.clip_count, plan.single_clip_max_frames, plan.fps, plan.overlap_frames, plan.join_mode);
     for warning in &plan.warnings {
