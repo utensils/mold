@@ -1785,6 +1785,16 @@ impl CollectionRef {
     }
 }
 
+pub(crate) fn optional_seed_schema() -> utoipa::openapi::schema::Schema {
+    use utoipa::openapi::schema::{ObjectBuilder, OneOfBuilder, Type};
+    utoipa::openapi::schema::Schema::OneOf(OneOfBuilder::new()
+        .item(ObjectBuilder::new().schema_type(Type::Integer).minimum(Some(0_u64)).maximum(Some(u64::MAX)))
+        .item(ObjectBuilder::new().schema_type(Type::String).pattern(Some("^[0-9]+$"))
+            .description(Some("Exact unsigned decimal integer in the inclusive range 0 through 18446744073709551615.")))
+        .item(ObjectBuilder::new().schema_type(Type::Null))
+        .build())
+}
+
 pub(crate) fn deserialize_optional_seed<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error> {
@@ -1839,6 +1849,7 @@ pub struct GenerateRequest {
     pub guidance: f64,
     /// Accept an exact decimal string from JavaScript; serialize as the legacy numeric seed.
     #[serde(default, deserialize_with = "deserialize_optional_seed")]
+    #[schema(schema_with = optional_seed_schema)]
     #[schema(example = 42)]
     pub seed: Option<u64>,
     #[serde(default = "default_batch_size")]
@@ -6008,6 +6019,41 @@ impl GpuBackend {
 mod tests {
     use super::*;
 
+    #[test]
+    fn seed_request_schemas_describe_only_integer_decimal_string_or_null() {
+        for (schema, field) in [
+            (
+                serde_json::to_value(<GenerateRequest as utoipa::PartialSchema>::schema()).unwrap(),
+                "seed",
+            ),
+            (
+                serde_json::to_value(
+                    <crate::chain::ChainRequest as utoipa::PartialSchema>::schema(),
+                )
+                .unwrap(),
+                "seed",
+            ),
+            (
+                serde_json::to_value(<crate::chain::ChainStage as utoipa::PartialSchema>::schema())
+                    .unwrap(),
+                "seed_offset",
+            ),
+        ] {
+            let variants = schema["properties"][field]["oneOf"]
+                .as_array()
+                .expect("exact seed wire alternatives");
+            assert_eq!(variants.len(), 3);
+            assert_eq!(variants[0]["type"], "integer");
+            assert_eq!(variants[0]["minimum"], 0);
+            assert_eq!(variants[0]["maximum"], serde_json::json!(u64::MAX));
+            assert_eq!(variants[1]["type"], "string");
+            assert_eq!(variants[1]["pattern"], "^[0-9]+$");
+            assert_eq!(variants[2]["type"], "null");
+            assert!(!schema["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|value| value == field)));
+        }
+    }
     #[test]
     fn generation_seed_decimal_string_preserves_full_u64_and_canonical_scope() {
         let base = serde_json::json!({"prompt":"seed", "model":"ltx-video", "width":512, "height":512, "steps":4});

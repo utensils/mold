@@ -266,6 +266,7 @@ pub struct ChainStage {
     /// different seed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
+    #[schema(schema_with = crate::types::optional_seed_schema)]
     pub seed_offset: Option<u64>,
 
     // NEW in multi-prompt v2 ───────────────────────────────────────────
@@ -369,6 +370,7 @@ pub struct ChainRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(example = 42)]
     #[serde(deserialize_with = "crate::types::deserialize_optional_seed")]
+    #[schema(schema_with = crate::types::optional_seed_schema)]
     pub seed: Option<u64>,
 
     #[schema(example = 8)]
