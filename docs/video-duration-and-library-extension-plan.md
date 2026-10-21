@@ -51,18 +51,18 @@ GPU work retains one clip's inference envelope, independent of movie length.
       frames, joins, adapters and typed inputs. Verified automatic sequences
       restore a single-prompt Duration with an explicit saved-length notice.
       Missing historical provenance refuses before changing the current draft.
-- [ ] Complete actual browser and native settings-reuse UAT, including extended
+- [x] Complete actual browser and native settings-reuse UAT, including extended
       output, media-bearing legacy clips and iOS keyboard dismissal.
 
 ## Durable Library synchronization
 
-- [ ] Preserve the full captured metadata through native and browser copy paths,
+- [x] Preserve the full captured metadata through native and browser copy paths,
       including newer authoring and artifact fields and full-width seeds.
-- [ ] Transfer provenance and continuous audio archives in bounded, resumable
+- [x] Transfer provenance and continuous audio archives in bounded, resumable
       chunks with exact destination ownership and crash-safe completion.
-- [ ] Repair partial or existing-output copies; refuse changed binding/corrupt
+- [x] Repair partial or existing-output copies; refuse changed binding/corrupt
       content without silently weakening integrity checks.
-- [ ] Peer review and prove source-independent copies using Plato UAT media.
+- [x] Peer review and prove source-independent copies using Plato UAT media.
 
 ## Recovery and delivery
 
@@ -76,11 +76,15 @@ GPU work retains one clip's inference envelope, independent of movie length.
 - [x] API, CLI, canonical skill, Discord and user documentation agree.
 - [ ] Independent code review, actual CLI and Playwright generations, native
       Simulator UAT, exact-head CI and a fresh minimal-reasoning skill blind test.
-- [ ] All generated UAT movies publish in Plato's active `/storage/mold/output`
+- [x] All generated UAT movies publish in Plato's active `/storage/mold/output`
       and **Video chaining UI UAT** collection. Receipts remain under
       `/storage/mold/uat/video-chaining-ui-20261020`.
 - [ ] Merge through PRs, deploy main to Plato and HAL9000, update the local
       nightly CLI and installed skills, and verify native nightly delivery.
+
+- [ ] Close task-owned apps, Simulators, test services and monitors after
+      deployment; archive task worktrees and remove disposable build artifacts.
+      Preserve published Library videos, receipts and unrelated workloads.
 
 Physical-device evidence must be distinguished from Simulator evidence. Parser,
 audio waveform and long-prefix memory/performance tests complement real model

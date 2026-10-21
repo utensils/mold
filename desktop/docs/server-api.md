@@ -361,7 +361,6 @@ Before importing a source-bearing copy, clients check destination readiness. Win
 
 `/api/capabilities.retained_media_transfer = { "protocol_version": 1 }` is the explicit receiver-readiness contract. It is absent on older servers and while the encrypted Unix media lifecycle is unready. Clients require this supported version before importing source-bearing outputs; queue `durable_media` alone does not establish transfer support.
 
-
 ### Durable video archive transfers
 
 A source-media transfer offer includes `video_artifacts_complete` when its
