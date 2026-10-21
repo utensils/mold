@@ -160,6 +160,12 @@ struct RetainedSourceMediaTests {
     /// `source_image_name` is a name with no bytes, and MiniMax H3 sets it
     /// alone -- so it is excluded on purpose, even though the local-stash
     /// restore does read it.
+    @Test func requestSpellingReferencesStillDiscloseRequiredMedia() {
+        #expect(RetainedSourceMedia.disclosable(Synthetic.metadata("""
+        "generation_references":[{"kind":"image","mime_type":"image/png","sha256":"abc"}]
+        """)))
+    }
+
     @Test func aNameWithNoDigestIsNotEvidenceThatBytesShipped() {
         #expect(RetainedSourceMedia.disclosable(Synthetic.metadata("""
         "source_image_name":"a-picture.png"
