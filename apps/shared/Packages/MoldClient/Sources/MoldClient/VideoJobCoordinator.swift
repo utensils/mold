@@ -107,7 +107,7 @@ public final class VideoJobCoordinator {
         ensure(value.id, owner: owner)
         if let index = index(value.id, owner: owner) { jobs[index].detail = value; jobs[index].message = value.state == .completed && value.outputFilename == nil
             ? "Completed, but no saved Library video was reported." : nil }
-        let completed = jobs.filter { $0.detail?.state == .completed || $0.detail?.state == .cancelled || $0.cancelledBeforeAdmission }
+        let completed = jobs.filter { $0.detail?.state == .completed || $0.cancelledBeforeAdmission }
         if completed.count > 32 {
             let old = Set(completed.prefix(completed.count - 32).map(\.id))
             old.forEach { retireReads($0) }

@@ -44,4 +44,35 @@ extension VideoJobCoordinatorTests {
         #expect(coordinator.jobs.isEmpty)
         #expect(coordinator.pagination[owner.host.id]?.isLoading == false)
     }
+    @Test func historicalCancelledParentsStayDiscoverableWithoutAutoResume() async throws {
+        let (backend, owner, saved) = try setup()
+        backend.stub("listVideoJobs(limit:cursor:)", returning: try listing([
+            detail("stopped", state: "cancelled", cancel: false, delete: true)
+        ], cursor: nil))
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        await coordinator.discover(owner: owner, backend: backend, current: { true })
+        #expect(coordinator.jobs.map(\.operationId) == ["stopped"])
+        #expect(backend.count("resumeVideoJob(id:destinationInstanceId:)") == 0)
+        #expect(backend.count("createVideoJob(_:operationId:destinationInstanceId:)") == 0)
+    }
+    @Test func cancelledRecoveryIsNotPrunedOrLocallyDismissedLikeCompletedHistory() throws {
+        let (_, owner, saved) = try setup()
+        let coordinator = VideoJobCoordinator(defaults: saved)
+        for index in 0..<40 {
+            coordinator.publish(try detail("stopped-\(index)", state: "cancelled", cancel: false, delete: true), owner: owner)
+        }
+        #expect(coordinator.jobs.count == 40)
+        let row = try #require(coordinator.jobs.first)
+        coordinator.dismiss(row)
+        #expect(coordinator.jobs.count == 40)
+    }
+
+    @Test func cancelledHistoryOffersAnExplicitFreshStartRatherThanResume() {
+        #expect(VideoJobState.cancelled.canRequestRestart)
+        #expect(VideoJobState.paused.canRequestRestart)
+        #expect(!VideoJobState.running.canRequestRestart)
+        #expect(!VideoJobState.completed.canRequestRestart)
+        #expect(!VideoJobState.unknown.canRequestRestart)
+    }
+
 }

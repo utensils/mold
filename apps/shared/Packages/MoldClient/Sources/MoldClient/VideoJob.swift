@@ -24,6 +24,9 @@ public struct VideoJobPlan: Codable, Hashable, Sendable {
 /// An unknown future state stays read-only; lifecycle controls use server flags.
 public enum VideoJobState: String, Codable, Hashable, Sendable {
     case queued, running, paused, completed, failed, interrupted, cancelled, unknown
+    /// Eligibility to request a fresh-start offer, never permission to mutate.
+    /// Capabilities and the current server offer remain authoritative.
+    public var canRequestRestart: Bool { [.failed, .interrupted, .paused, .cancelled].contains(self) }
     public init(from decoder: any Decoder) throws {
         self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
     }
