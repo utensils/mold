@@ -639,3 +639,5 @@ network copy; an explicit cross-machine Send streams bounded chunks. An
 unanswered create/Stop is recovered with the exact captured destination and
 operation before another attempt is admitted. Recoverable-list pagination is
 stable under earlier jobs completing or disappearing.
+
+Saved duration-video history refreshes automatically when machine readiness, route, credentials, mode or installation changes. Stale Details controls remain disabled until discovery verifies the current owner; telemetry alone does not trigger listings.

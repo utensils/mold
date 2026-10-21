@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { apiJsonTo } from "../api/client";
 import { listVideoJobs } from "../api/videoJobList";
 import type { VideoJobOwner, VideoJobAdmission } from "../api/videoJobs";
@@ -49,14 +49,14 @@ const unanswered = computed(() =>
   ),
 );
 async function check() {
-  if (busy.value) return;
+  if (disposed) return;
   const token = ++revision;
   busy.value = true;
   error.value = "";
   try {
     pending.value = readVideoJobOperations();
     const result: HostPage[] = [];
-    for (const host of fleet?.hosts.value ?? []) {
+    for (const host of [...(fleet?.hosts.value ?? [])]) {
       if (!host.ready) continue;
       const owner = {
         hostId: host.id,
@@ -91,9 +91,10 @@ async function check() {
           error.value += `${owner.label}: ${cause instanceof Error ? cause.message : String(cause)} `;
       }
     }
-    if (!disposed && token === revision) pages.value = result;
+    if (!disposed && token === revision)
+      pages.value = result.filter((page) => current(page.owner));
   } catch (cause) {
-    if (token === revision)
+    if (!disposed && token === revision)
       error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     if (token === revision) busy.value = false;
@@ -110,6 +111,7 @@ async function more(page: HostPage) {
       page.cursor,
       () => !disposed && token === revision && current(page.owner),
     );
+    if (disposed || token !== revision || !current(page.owner)) return;
     const ids = new Set(page.jobs.map((job) => job.id));
     pages.value = pages.value.map((existing) =>
       existing === page
@@ -125,12 +127,37 @@ async function more(page: HostPage) {
         : existing,
     );
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    if (!disposed && token === revision && current(page.owner))
+      error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    busy.value = false;
+    if (token === revision) busy.value = false;
   }
 }
-onMounted(() => void check());
+// Retire old reads synchronously, then coalesce the connection updates from
+// one readiness refresh. Progress/uptime never changes this authority key.
+watch(
+  () =>
+    JSON.stringify(
+      (fleet?.hosts.value ?? [])
+        .map((host) => [
+          host.id,
+          host.ready,
+          host.instanceId,
+          host.target.baseUrl,
+          host.target.apiKey,
+          host.target.connectionMode,
+        ])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ),
+  () => {
+    const token = ++revision;
+    pages.value = pages.value.filter((page) => current(page.owner));
+    void Promise.resolve().then(() => {
+      if (!disposed && token === revision) void check();
+    });
+  },
+  { immediate: true, flush: "sync" },
+);
 onBeforeUnmount(() => {
   disposed = true;
   revision++;
