@@ -1,3 +1,4 @@
+import { ref } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
@@ -139,4 +140,19 @@ it("keeps historical stopped videos available for a fresh attempt and server dis
   );
   expect(document.body.textContent).toContain("Delete recovery data");
   expect(document.body.textContent).not.toContain("Resume video");
+});
+
+it("disables a captured stale Details owner without sending any mutation", async () => {
+  const connected = ref(true);
+  const wrapper = mount(VideoJobControl, {
+    props: { owner, jobId: "known", isCurrent: () => connected.value },
+  });
+  wrappers.push(wrapper);
+  connected.value = false;
+  await flushPromises();
+  expect(wrapper.get("button").attributes("disabled")).toBeDefined();
+  await wrapper.get("button").trigger("click");
+  expect(api.get).not.toHaveBeenCalled();
+  expect(api.mutate).not.toHaveBeenCalled();
+  expect(api.admit).not.toHaveBeenCalled();
 });

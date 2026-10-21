@@ -31,7 +31,7 @@ const captured = shallowRef<VideoJobOwner | null>(null);
 let revision = 0,
   timer: ReturnType<typeof setTimeout> | undefined;
 const available = computed(() => {
-  if (props.owner) return props.owner;
+  if (props.owner) return current(props.owner) ? props.owner : null;
   const host = fleet?.hosts.value.find(
     (host) =>
       host.id === props.hostId &&

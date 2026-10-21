@@ -1,0 +1,1 @@
+- **Saved video jobs reconnect automatically.** Web and Tauri Queue refresh recoverable video jobs when a machine reconnects or its connection changes, discard stale discovery replies, and disable Details for outdated owners.

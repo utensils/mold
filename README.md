@@ -349,6 +349,8 @@ attempt using the destination's current recipe,
 while keeping the original job recoverable. Exact Resume preserves its frozen recipe.
 Web and Tauri Queue expose the same choice as **Start again…**. Updated machines also offer **Delete recovery data…** for failed/interrupted jobs, with a separate confirmation that preserves saved Library videos.
 
+Web and Tauri Queue refresh saved video jobs automatically when a machine reconnects or its connection changes. **Check saved video jobs** also refreshes them on demand. Recovery controls stay unavailable until the original machine and installation are verified.
+
 For advanced frame-level scripts and separate linked parts:
 
 ```bash
