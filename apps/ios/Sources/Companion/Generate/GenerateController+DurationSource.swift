@@ -53,9 +53,18 @@ extension GenerateController {
         } catch { if current() { durationSourceError = UserFacingError.describe(error) } }
     }
 
+    /// Library can mount Generate and deliver its action in the same turn.
+    /// Settle automatic defaults before capturing a user's source action, so
+    /// the view's initial hooks cannot invalidate an otherwise unchanged draft.
+    func prepareVideoSourceInspection() {
+        settleChoice()
+        if canAuthorVideoDuration { ensureVideoDuration() }
+    }
+
     func extendVideo(_ entry: LibraryEntry) {
         guard entry.print.isVideo, entry.print.trashedAt == nil, let host = hosts.host(entry.hostID),
               let instance = hosts.instanceID(of: host.id), hosts.capabilities[host.id]?.canExtendLibraryVideo == true else { return }
+        prepareVideoSourceInspection()
         let owner = VideoJobOwner(host: host, instanceId: instance)
         let snapshot = draft, authoring = videoDuration
         let token = UUID(); durationSourceToken = token; durationSourceLoading = true; durationSourceError = nil
