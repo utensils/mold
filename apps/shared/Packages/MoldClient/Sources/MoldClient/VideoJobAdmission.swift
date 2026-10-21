@@ -34,6 +34,8 @@ public struct ObservedVideoJob: Identifiable, Hashable, Sendable {
     public var detail: VideoJob?
     public var message: String?
     public var cancelledBeforeAdmission = false
+    public var outputAvailable: Bool?
+    public var outputMessage: String?
 }
 
 public struct VideoJobPage: Hashable, Sendable {

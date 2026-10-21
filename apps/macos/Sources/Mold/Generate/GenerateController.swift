@@ -104,6 +104,11 @@ final class GenerateController {
         sequence.restoreReferences = { [weak self] refs in
             self?.draft.media.generationReferences = refs.map(AuthoringReference.canonical)
         }
+        hosts.onEvent { [weak self] id, event in
+            guard let self, case let .gallery(change) = event,
+                  let host = self.hosts.host(id), let instance = self.hosts.instanceID(of: id) else { return }
+            self.videoJobs.galleryChanged(change, owner: .init(host: host, instanceId: instance))
+        }
     }
 
     /// Adopts a model while KEEPING the draft that was just restored.

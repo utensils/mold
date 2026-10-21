@@ -30,12 +30,45 @@ struct NativeDurationJobs: View {
                         .font(.caption).foregroundStyle(.secondaryText)
                     if let error = detail.errorDetail ?? detail.error { Text(error).fixedSize(horizontal: false, vertical: true) }
                     if let filename = detail.outputFilename, let open {
-                        Button("Show video in Library") { open(job.owner.host, filename) }.frame(minHeight: 44)
+                        if job.outputAvailable == false {
+                            Text("Saved video is no longer in Library.").foregroundStyle(.secondaryText)
+                        } else {
+                            Button(coordinator.isCheckingOutput(job) ? "Checking video…" : job.outputAvailable == true
+                                   ? "Show video in Library" : "Check video in Library") {
+                                guard let service = backend(job.owner), current(job.owner) else { return }
+                                Task {
+                                    guard await coordinator.checkOutput(job, backend: service, current: { current(job.owner) }, force: true) == true,
+                                          current(job.owner), coordinator.jobs.contains(where: {
+                                              $0.id == job.id && $0.owner == job.owner && $0.detail?.outputFilename == filename && $0.outputAvailable == true
+                                          }) else { return }
+                                    open(job.owner.host, filename)
+                                }
+                            }.disabled(!current(job.owner) || coordinator.isCheckingOutput(job)).frame(minHeight: 44)
+                        }
                     }
+                    if let message = job.outputMessage { Text(message).fixedSize(horizontal: false, vertical: true) }
                 } else { Text(job.cancelledBeforeAdmission ? "Cancelled before queueing" : "Checking saved video attempt…") }
                 if let message = job.message { Text(message).fixedSize(horizontal: false, vertical: true) }
                 actions(job)
             }.padding(.vertical, 8)
+                .buttonStyle(.borderless)
+                .confirmationDialog("Delete this job and its recovery data?", isPresented: Binding(
+                    get: { deleting?.id == job.id && deleting?.owner == job.owner },
+                    set: { if !$0, deleting?.id == job.id, deleting?.owner == job.owner { deleting = nil } }), titleVisibility: .visible) {
+                        if let selected = deleting, let target = backend(selected.owner) {
+                            Button("Delete recovery data", role: .destructive) {
+                                deleting = nil
+                                Task { await coordinator.delete(selected, backend: target, current: { current(selected.owner) }) }
+                            }
+                        }
+                        Button("Cancel", role: .cancel) { deleting = nil }
+                    } message: {
+                        Text("Saved Library videos remain. This job’s saved inputs and unfinished progress will be removed.")
+                    }
+                .task(id: OutputLocator(owner: job.owner, filename: job.detail?.outputFilename, completed: job.detail?.state == .completed)) {
+                    guard let service = backend(job.owner), current(job.owner) else { return }
+                    await coordinator.checkOutput(job, backend: service, current: { current(job.owner) })
+                }
         }
         ForEach(Array(coordinator.pagination.values).sorted { $0.owner.host.name < $1.owner.host.name }, id: \.owner.host.id) { page in
             if page.hasMore || page.error != nil || page.isLoading {
@@ -51,17 +84,9 @@ struct NativeDurationJobs: View {
             }
         }
         }
-        .confirmationDialog("Delete this job and its recovery data?", isPresented: Binding(
-            get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-                if let job = deleting, let target = backend(job.owner) {
-                    Button("Delete recovery data", role: .destructive) {
-                        deleting = nil
-                        Task { await coordinator.delete(job, backend: target, current: { current(job.owner) }) }
-                    }
-                }
-                Button("Cancel", role: .cancel) { deleting = nil }
-            } message: { Text("Saved Library videos remain. This job’s saved inputs and unfinished progress will be removed.") }
     }
+
+    private struct OutputLocator: Hashable { let owner: VideoJobOwner; let filename: String?; let completed: Bool }
 
     static func statusDescription(_ detail: VideoJob, current: Bool) -> String {
         let status = "\(detail.state.rawValue.capitalized) · \(min(detail.completedClips, detail.plan.clipCount)) of \(detail.plan.clipCount) clips"
@@ -70,7 +95,7 @@ struct NativeDurationJobs: View {
 
     @ViewBuilder private func actions(_ job: ObservedVideoJob) -> some View {
         if job.cancelledBeforeAdmission || job.detail?.state == .completed {
-            Button("Dismiss video") { coordinator.dismiss(job) }.frame(minHeight: 44)
+            Button("Dismiss from Queue") { coordinator.dismiss(job) }.frame(minHeight: 44)
         }
         if let target = backend(job.owner), current(job.owner) {
             ViewThatFits(in: .horizontal) {
@@ -86,7 +111,10 @@ struct NativeDurationJobs: View {
 
     @ViewBuilder private func controls(_ job: ObservedVideoJob, backend: any MoldBackend) -> some View {
         Button("Check queue") {
-            Task { await coordinator.refresh(job.operationId, owner: job.owner, backend: backend, current: { current(job.owner) }) }
+            Task {
+                await coordinator.refresh(job.operationId, owner: job.owner, backend: backend, current: { current(job.owner) })
+                await coordinator.checkOutput(job, backend: backend, current: { current(job.owner) }, force: true)
+            }
         }.frame(minHeight: 44)
         if job.detail?.canCancel == true || (job.detail == nil && !job.cancelledBeforeAdmission) {
             Button(coordinator.isCancellationRequested(job) ? "Check Stop" : "Stop", role: .destructive) {
@@ -100,7 +128,7 @@ struct NativeDurationJobs: View {
             Button("Start again…") { restart(job) }.frame(minHeight:44)
         }
         if job.detail?.canDelete == true {
-            Button("Delete job…", role: .destructive) { deleting = job }.frame(minHeight: 44)
+            Button(coordinator.isDeleting(job) ? "Deleting…" : "Delete job…", role: .destructive) { deleting = job }.frame(minHeight: 44)
         }
     }
 }

@@ -1102,3 +1102,5 @@ Video listing failures remain visible in an otherwise-empty Queue with a Retry a
 Extend rechecks original inputs after connection metadata changes without replacing the new prompt or duration. A cancelled or stale restore cannot overwrite its replacement or a newer explicit Library action.
 
 Video progress readers follow the current captured connection after its details change. If that connection is not current, Queue labels cached progress **Last known** and keeps mutation controls unavailable until the original machine is verified again.
+
+Completed videos offer **Dismiss from Queue**, an immediate device-local action that survives refresh and relaunch without deleting the job or movie. **Delete job…** separately confirms removal of server recovery data and shows **Deleting…** until it settles; Library videos remain independently owned. A confirmed missing or trashed output replaces the Library link with an explanation. An unavailable connection is not treated as a deleted movie, and opening an output rechecks its exact owning machine.

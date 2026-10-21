@@ -5,7 +5,7 @@ public extension VideoJobCoordinator {
                  current: @escaping @MainActor () -> Bool) async {
         let backend = scoped(backend, owner: owner)
         let key = identity(id, owner: owner)
-        guard !mutating.contains(key), current(), !Task.isCancelled else { return }
+        guard !isRemoved(id, owner: owner), !mutating.contains(key), current(), !Task.isCancelled else { return }
         let token = UUID(); readTokens[key] = token
         let fresh = { @MainActor in !Task.isCancelled && current() && self.readTokens[key] == token }
         do {
@@ -44,8 +44,12 @@ public extension VideoJobCoordinator {
     }
 
     func dismiss(_ job: ObservedVideoJob) {
-        guard job.cancelledBeforeAdmission || job.detail?.state == .completed else { return }
-        do { try forget(job.operationId, owner: job.owner) }
+        guard let live = jobs.first(where: { $0.id == job.id && $0.owner == job.owner }),
+              live.cancelledBeforeAdmission || live.detail?.state == .completed else { return }
+        do {
+            try recordRemoval(job.operationId, owner: job.owner)
+            try forget(job.operationId, owner: job.owner)
+        }
         catch { message(UserFacingError.describe(error), id: job.operationId, owner: job.owner); return }
         retireReads(job.id)
         jobs.removeAll { $0.id == job.id && $0.owner == job.owner }
@@ -56,7 +60,7 @@ extension VideoJobCoordinator {
     func follow(_ record: VideoJobAdmission, owner: VideoJobOwner, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool) {
         let key = owner.host.id.uuidString + ":" + record.operationId
-        guard current() else { return }
+        guard !isRemoved(record.operationId, owner: owner), current() else { return }
         if let existing = followers[key], !existing.isCancelled, followOwners[key] == owner { return }
         followers[key]?.cancel()
         let token = UUID(); followTokens[key] = token; followOwners[key] = owner

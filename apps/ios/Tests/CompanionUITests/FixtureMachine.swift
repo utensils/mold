@@ -20,6 +20,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "iphone-ui-fixture")
     private let models: Data
+    let durationQueueFixture: Bool
+    let durationCompleted = Mutex(false)
     private let keyboardSequenceFixture: Bool
     private let aspectFixture: Bool
     private let referenceFixture: Bool
@@ -68,7 +70,8 @@ final class FixtureMachine: @unchecked Sendable {
     private let modelMemoryFixture: Bool
     private var residentModels: Set<String> = []
 
-    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, sourceAspectFixture: Bool = false, failFirstSourceThumbnail: Bool = false, playbackData: Data? = nil, keyboardSequenceFixture: Bool = false) throws {
+    init(justifiedFixture: Bool = false, landscapePlaybackFixture: Bool = false, exportFixture: Bool = false, unsupportedExportFormats: Bool = false, aspectFixture: Bool = false, referenceFixture: Bool = false, galleryPrints: Int = 0, galleryID: String? = nil, galleryFavorites: Int = 0, collectionFixture: Bool = false, hiddenCollectionFixture: Bool = false, omitOrganizationCapabilities: Bool = false, mixedMedia: Bool = false, queueFixture: Bool = false, retainedMediaFixture: Bool = false, retainedFrameFixture: Bool = false, loadedModels: Bool = false, queueControls: Bool = false, libraryMutations: Bool = false, removePrintOnFavorite: String? = nil, memoryErrorFixture: String? = nil, queueDownloadFixture: Bool = false, requiresDownloadLicense: Bool = false, trashFixture: Bool = false, queueFailureFixture: Bool = false, queueSwipeFixture: Bool = false, queueDestinationFixture: Bool = false, promptExpansionFixture: Bool = false, batchQueueFixture: Bool = false, sourceFreeQueueFixture: Bool = false, sourceMediaLibraryFixture: Bool = false, sourceAspectFixture: Bool = false, failFirstSourceThumbnail: Bool = false, playbackData: Data? = nil, keyboardSequenceFixture: Bool = false, durationQueueFixture: Bool = false) throws {
+        self.durationQueueFixture = durationQueueFixture
         self.keyboardSequenceFixture = keyboardSequenceFixture
         self.landscapePlaybackFixture = landscapePlaybackFixture
         self.playbackData = playbackData
@@ -446,6 +449,7 @@ final class FixtureMachine: @unchecked Sendable {
     }
 
     private func response(_ path: String, historyQuery: String? = nil) -> Data {
+        if durationQueueFixture, let response = durationQueueResponse(path) { return response }
         if let retainedFrames = retainedFrameResponse(path) { return retainedFrames }
         if sourceAspectFixture, path == "/api/gallery/source-media/fixture-0.png" {
             let members: [[String: Any]] = [
