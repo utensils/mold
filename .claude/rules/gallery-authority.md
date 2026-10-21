@@ -220,7 +220,6 @@ responses are private/no-store. Browsing creates no pins; Trash and permanent
 deletion retain their existing ownership rules. There is no independent source
 upload, pinning or deletion action.
 
-
 **Source identity and derived caches remain subordinate to ownership.** Additive
 `content_sha256` is the SHA-256 of exact reusable bytes: raw members use their
 authenticated manifest digest, while keyframes hash the actual unwrapped image
@@ -244,3 +243,12 @@ plaintext files. Responses stay private/no-store; caches never persist plaintext
 Thumbnail misses additionally hold a separate two-slot payload-lifetime permit from selected-member extraction through rendering and plaintext drop; the shared cold-work permit alone cannot bound buffers waiting between phases.
 
 Stored `GenerationRecord.metadata`, committed archive records, Mold `mold:parameters` containers, Trash metadata, and `GalleryImage.metadata` carry logical strings serialized by Mold. Decode them with the explicit literal metadata reader; never reapply legacy prompt-escape normalization. Keep the legacy request parser unchanged. A decoding fix that changes existing Gallery rows must bump `gallery_changes_api::ROW_FORMAT` and its golden fixture so feed cursors and listing validators invalidate stale replicas.
+
+For a duration movie, authenticated reuse maps retained `stage_source:0`,
+`stage_reference:0:<position>` and `stage_keyframe:0:<position>` into a fresh
+ordinary generation request. Reference and boundary positions must be complete
+and unambiguous; mixed ordinary/stage aliases, missing frame locators and later
+stages are refused. Boundary locators come from the exact archived recipe,
+never the movie's total delivered frame count. Reuse sessions bind and recheck
+that locator with archive/member identity before consuming a session. Legacy
+full-sequence restoration uses each stage's authenticated retained inputs.

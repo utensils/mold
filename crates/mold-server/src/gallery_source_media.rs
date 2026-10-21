@@ -115,7 +115,27 @@ fn downloadable_role(role: &str) -> bool {
     )
 }
 
+fn stage_zero_slot(role: &str, prefix: &str) -> Option<usize> {
+    let value = role.strip_prefix(prefix)?.strip_prefix("0:")?;
+    let index = value.parse::<usize>().ok()?;
+    (value == index.to_string()).then_some(index)
+}
+
+fn reuse_role(role: &str) -> &str {
+    if stage_zero_slot(role, "stage_reference:").is_some() {
+        "references"
+    } else if stage_zero_slot(role, "stage_keyframe:").is_some() {
+        "keyframes"
+    } else {
+        role
+    }
+}
+
 fn reusable_role(role: &str) -> bool {
+    if role.starts_with("stage_reference:") || role.starts_with("stage_keyframe:") {
+        return stage_zero_slot(role, "stage_reference:").is_some()
+            || stage_zero_slot(role, "stage_keyframe:").is_some();
+    }
     if role.starts_with("chain_continuation_tail:") {
         return false;
     }
@@ -423,16 +443,38 @@ fn present_member(member: &mut ResolvedMember, metadata: &mold_core::OutputMetad
                 kind = match stage
                     .and_then(|stage| stage.generation_references.get(item_index?))
                     .map(|reference| reference.kind)
-                {
+                    .or_else(|| {
+                        (stage_index == Some(0) && metadata.video_job.is_some())
+                            .then(|| {
+                                metadata
+                                    .references
+                                    .as_ref()?
+                                    .get(item_index?)
+                                    .map(|r| r.kind)
+                            })
+                            .flatten()
+                    }) {
                     Some(mold_core::GenerationReferenceKind::Image) => "image",
                     Some(mold_core::GenerationReferenceKind::Video) => "video",
                     Some(mold_core::GenerationReferenceKind::Audio) => "audio",
+                    Some(mold_core::GenerationReferenceKind::Mesh) => "mesh",
                     _ => "unknown",
                 };
             } else {
                 frame_index = stage
                     .and_then(|stage| stage.keyframes.get(item_index?))
-                    .map(|frame| frame.frame);
+                    .map(|frame| frame.frame)
+                    .or_else(|| {
+                        (stage_index == Some(0) && metadata.video_job.is_some())
+                            .then(|| {
+                                metadata
+                                    .keyframes
+                                    .as_ref()?
+                                    .get(item_index?)
+                                    .map(|f| f.frame)
+                            })
+                            .flatten()
+                    });
             }
             format!(
                 "Stage {} {} {}",
@@ -660,6 +702,7 @@ struct ReuseSessionMember {
     index: usize,
     role: String,
     position: String,
+    frame_index: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -876,6 +919,7 @@ fn selected_members(
             index: member.index,
             role: member.member.role.clone(),
             position: member.position.clone(),
+            frame_index: member.member.frame_index,
         });
     }
     selected.sort_by_key(|member| (member.pin_id.clone(), member.index));
@@ -1111,6 +1155,7 @@ async fn hydrate_reuse_session_with_mode(
             || current_member.index != selected.index
             || current_member.member.role != selected.role
             || current_member.position != selected.position
+            || current_member.member.frame_index != selected.frame_index
         {
             return Err(ApiError::with_code(
                 "retained source-media member identity changed",
@@ -1170,8 +1215,35 @@ fn ensure_hydration_target_is_empty(
 ) -> Result<(), ApiError> {
     let roles = members
         .iter()
-        .map(|member| member.role.as_str())
+        .map(|member| reuse_role(&member.role))
         .collect::<HashSet<_>>();
+    for (prefix, canonical) in [
+        ("stage_reference:", "references"),
+        ("stage_keyframe:", "keyframes"),
+    ] {
+        let mut slots = members
+            .iter()
+            .filter_map(|member| stage_zero_slot(&member.role, prefix))
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        if slots
+            .iter()
+            .enumerate()
+            .any(|(expected, actual)| expected != *actual)
+            || (!slots.is_empty() && members.iter().any(|member| member.role == canonical))
+            || members
+                .iter()
+                .any(|member| member.role.starts_with(prefix) && !reusable_role(&member.role))
+            || (canonical == "keyframes"
+                && members
+                    .iter()
+                    .any(|member| member.role.starts_with(prefix) && member.frame_index.is_none()))
+        {
+            return Err(ApiError::validation(
+                "retained stage inputs require a complete, unambiguous first-stage topology",
+            ));
+        }
+    }
     let source_count = members
         .iter()
         .filter(|member| matches!(member.role.as_str(), "source_image" | "stage_source:0"))
@@ -1199,7 +1271,7 @@ fn ensure_hydration_target_is_empty(
     }
     let selected_references = members
         .iter()
-        .filter(|member| member.role == "references")
+        .filter(|member| reuse_role(&member.role) == "references")
         .count();
     if selected_references > 0 {
         let references = request.references.as_deref().ok_or_else(|| {
@@ -1238,8 +1310,26 @@ fn hydrate_selected_members(
     let mut edit_images = Vec::new();
     let mut references = Vec::new();
     let mut keyframes = Vec::new();
+    let mut decrypted = decrypted;
+    // A retained archive may span pins with unrelated storage indices. Authored
+    // stage positions, rather than pin order, define reference ordering.
+    decrypted.sort_by_key(|(member, _)| {
+        stage_zero_slot(&member.role, "stage_reference:")
+            .or_else(|| stage_zero_slot(&member.role, "stage_keyframe:"))
+            .unwrap_or(usize::MAX)
+    });
     for (member, bytes) in decrypted {
-        match member.role.as_str() {
+        if stage_zero_slot(&member.role, "stage_keyframe:").is_some() {
+            keyframes.push(mold_core::KeyframeCondition {
+                frame: member
+                    .frame_index
+                    .expect("archived frame locator checked above"),
+                image: bytes,
+                name: None,
+            });
+            continue;
+        }
+        match reuse_role(&member.role) {
             "source_image" | "stage_source:0" => request.source_image = Some(bytes),
             "identity_image" => request.id_image = Some(bytes),
             "identity_images" => identity_images.push(bytes),
@@ -1725,6 +1815,31 @@ mod tests {
             present_member(&mut member, &metadata);
             assert_eq!(member.member.media_kind.as_deref(), Some(kind));
         }
+        metadata.video_job = Some(
+            serde_json::from_value(serde_json::json!({
+                "id":"a9c465f9-661b-421b-b960-7bf1ce85b614", "manifest_sha256":"a".repeat(64),
+                "clip_count":"2","part_count":"2","added_frames":"144","source_frames":"0",
+                "total_frames":"144","join_mode":"continuous"
+            }))
+            .unwrap(),
+        );
+        metadata.frames = Some(144);
+        member.member.role = "stage_keyframe:0:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(
+            member.member.frame_index,
+            Some(24),
+            "the authored endpoint is not the movie's final frame"
+        );
+        member.member.role = "stage_keyframe:1:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(
+            member.member.frame_index, None,
+            "never borrow first-stage authority for another stage"
+        );
+        member.member.role = "stage_reference:0:0".into();
+        present_member(&mut member, &metadata);
+        assert_eq!(member.member.media_kind.as_deref(), Some("mesh"));
         member.member.role = "chain_continuation_tail:4294967295".into();
         present_member(&mut member, &metadata);
         assert_eq!(
@@ -1988,6 +2103,7 @@ mod tests {
             pin_id: "a".repeat(64),
             index,
             role: role.to_string(),
+            frame_index: None,
             position: if index == 0 {
                 "scalar".to_string()
             } else {
@@ -2020,6 +2136,97 @@ mod tests {
         )
         .is_err());
         assert!(target.source_image.is_none());
+    }
+
+    #[test]
+    fn stage_zero_reference_and_boundary_roles_restore_in_authored_order() {
+        let mut target = request();
+        target.references = Some(serde_json::from_value(serde_json::json!([
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64},
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64}
+        ])).unwrap());
+        let mut boundary = selected("stage_keyframe:0:0", 3);
+        boundary.frame_index = Some(123);
+        hydrate_selected_members(
+            &mut target,
+            vec![
+                (selected("stage_reference:0:1", 0), vec![22]),
+                (selected("stage_reference:0:0", 1), vec![11]),
+                (boundary, vec![33]),
+            ],
+        )
+        .unwrap();
+        let refs = target.references.unwrap();
+        assert_eq!(
+            refs[0].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![11] }
+        );
+        assert_eq!(
+            refs[1].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![22] }
+        );
+        assert_eq!(target.keyframes.unwrap()[0].frame, 123);
+    }
+
+    #[test]
+    fn ordinary_reference_order_is_not_replaced_by_storage_indices() {
+        let mut target = request();
+        target.references = Some(serde_json::from_value(serde_json::json!([
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64},
+            {"kind":"image", "media":{"authority":"descriptor"},"mime_type":"image/png","width":64,"height":64}
+        ])).unwrap());
+        hydrate_selected_members(
+            &mut target,
+            vec![
+                (selected("references", 9), vec![11]),
+                (selected("references", 0), vec![22]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            target.references.unwrap()[0].media(),
+            &mold_core::GenerationReferenceAuthority::Inline { data: vec![11] }
+        );
+    }
+
+    #[test]
+    fn stage_reuse_refuses_missing_positions_and_other_stages_before_mutation() {
+        for role in [
+            "stage_reference:1:0",
+            "stage_keyframe:1:0",
+            "stage_reference:0:1",
+            "stage_keyframe:0:0",
+        ] {
+            let mut target = request();
+            assert!(
+                hydrate_selected_members(&mut target, vec![(selected(role, 0), vec![1])]).is_err(),
+                "{role}"
+            );
+            assert!(target.source_image.is_none());
+            assert!(target.keyframes.is_none());
+        }
+    }
+
+    #[test]
+    fn stage_reuse_rejects_duplicate_mixed_and_noncanonical_reference_authority() {
+        for roles in [
+            vec!["stage_reference:0:0", "stage_reference:0:0"],
+            vec!["stage_reference:0:0", "references"],
+            vec!["stage_reference:0:00"],
+            vec!["stage_reference:00:0"],
+        ] {
+            let mut target = request();
+            assert!(hydrate_selected_members(
+                &mut target,
+                roles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, role)| (selected(role, i), vec![1]))
+                    .collect()
+            )
+            .is_err());
+            assert!(target.references.is_none());
+        }
     }
 
     #[test]
