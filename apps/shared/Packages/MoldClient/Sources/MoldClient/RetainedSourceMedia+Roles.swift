@@ -48,9 +48,15 @@ public extension RetainedSourceMedia {
 
     static func referenceMembers(_ members: [Member]) -> [Member] {
         let selected = members.filter { field(forRole: $0.role) == .references }
-        guard selected.contains(where: { $0.role.hasPrefix("stage_reference:") }) else { return selected }
-        return selected.sorted { Int($0.role.split(separator: ":").last ?? "") ?? -1
-            < Int($1.role.split(separator: ":").last ?? "") ?? -1 }
+        let staged = members.filter { $0.role.hasPrefix("stage_reference:") }
+        guard !staged.isEmpty else { return selected }
+        guard staged.count == selected.count,
+              selected.allSatisfy({ $0.role.hasPrefix("stage_reference:0:") }),
+              Set(selected.map(\.memberId)).count == selected.count else { return [] }
+        let ordered = selected.sorted { (Int($0.role.split(separator: ":").last ?? "") ?? -1)
+            < (Int($1.role.split(separator: ":").last ?? "") ?? -1) }
+        guard ordered.enumerated().allSatisfy({ $0.element.role == "stage_reference:0:\($0.offset)" }) else { return [] }
+        return ordered
     }
 
     /// Roles the host will hand over for DOWNLOAD but refuses to hydrate: a
