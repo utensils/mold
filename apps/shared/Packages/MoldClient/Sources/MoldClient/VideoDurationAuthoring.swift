@@ -24,8 +24,9 @@ public struct VideoLibrarySourceOwner: Codable, Hashable, Sendable {
 public struct VideoDurationAuthoring: Codable, Hashable, Sendable {
     public var draft: VideoDurationDraft
     public var sourceOwner: VideoLibrarySourceOwner?
-    public init(draft: VideoDurationDraft, sourceOwner: VideoLibrarySourceOwner? = nil) {
-        self.draft = draft; self.sourceOwner = sourceOwner
+    public var reuseNotice: String?
+    public init(draft: VideoDurationDraft, sourceOwner: VideoLibrarySourceOwner? = nil, reuseNotice: String? = nil) {
+        self.draft = draft; self.sourceOwner = sourceOwner; self.reuseNotice = reuseNotice
     }
     public func request(generation: GenerateRequest, owner: VideoJobOwner) throws -> VideoJobRequest {
         if draft.source != nil, sourceOwner?.matches(owner) != true {
@@ -42,5 +43,5 @@ public struct VideoDurationAuthoring: Codable, Hashable, Sendable {
                 || generation.keyframes?.contains(where: { $0.frame == 0 }) == true else { return nil }
         return "This video continues the original ending. Remove the attached first frame, or choose Start new video."
     }
-    public mutating func startFresh() { draft.source = nil; sourceOwner = nil }
+    public mutating func startFresh() { draft.source = nil; sourceOwner = nil; reuseNotice = nil }
 }

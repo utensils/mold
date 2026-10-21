@@ -124,6 +124,7 @@ public struct OutputMetadata: Codable, Hashable, Sendable {
     /// only the durable job carries the id beside it.
     public let chain: ChainProvenance?
     public let chainJobId: String?
+    public let videoJob: VideoJobPrintProvenance?
     public let version: String?
 }
 

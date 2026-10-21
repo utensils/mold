@@ -59,7 +59,7 @@ public extension InputMediaPreview {
               RetainedReferenceGuard.canHydrate(references: references, original: original, members: members) else {
             throw MoldClientError.malformedResponse
         }
-        let ordered = members.filter { $0.role == "references" }
+        let ordered = RetainedSourceMedia.referenceMembers(members)
         guard ordered.indices.contains(index) else { throw MoldClientError.malformedResponse }
         let member = ordered[index]
         let inventory = try await backend.retainedSourceMedia(for: filename)

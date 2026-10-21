@@ -37,6 +37,8 @@ public struct ChainStageInput: Codable, Hashable, Sendable {
 /// Authored work has durable history and publishes a recoverable Library job id.
 /// This is deliberately separate from AutoChainRequest's hidden implementation detail.
 public struct AuthoredChainRequest: Codable, Hashable, Sendable {
+    public static let inlineMediaLimitBytes = 32 * 1_024 * 1_024
+    public static let retainedMediaMemberLimit = 64
     public var continueFrom: ChainContinuation?
     public var model: String
     public var stages: [ChainStageInput]
@@ -144,14 +146,14 @@ public struct AuthoredChainRequest: Codable, Hashable, Sendable {
                 members += 1
                 if let data = reference.media.data { payloads.append(data) }
             }
-            guard members <= 64 else {
+            guard members <= Self.retainedMediaMemberLimit else {
                 throw SequenceDraftError.invalid("This part contains too many attachments. Use fewer clips or references.")
             }
             for payload in payloads {
                 let count = payload.utf8.count
                 let padding = payload.hasSuffix("==") ? 2 : (payload.hasSuffix("=") ? 1 : 0)
                 let bytes = max(0, count / 4 * 3 - padding)
-                guard bytes <= 32 * 1_024 * 1_024 - decodedBytes else {
+                guard bytes <= Self.inlineMediaLimitBytes - decodedBytes else {
                     throw SequenceDraftError.invalid("Attachments across this part exceed 32 MiB. Use fewer clips or smaller references.")
                 }
                 decodedBytes += bytes

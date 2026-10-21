@@ -20,7 +20,7 @@ public extension RetainedSourceMedia {
         var relayed = request
         var grouped: [Field: [Data]] = [:]
         for (member, bytes) in downloaded {
-            guard let field = fieldForRole[member.role] else {
+            guard let field = field(forRole: member.role) else {
                 throw RelayFailure.unsupportedRole(member.role)
             }
             guard !notReusableRoles.contains(member.role) else {
@@ -29,7 +29,11 @@ public extension RetainedSourceMedia {
             // Asked before ANY of it is applied, so a conflict on the last
             // member cannot leave the first three already written in.
             guard relayed.isVacant(field) else { throw RelayFailure.alreadyHeld(field) }
-            grouped[field, default: []].append(bytes)
+            if field == .keyframes, member.role.hasPrefix("stage_keyframe:") {
+                guard let frame = member.frameIndex, frame >= 0 else { throw RelayFailure.unsupportedRole(member.role) }
+                let keyframe = KeyframeCondition(frame: frame, image: bytes.base64EncodedString(), name: member.displayName)
+                grouped[field, default: []].append(try MoldJSON.encoder.encode(keyframe))
+            } else { grouped[field, default: []].append(bytes) }
         }
         for (field, bytes) in grouped {
             try relayed.inline(field, bytes)

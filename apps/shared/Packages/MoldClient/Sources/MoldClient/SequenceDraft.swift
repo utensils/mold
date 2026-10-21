@@ -29,7 +29,7 @@ public struct SequenceDraft: Codable, Hashable, Sendable {
         let stage = stages.remove(at: from); stages.insert(stage, at: to)
     }
     public func wireStages() -> [ChainStageInput] { stages.map(\.input) }
-    public func request(base: GenerateRequest, limits: ChainLimits, repeatReferences: Bool = true) throws -> AuthoredChainRequest {
-        try AuthoredChainRequest(base, stages: wireStages(), limits: limits, repeatReferences: repeatReferences)
+    public func request(base: GenerateRequest, limits: ChainLimits, repeatReferences: Bool = true, motionTailFrames: Int? = nil) throws -> AuthoredChainRequest {
+        try AuthoredChainRequest(base, stages: wireStages(), limits: limits, motionTailFrames: motionTailFrames, repeatReferences: repeatReferences)
     }
 }
