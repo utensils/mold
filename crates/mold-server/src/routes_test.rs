@@ -24995,4 +24995,155 @@ mod tests {
             "the authenticated caller keeps the verbatim reason"
         );
     }
+
+    #[cfg(feature = "mp4")]
+    fn duration_capability_state(
+        root: &std::path::Path,
+        install_admission: bool,
+    ) -> (AppState, tokio_util::sync::CancellationToken) {
+        let db = Arc::new(Some(
+            mold_db::MetadataDb::open(&root.join("mold.db")).unwrap(),
+        ));
+        let (mut state, _rx) = durable_state_with_admission_policy(
+            db,
+            root,
+            MockEngine::ready(),
+            true,
+            install_admission,
+            "video-capability-test",
+        );
+        install_authoritative_v2(&mut state);
+        state.chain_jobs = Some(Arc::new(
+            crate::chain_job_runner::ChainJobRunnerHandle::inert_for_tests(),
+        ));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        state.video_jobs = Some(crate::video_job_actor::spawn(
+            state.clone(),
+            shutdown.clone(),
+        ));
+        (state, shutdown)
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn capabilities_video_jobs_offer_complete_protocol_on_ready_keyed_and_keyless_hosts() {
+        for keyed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (state, shutdown) = duration_capability_state(root.path(), true);
+            let auth = keyed.then(|| {
+                Arc::new(crate::auth::ApiKeySet::new(
+                    std::collections::HashSet::from(["video-test-key".to_owned()]),
+                ))
+            });
+            let app = app_with_state(state)
+                .layer(axum::middleware::from_fn(crate::auth::require_api_key))
+                .layer(crate::auth::test_loopback_peer())
+                .layer(axum::middleware::from_fn_with_state(
+                    auth,
+                    crate::auth::inject_auth_state,
+                ));
+            let response = app
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .header("x-api-key", "video-test-key")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            shutdown.cancel();
+            assert_eq!(
+                body["video_jobs"],
+                serde_json::json!({
+                    "supported": true, "literal_prompts": true, "library_extend": true,
+                    "source_transfer": true, "restart": true,
+                }),
+                "keyed={keyed}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[tokio::test]
+    async fn capabilities_video_jobs_refuse_each_unready_authority() {
+        for missing in [
+            "database",
+            "captured_home",
+            "chain_runner",
+            "video_actor",
+            "generation",
+            "scheduler",
+            "journal",
+            "output",
+            "reconciled_media",
+            "admission",
+            "media_services",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut state, shutdown) =
+                duration_capability_state(root.path(), missing != "admission");
+            match missing {
+                "database" => state.metadata_db = Arc::new(None),
+                "captured_home" => {
+                    state.metadata_db =
+                        Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()))
+                }
+                "chain_runner" => state.chain_jobs = None,
+                "video_actor" => state.video_jobs = None,
+                "generation" => state.set_generation_unavailable("maintenance"),
+                "scheduler" => {
+                    install_dispatch_mode(&mut state, crate::dispatch_mode::DispatchMode::Legacy)
+                }
+                "journal" => {
+                    state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::disabled())
+                }
+                "output" => state.output_disabled_override = true,
+                "reconciled_media" => state
+                    .queue_journal
+                    .set_durable_media_status(false, vec!["input storage unavailable".into()]),
+                "admission" => {}
+                "media_services" => {
+                    state.queue_journal = Arc::new(crate::queue_journal::QueueJournal::new(
+                        state.metadata_db.clone(),
+                        Some(root.path()),
+                        "unreconciled",
+                    ));
+                    state.queue_journal.set_durable_media_ready(true);
+                }
+                _ => unreachable!(),
+            }
+            let response = app_with_state(state)
+                .oneshot(
+                    Request::get("/api/capabilities")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            shutdown.cancel();
+            assert!(
+                body.get("video_jobs").is_none(),
+                "missing={missing}: {body}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "mp4"))]
+    #[tokio::test]
+    async fn capabilities_video_jobs_remain_absent_without_mp4() {
+        let response = app_with_state(AppState::for_tests())
+            .oneshot(
+                Request::get("/api/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(json_body(response).await.get("video_jobs").is_none());
+    }
 }

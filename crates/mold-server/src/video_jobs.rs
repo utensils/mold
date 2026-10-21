@@ -11,7 +11,7 @@ use mold_core::video_job::{VideoJob, VideoJobPlan, VideoJobRequest};
 use mold_db::video_jobs as db;
 use std::sync::{Arc, OnceLock};
 
-/// MP4 builds expose the literal protocol; capability stays absent until UAT.
+/// MP4 builds expose the literal protocol; capabilities also require runtime readiness.
 pub(crate) fn router() -> axum::Router<AppState> {
     #[cfg(feature = "mp4")]
     {

@@ -8624,6 +8624,38 @@ async fn discovery_peers(
     Ok(Json(peers))
 }
 
+/// Offer the complete duration protocol only when its runners, captured home,
+/// publication and reconciled encrypted input authority are all available.
+/// This is a runtime snapshot; model-specific feasibility belongs to validation.
+fn video_job_capabilities(
+    state: &AppState,
+    readiness: &DurableAdmissionReadiness,
+) -> Option<mold_core::video_job::VideoJobCapabilities> {
+    #[cfg(feature = "mp4")]
+    let video_actor_ready = state.video_jobs.is_some();
+    #[cfg(not(feature = "mp4"))]
+    let video_actor_ready = false;
+    let captured_home = state
+        .metadata_db
+        .as_ref()
+        .as_ref()
+        .and_then(|db| db.path().parent())
+        .is_some_and(|home| home.is_absolute());
+    (video_actor_ready
+        && captured_home
+        && state.chain_jobs.is_some()
+        && state.generation_unavailable().is_none()
+        && readiness.generation_admitted()
+        && readiness.media_ready())
+    .then_some(mold_core::video_job::VideoJobCapabilities {
+        supported: true,
+        literal_prompts: true,
+        library_extend: true,
+        source_transfer: true,
+        restart: true,
+    })
+}
+
 /// Report the feature toggles a client needs to render correctly (hide the
 /// delete button when delete isn't allowed, etc.). Authentication follows the
 /// rest of `/api/*` when an API key is configured.
@@ -8706,7 +8738,7 @@ async fn server_capabilities(
         ),
     };
     Json(mold_core::ServerCapabilities {
-        video_jobs: None,
+        video_jobs: video_job_capabilities(&state, &readiness),
         generation_profile_v1: true,
         licenses: true,
         gallery,
