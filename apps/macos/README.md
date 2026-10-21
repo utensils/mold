@@ -1100,3 +1100,5 @@ Stopped accepted duration videos remain paused in Queue and can resume from comp
 Video listing failures remain visible in an otherwise-empty Queue with a Retry action for the failed first or later page. Successful retry clears that machine’s listing error without clearing unrelated admission errors.
 
 Extend rechecks original inputs after connection metadata changes without replacing the new prompt or duration. A cancelled or stale restore cannot overwrite its replacement or a newer explicit Library action.
+
+Video progress readers follow the current captured connection after its details change. If that connection is not current, Queue labels cached progress **Last known** and keeps mutation controls unavailable until the original machine is verified again.

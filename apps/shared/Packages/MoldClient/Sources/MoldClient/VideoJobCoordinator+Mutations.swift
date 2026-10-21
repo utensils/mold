@@ -53,7 +53,7 @@ public extension VideoJobCoordinator {
             try await backend.deleteVideoJob(id: job.operationId, destinationInstanceId: job.owner.instanceId)
             guard current(), !Task.isCancelled else { return }
             try forget(job.operationId, owner: job.owner)
-            followers[job.id]?.cancel(); followers[job.id] = nil; followTokens[job.id] = nil
+            retireReads(job.id)
             jobs.removeAll { $0.id == job.id && $0.owner == job.owner }
         } catch { if current() { message(UserFacingError.describe(error), id: job.operationId, owner: job.owner) } }
     }

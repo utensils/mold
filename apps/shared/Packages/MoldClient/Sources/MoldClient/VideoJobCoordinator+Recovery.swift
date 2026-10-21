@@ -56,11 +56,13 @@ extension VideoJobCoordinator {
     func follow(_ record: VideoJobAdmission, owner: VideoJobOwner, backend: any MoldBackend,
                 current: @escaping @MainActor () -> Bool) {
         let key = owner.host.id.uuidString + ":" + record.operationId
-        guard followers[key] == nil, current() else { return }
-        let token = UUID(); followTokens[key] = token
+        guard current() else { return }
+        if let existing = followers[key], !existing.isCancelled, followOwners[key] == owner { return }
+        followers[key]?.cancel()
+        let token = UUID(); followTokens[key] = token; followOwners[key] = owner
         followers[key] = Task { [weak self] in
             guard let self else { return }
-            defer { if self.followTokens[key] == token { self.followers[key] = nil; self.followTokens[key] = nil } }
+            defer { if self.followTokens[key] == token { self.followers[key] = nil; self.followTokens[key] = nil; self.followOwners[key] = nil } }
             while !Task.isCancelled, current(), self.followTokens[key] == token {
                 await self.refresh(record.operationId, owner: owner, backend: backend, current: current)
                 guard !Task.isCancelled, self.followTokens[key] == token,
