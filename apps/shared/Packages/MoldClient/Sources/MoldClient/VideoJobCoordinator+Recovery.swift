@@ -44,7 +44,7 @@ public extension VideoJobCoordinator {
     }
 
     func dismiss(_ job: ObservedVideoJob) {
-        guard job.cancelledBeforeAdmission || job.detail?.state == .completed || job.detail?.state == .cancelled else { return }
+        guard job.cancelledBeforeAdmission || job.detail?.state == .completed else { return }
         do { try forget(job.operationId, owner: job.owner) }
         catch { message(UserFacingError.describe(error), id: job.operationId, owner: job.owner); return }
         retireReads(job.id)

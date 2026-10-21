@@ -63,7 +63,7 @@ struct NativeDurationJobs: View {
     }
 
     @ViewBuilder private func actions(_ job: ObservedVideoJob) -> some View {
-        if job.cancelledBeforeAdmission || job.detail?.state == .completed || job.detail?.state == .cancelled {
+        if job.cancelledBeforeAdmission || job.detail?.state == .completed {
             Button("Dismiss video") { coordinator.dismiss(job) }.frame(minHeight: 44)
         }
         if let target = backend(job.owner), current(job.owner) {
@@ -90,8 +90,7 @@ struct NativeDurationJobs: View {
         if job.detail?.canResume == true {
             Button("Resume") { Task { await coordinator.resume(job, backend: backend, current: { current(job.owner) }) } }.frame(minHeight: 44)
         }
-        if let restart, canRestart(job), let state=job.detail?.state,
-           state == .failed || state == .interrupted || state == .paused {
+        if let restart, canRestart(job), job.detail?.state.canRequestRestart == true {
             Button("Start again…") { restart(job) }.frame(minHeight:44)
         }
         if job.detail?.canDelete == true {

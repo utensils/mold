@@ -28,7 +28,7 @@ extension VideoJobCoordinator {
             let listing = try await backend.listVideoJobs(limit: 50, cursor: cursor)
             guard fresh() else { return }
             guard !listing.hasMore || listing.nextCursor != cursor else { throw MoldClientError.malformedResponse }
-            for value in listing.jobs where value.state != .completed && value.state != .cancelled {
+            for value in listing.jobs where value.state != .completed {
                 publish(value, owner: owner)
                 if value.state == .queued || value.state == .running {
                     follow(.init(operationId: value.id, owner: owner), owner: owner, backend: backend, current: current)
