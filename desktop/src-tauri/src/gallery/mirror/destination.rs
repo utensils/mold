@@ -267,7 +267,7 @@ fn import_descriptor(
     embedded: Option<serde_json::Value>,
 ) -> Result<Vec<u8>, String> {
     let synthetic = snapshot.metadata_synthetic && embedded.is_none();
-    serde_json::to_vec(&serde_json::json!({"metadata":embedded.unwrap_or(archive),"metadata_synthetic":synthetic,"timestamp":snapshot.timestamp})).map_err(|_| "Could not encode native import recipe.".into())
+    serde_json::to_vec(&serde_json::json!({"metadata":archive,"metadata_synthetic":synthetic,"timestamp":snapshot.timestamp})).map_err(|_| "Could not encode native import recipe.".into())
 }
 async fn legacy_metadata(
     client: &reqwest::Client,
@@ -471,6 +471,16 @@ fn put(client: &reqwest::Client, target: &MediaSaveTarget, path: &str) -> reqwes
         None => request,
     }
 }
+fn output_import_request(
+    client: &reqwest::Client,
+    target: &MediaSaveTarget,
+    path: &str,
+    instance: &str,
+) -> reqwest::RequestBuilder {
+    put(client, target, path)
+        .header(reqwest::header::CONTENT_TYPE, GALLERY_IMPORT_CONTENT_TYPE)
+        .header("x-mold-destination-instance", instance)
+}
 fn body(file: &tempfile::NamedTempFile, prefix: Vec<u8>) -> Result<reqwest::Body, String> {
     let file = tokio::fs::File::from_std(
         file.reopen()
@@ -612,8 +622,8 @@ pub async fn library_copy_output(
         let mut prefix = Vec::with_capacity(12 + descriptor.len());
         prefix.extend_from_slice(&(descriptor.len() as u32).to_be_bytes()); prefix.extend_from_slice(&output.length.to_be_bytes()); prefix.extend_from_slice(&descriptor);
         installation(&client, &destination, &destination_instance).await?;
-        let response = put(&client, &destination, &format!("/api/gallery/import/{}", encoded(&filename)?))
-            .header(reqwest::header::CONTENT_TYPE, GALLERY_IMPORT_CONTENT_TYPE).body(body(&output.file, prefix)?).secure_send().await.map_err(|_| "Native output import was interrupted; retry repairs the copy.")?;
+        let response = output_import_request(&client, &destination, &format!("/api/gallery/import/{}", encoded(&filename)?), &destination_instance)
+            .body(body(&output.file, prefix)?).secure_send().await.map_err(|_| "Native output import was interrupted; retry repairs the copy.")?;
         if !response.status().is_success() { return Err(response_error(response).await); }
         let result: GalleryImportResponse = serde_json::from_slice(&bounded_response(response, MAX_DESCRIPTOR_BYTES).await?).map_err(|_| "Invalid native output import acknowledgement.")?;
         encoded(&result.filename)?;
@@ -795,6 +805,51 @@ mod tests {
         .unwrap();
         assert_eq!(descriptor["timestamp"], 123456);
         assert_eq!(descriptor["metadata_synthetic"], false);
+    }
+    #[test]
+    fn native_import_keeps_full_archive_recipe_after_embedded_compatibility() {
+        let archive: serde_json::Value = serde_json::from_str(r#"{"seed":18446744073709551615,"prompt":"literal\\n\r\nnext","negative_prompt":"literal\\t","job_id":"archive-only","version":"1.0"}"#).unwrap();
+        let mut embedded = archive.clone();
+        embedded.as_object_mut().unwrap().remove("job_id");
+        let snapshot = SourceSnapshot {
+            metadata: archive.clone(),
+            timestamp: 123,
+            metadata_synthetic: false,
+        };
+        assert!(metadata_matches(
+            archive.clone(),
+            embedded.clone(),
+            Some(&embedded)
+        ));
+        let descriptor: serde_json::Value = serde_json::from_slice(
+            &import_descriptor(&snapshot, archive.clone(), Some(embedded)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(descriptor["metadata"], archive);
+    }
+    #[test]
+    fn native_import_request_captures_destination_installation() {
+        let target = MediaSaveTarget {
+            connection_mode: Default::default(),
+            base_url: "https://destination.invalid".into(),
+            api_key: Some("fixture-private".into()),
+        };
+        let request = output_import_request(
+            &reqwest::Client::new(),
+            &target,
+            "/api/gallery/import/print.mp4",
+            "captured-instance",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()["x-mold-destination-instance"],
+            "captured-instance"
+        );
+        assert_eq!(
+            request.headers()[reqwest::header::CONTENT_TYPE],
+            GALLERY_IMPORT_CONTENT_TYPE
+        );
     }
     #[test]
     fn mirror_recipe_compatibility_keeps_exact_u64_and_conflicting_facts() {

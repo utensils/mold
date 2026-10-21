@@ -122,10 +122,14 @@ export async function json(
   target: ApiTarget,
   path: string,
   signal?: AbortSignal,
+  headers?: HeadersInit,
 ): Promise<{ value: Record<string, any>; text: string }> {
   const text = new TextDecoder().decode(
     await bounded(
-      await apiFetchTo(target, path, { signal: signal ?? null }),
+      await apiFetchTo(target, path, {
+        signal: signal ?? null,
+        ...(headers ? { headers } : {}),
+      }),
       MAX_JSON,
       signal,
     ),
@@ -248,6 +252,10 @@ export async function offer(
       machine.target,
       `/api/gallery/source-media/${encodeURIComponent(filename)}/transfer`,
       signal,
+      {
+        "x-mold-source-instance": machine.instanceId,
+        "x-mold-destination-instance": machine.instanceId,
+      },
     );
   } catch (failure) {
     if (

@@ -44,6 +44,7 @@ beforeEach(() => {
     item: {},
     collections: [],
   });
+  vi.mocked(applyMirrorOrganization).mockClear();
   vi.mocked(applyMirrorOrganization).mockResolvedValue(undefined);
 });
 it("preserves exact 64-bit recipe integers in the import descriptor", () => {
@@ -690,4 +691,169 @@ it("persists the verified destination recipe separately from compatible source a
           row.stage === "output" && row.destinationRecipe === receipt.recipe,
       ),
   ).toBe(true);
+});
+
+async function artifactCopyFixture(
+  completeAcknowledgement = true,
+  targetSupported = true,
+) {
+  const { receipt, offer: original } = await existingFixture();
+  const artifacts = {
+    version: 1,
+    bundle_id: "c".repeat(64),
+    provenance: { sha256: "d".repeat(64), size_bytes: "3" },
+  };
+  const portable = {
+    ...original,
+    metadata: { seed: 1, video_job: { artifacts } },
+  };
+  let complete = false;
+  const offsets = { provenance: "0" };
+  api.fetch.mockImplementation(async (target, path, init) => {
+    if (path === "/api/status")
+      return new Response(
+        JSON.stringify({ instance_id: target === source.target ? "s1" : "d1" }),
+      );
+    if (path === "/api/capabilities")
+      return new Response(
+        JSON.stringify({
+          retained_media_transfer: {
+            protocol_version: 1,
+            video_artifacts: target === source.target || targetSupported,
+          },
+        }),
+      );
+    if (path.includes("/video-artifacts/")) {
+      if (target === source.target) return new Response(new Uint8Array(3));
+      if (init?.method === "PUT") offsets.provenance = "3";
+      if (path.endsWith("/complete")) complete = completeAcknowledgement;
+      return new Response(
+        JSON.stringify({
+          handle: "a".repeat(64),
+          archive_identity_sha256: portable.archive_identity_sha256,
+          offsets,
+          complete,
+        }),
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        ...portable,
+        video_artifacts_complete: target === source.target || complete,
+      }),
+    );
+  });
+  return { receipt, artifacts };
+}
+it("repairs missing video artifacts even when an equal output and complete receipt already exist", async () => {
+  await artifactCopyFixture();
+  const result = await copyGalleryPrint({
+    source,
+    destination,
+    filename: "print.png",
+    current: () => true,
+    journal,
+  });
+  expect(
+    api.fetch.mock.calls.some(
+      ([, path, init]) =>
+        path.includes("/video-artifacts/") && init?.method === "PUT",
+    ),
+  ).toBe(true);
+  expect(result.stage).toBe("complete");
+  expect(
+    api.fetch.mock.calls.some(([, path]) => path.includes("/import/")),
+  ).toBe(false);
+});
+it("does not publish a complete receipt before durable video artifact completion", async () => {
+  await artifactCopyFixture(false);
+  await expect(
+    copyGalleryPrint({
+      source,
+      destination,
+      filename: "print.png",
+      current: () => true,
+      journal,
+    }),
+  ).rejects.toThrow("Saving all video data");
+  expect(
+    vi
+      .mocked(journal.write)
+      .mock.calls.some(([, receipt]) => receipt.stage === "complete"),
+  ).toBe(false);
+});
+it("refuses old artifact receivers before any output import or organization mutation", async () => {
+  await artifactCopyFixture(true, false);
+  vi.mocked(journal.read).mockResolvedValue(null);
+  await expect(
+    copyGalleryPrint({
+      source,
+      destination,
+      filename: "print.png",
+      current: () => true,
+      journal,
+    }),
+  ).rejects.toThrow("Update");
+  expect(
+    api.fetch.mock.calls.some(([, path]) => path.includes("/import/")),
+  ).toBe(false);
+  expect(applyMirrorOrganization).not.toHaveBeenCalled();
+});
+it("imports authenticated raw video recipe bytes without rounding u64 or normalizing literal prompts", async () => {
+  await artifactCopyFixture();
+  vi.mocked(journal.read).mockResolvedValue(null);
+  const fallback = api.fetch.getMockImplementation()!;
+  let imported = false;
+  let body: Blob | undefined;
+  const rawRecipe =
+    '{"seed":18446744073709551615,"prompt":"literal\\\\n\\r\\nnext","negative_prompt":"literal\\\\t","video_job":{"artifacts":{"version":1,"bundle_id":"' +
+    "c".repeat(64) +
+    '","provenance":{"sha256":"' +
+    "d".repeat(64) +
+    '","size_bytes":"3"}}}}';
+  api.fetch.mockImplementation(async (target, path, init) => {
+    if (path.includes("/import/")) {
+      expect(new Headers(init.headers).get("x-mold-destination-instance")).toBe(
+        "d1",
+      );
+      imported = true;
+      body = init.body;
+      return new Response('{"filename":"print.png"}');
+    }
+    if (path.includes("/image/"))
+      return new Response(new TextEncoder().encode("abc"));
+    if (
+      target === destination.target &&
+      path.includes("/source-media/") &&
+      !imported
+    )
+      throw new ApiError("missing", 404);
+    const response = await fallback(target, path, init);
+    if (path.includes("/source-media/") && path.endsWith("/transfer")) {
+      const value = await response.json();
+      const text = JSON.stringify(value);
+      return new Response(
+        text.replace(
+          '"metadata":' + rawJsonProperty(text, "metadata"),
+          '"metadata":' + rawRecipe,
+        ),
+      );
+    }
+    return response;
+  });
+  await copyGalleryPrint({
+    source,
+    destination,
+    filename: "print.png",
+    current: () => true,
+    journal,
+  });
+  const bytes = new Uint8Array(await body!.arrayBuffer());
+  const size = new DataView(bytes.buffer).getUint32(0);
+  expect(
+    rawJsonProperty(
+      new TextDecoder().decode(bytes.slice(12, 12 + size)),
+      "metadata",
+    ),
+  ).toBe(rawRecipe);
 });

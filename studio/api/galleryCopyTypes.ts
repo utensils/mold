@@ -26,6 +26,7 @@ export interface CopyOffer {
   metadata: object;
   members: Member[];
   rawMetadata: string;
+  video_artifacts_complete?: boolean;
 }
 export interface CopyReceipt {
   version: 1;
