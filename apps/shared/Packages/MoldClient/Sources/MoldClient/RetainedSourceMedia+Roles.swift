@@ -47,15 +47,23 @@ public extension RetainedSourceMedia {
     }
 
     static func referenceMembers(_ members: [Member]) -> [Member] {
-        let selected = members.filter { field(forRole: $0.role) == .references }
-        let staged = members.filter { $0.role.hasPrefix("stage_reference:") }
+        orderedStageMembers(members, field: .references, prefix: "stage_reference")
+    }
+
+    static func keyframeMembers(_ members: [Member]) -> [Member] {
+        orderedStageMembers(members, field: .keyframes, prefix: "stage_keyframe")
+    }
+
+    private static func orderedStageMembers(_ members: [Member], field: Field, prefix: String) -> [Member] {
+        let selected = members.filter { Self.field(forRole: $0.role) == field }
+        let staged = members.filter { $0.role.hasPrefix(prefix + ":") }
         guard !staged.isEmpty else { return selected }
         guard staged.count == selected.count,
-              selected.allSatisfy({ $0.role.hasPrefix("stage_reference:0:") }),
+              selected.allSatisfy({ $0.role.hasPrefix(prefix + ":0:") }),
               Set(selected.map(\.memberId)).count == selected.count else { return [] }
         let ordered = selected.sorted { (Int($0.role.split(separator: ":").last ?? "") ?? -1)
             < (Int($1.role.split(separator: ":").last ?? "") ?? -1) }
-        guard ordered.enumerated().allSatisfy({ $0.element.role == "stage_reference:0:\($0.offset)" }) else { return [] }
+        guard ordered.enumerated().allSatisfy({ $0.element.role == prefix + ":0:\($0.offset)" }) else { return [] }
         return ordered
     }
 
