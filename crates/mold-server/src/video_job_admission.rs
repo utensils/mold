@@ -251,12 +251,12 @@ fn repeated_prompt_warnings(
         .map(move |(index, clips)| {
             if scenes {
                 format!(
-                    "Scene {} is longer than one generation ({limit} s), so its prompt is reused for {clips} clips and its action will repeat. Split it into scenes of {limit} s or less.",
+                    "Scene {} is longer than {limit} s, so its prompt is reused for {clips} clips and its action will repeat. Split it into scenes of up to {limit} s.",
                     index + 1
                 )
             } else {
                 format!(
-                    "One generation is {limit} s, so this prompt is reused for {clips} clips and its action will repeat. Define scenes of {limit} s or less, each describing only its own part."
+                    "This prompt is reused for all {clips} clips, so its action will repeat. Define scenes of up to {limit} s, each describing only its own part."
                 )
             }
         });
@@ -934,7 +934,7 @@ mod tests {
         let (plan, _, _) = plan_template(&h3_request(40_000, None), "minimax-h3", None, 0).unwrap();
         assert_eq!(plan.warnings.len(), 1);
         assert!(
-            plan.warnings[0].contains("reused for 3 clips"),
+            plan.warnings[0].contains("reused for all 3 clips"),
             "{:?}",
             plan.warnings
         );

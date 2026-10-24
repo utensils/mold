@@ -398,17 +398,12 @@ async fn admit_with_receipt(
         let mut start = 0u64;
         for (index, scene) in scenes.iter().enumerate() {
             let end = start + scene.duration_ms;
-            let first_line = scene
-                .prompt
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("");
-            let preview: String = first_line.chars().take(60).collect();
             status!(
-                "Scene {}: {:.1}-{:.1} s  {preview}",
+                "Scene {}: {:.1}-{:.1} s ({} words)",
                 index + 1,
                 start as f64 / 1000.0,
-                end as f64 / 1000.0
+                end as f64 / 1000.0,
+                scene.prompt.split_whitespace().count()
             );
             start = end;
         }

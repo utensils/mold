@@ -123,9 +123,7 @@ async fn scenes_file_sets_the_length_and_sends_each_scene_prompt() {
         .args(["--dry-run", "--host", &server.uri()])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            "Scene 2: 12.0-26.0 s  The gardener turns around",
-        ));
+        .stderr(predicate::str::contains("Scene 2: 12.0-26.0 s (4 words)"));
     let requests = server.received_requests().await.unwrap();
     let validation = requests
         .iter()
