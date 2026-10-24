@@ -5,6 +5,7 @@ import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
 import { createParentVideoRestart } from "../composables/useParentVideoRestart";
 import type { VideoJobOwner } from "../api/videoJobs";
 import { VIDEO_LIBRARY_NAVIGATION } from "../lib/videoLibraryNavigation";
+import { videoJobRowFromJob } from "../lib/videoJobRow";
 const props = defineProps<{ owner: VideoJobOwner; jobId: string }>();
 const fleet = useHeldQueueTransfer();
 const openLibrary = inject(VIDEO_LIBRARY_NAVIGATION, null);
@@ -73,8 +74,8 @@ onBeforeUnmount(() => {
     </p>
     <template v-if="destination && (admission || detail)">
       <p v-if="detail" role="status">
-        {{ detail.state }} · {{ detail.completed_clips }} of
-        {{ detail.plan.clip_count }} clips
+        {{ videoJobRowFromJob(detail).caption }} ·
+        {{ videoJobRowFromJob(detail).detail }}
       </p>
       <button type="button" :disabled="run.busy.value" @click="run.refresh">
         Check queue

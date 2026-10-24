@@ -125,40 +125,31 @@ struct StepperChip: View {
     }
 }
 
-/// A clip's length in seconds, snapped to the recipe's frame grid; the mono
-/// figure says frames and rate.
-struct LengthChip: View {
+/// The clip's Length: the shared slider, writing the Duration request on a
+/// machine that takes video parents and the ordinary frame count elsewhere.
+struct ComposerLength: View {
     @Environment(GenerateController.self) private var generate
     let temporal: TemporalProfile
 
     var body: some View {
         @Bindable var generate = generate
-        let selection = temporal.lengthSelection(fps: generate.draft.fps, frames: generate.draft.frames,
-            family: generate.model?.family, model: generate.modelName, sourceImage: generate.recipe?.capabilities.sourceImage)
-        let fps = selection.fps
-        let frames = selection.frames
-        let seconds = Double(frames) / Double(fps)
-        Menu {
-            if generate.draft.supportsDurationPrediction {
-                Toggle("Automatic from prompt", isOn: $generate.draft.prefersAutomaticDuration)
-                Divider()
-            }
-            ForEach(selection.options, id: \.frames) { option in
-                Button { generate.draft.prefersAutomaticDuration = false; generate.draft.frames = option.frames } label: {
-                    let text = String(localized: "\(durationText(option.seconds)) s")
-                    if !generate.draft.usesAutomaticDuration && option.frames == frames { Label(text, systemImage: "checkmark") } else { Text(text) }
-                }
-            }
-        } label: {
-            chipLabel(generate.draft.usesAutomaticDuration ? "Auto length" : String(localized: "\(durationText(seconds)) s"),
-                      detail: generate.draft.usesAutomaticDuration ? "From prompt" : "\(frames) f · \(Int(fps)) fps")
+        if generate.offersVideoDuration, let authoring = generate.videoDuration {
+            NativeLengthControl(
+                grid: VideoLengthGrid.duration(temporal: temporal, fps: generate.draft.fps, limits: generate.sequenceLimits,
+                                               plan: generate.videoPlanner.plan),
+                temporal: temporal, draft: $generate.draft,
+                duration: Binding(get: { generate.videoDuration?.draft ?? authoring.draft },
+                                  set: { generate.videoDuration?.draft = $0 }),
+                prompt: generate.draft.prompt,
+                authoritative: generate.sequenceLimits != nil || generate.videoPlanner.plan != nil)
+            .disabled(generate.durationTask != nil)
+        } else {
+            let rate = temporal.fps.resolvedRate(generate.draft.fps)
+            let bounds = temporal.lengthBounds(fps: rate, family: generate.model?.family, model: generate.modelName,
+                                               sourceImage: generate.recipe?.capabilities.sourceImage)
+            NativeLengthControl(
+                grid: VideoLengthGrid.resolve(temporal: temporal, fps: generate.draft.fps, limits: nil, ceiling: bounds.max),
+                temporal: temporal, draft: $generate.draft, prompt: generate.draft.prompt)
         }
-        .buttonStyle(.bordered)
-        .accessibilityLabel(generate.draft.usesAutomaticDuration ? "Length, automatic from prompt" : String(localized: "Length, \(durationText(seconds)) seconds"))
-    }
-
-
-    private func durationText(_ seconds: Double) -> String {
-        seconds.formatted(.number.precision(.fractionLength(0...(seconds < 0.1 ? 3 : 1))))
     }
 }

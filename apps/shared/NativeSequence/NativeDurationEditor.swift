@@ -2,12 +2,15 @@ import MoldClient
 import MoldStyle
 import SwiftUI
 
-/// One duration beside the ordinary prompt; optional scenes share its recipe.
+/// What a Duration video says beside the ordinary prompt -- the Extend source,
+/// the scenes of a Longer video, and the machine's plan. The length itself is
+/// `NativeLengthControl`; optional scenes share its recipe.
 struct NativeDurationEditor: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Binding var draft: VideoDurationDraft
     @Bindable var planner: VideoPlanController
     let prompt: String
+    var grid: VideoLengthGrid? = nil
     var reuseNotice: String? = nil
     var sourceTitle: String? = nil
     var sourceMachine: String? = nil
@@ -67,30 +70,17 @@ struct NativeDurationEditor: View {
                 Button("Start new video", action: startFresh).frame(minHeight: 44)
                     .accessibilityIdentifier("duration-start-fresh")
             }
-            if scenesActive {
-                Text("\(draft.source == nil ? "Duration" : "Add duration"): \(draft.seconds) seconds").font(.headline)
+            if scenesActive, let grid {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach($draft.scenes) { $scene in
-                        NativeDurationScene(scene: $scene,
-                            number: (draft.scenes.firstIndex { $0.id == scene.id } ?? 0) + 1,
-                            remove: { draft.scenes.removeAll { $0.id == scene.id } }, canRemove: draft.scenes.count > 1)
+                    ForEach(Array(draft.scenes.enumerated()), id: \.element.id) { offset, scene in
+                        NativeDurationScene(draft: $draft, id: scene.id, grid: grid, number: offset + 1)
                     }
                 }
-                let actions = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(spacing: 12))
-                actions {
-                    Button("Add scene", systemImage: "plus") { draft.scenes.append(.init(prompt: "", seconds: "5")) }
-                    if !typeSize.isAccessibilitySize { Spacer(minLength: 8) }
-                    Button("Use one prompt") { draft.scenesEnabled = false }
-                }.frame(minHeight: 44)
-                Text("References apply to every scene. Opening and closing frames bound the whole video.")
+                Button("Add scene", systemImage: "plus") { draft.addScene(on: grid) }
+                    .frame(minHeight: 44).accessibilityIdentifier("duration-add-scene")
+                Text("Each scene is one generation of up to \(VideoLengthGrid.seconds(tenths: grid.sceneMaxTenths)) seconds and starts where the previous one ends. References apply to every scene; opening and closing frames bound the whole video.")
                     .font(.caption).foregroundStyle(.secondaryText)
-            } else {
-                NativeDurationField(title: draft.source == nil ? "Duration" : "Add duration", seconds: $draft.seconds)
-                Button("Define scenes") {
-                    if draft.scenes.isEmpty { draft.scenes = [.init(prompt: prompt, seconds: draft.seconds)] }
-                    draft.scenesEnabled = true
-                    draft.updateDurationFromScenes()
-                }.frame(minHeight: 44).accessibilityIdentifier("duration-define-scenes")
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let seconds = singleGenerationSeconds {
                 Text("Single generation: up to \(seconds, format: .number.precision(.fractionLength(0 ... 2))) seconds")
@@ -100,16 +90,20 @@ struct NativeDurationEditor: View {
             if planner.isCalculating {
                 Text("Calculating length…").font(.caption).foregroundStyle(.secondaryText)
             } else if let plan = planner.plan {
-                Text(plan.clipCount == 1 ? "1 clip · one video" : "\(plan.clipCount) clips joined into one video")
+                Text(plan.clipCount == 1 ? "1 clip · one video" : "\(Plural.count(Int(clamping: plan.clipCount), of: "clip")) joined into one video")
                     .font(.callout).accessibilityIdentifier("duration-plan-clips")
                 if plan.joinMode == .blendedShots, plan.clipCount > 1 {
                     Text("Shots blend together; motion does not carry between them.")
                         .font(.caption).foregroundStyle(.secondaryText)
                 }
-                Text("\(draft.source == nil ? "Video" : "New total"): \(VideoDurationDraft.seconds(milliseconds: plan.totalDurationMs)) seconds")
+                // The plan's total is on the frame clock (14.3 s at 24 fps is 344
+                // frames, 14.334 s); it reads to the same tenth as the slider.
+                Text("\(draft.source == nil ? "Video" : "New total"): \(VideoLengthGrid.label(milliseconds: plan.totalDurationMs))")
                     .font(.caption).foregroundStyle(.secondaryText)
                 ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
-                    Text(warning).font(.caption).foregroundStyle(.secondaryText)
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("duration-plan-warning")
                 }
             }
             if let error = planner.error {
@@ -118,6 +112,5 @@ struct NativeDurationEditor: View {
             }
         }
         .disabled(busy)
-        .onChange(of: draft.scenes) { _, _ in draft.updateDurationFromScenes() }
     }
 }

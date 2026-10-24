@@ -7,6 +7,7 @@ import { cancellationRequestedLabel, jobStallLabel } from "@studio/lib/jobStall"
  */
 import { activeWorkPhaseLabel } from "@studio/api/activity";
 import { queueWaitLabel, resolveQueueWait, type QueueStatus } from "@studio/lib/queuePosition";
+import { videoJobActivityRow, type VideoJobRowSymbol } from "@studio/lib/videoJobRow";
 import { formatEta } from "./format";
 import { isCancelledError, type Job } from "./generationJob";
 import { modelDisplayNameForId, type DisplayableModel } from "@studio/lib/modelDisplay";
@@ -136,6 +137,9 @@ export function rowProgressFraction(row: QueueRow): number | null {
         ? clampFraction(row.print.step / row.print.total)
         : null;
     case "shared": {
+      // A video parent's meter is the shared row contract's: completed clips
+      // of a multi-clip movie, nothing for one clip or a held parent.
+      if (row.shared.kind === "video_job") return videoJobActivityRow(row.shared).progress;
       const { current, total } = row.shared;
       return current != null && total != null && total > 0 ? clampFraction(current / total) : null;
     }
@@ -191,8 +195,38 @@ export function rowGlyph(row: QueueRow): string {
     if (job.status === "loading" && job.stage?.toLowerCase().includes("download")) return "↓";
     return "⠂";
   }
+  if (row.shared.kind === "video_job") return VIDEO_GLYPH[videoSymbol(row)];
   return row.shared.kind === "download" ? "↓" : "⠂";
 }
+
+function videoSymbol(row: QueueRow & { kind: "shared" }): VideoJobRowSymbol {
+  return videoJobActivityRow(row.shared).symbol;
+}
+
+/** A video parent wears the glyph a print in the same situation wears. */
+const VIDEO_GLYPH: Record<VideoJobRowSymbol, string> = {
+  waiting: "·",
+  rendering: "⠂",
+  joining: "⠂",
+  stopping: "⠂",
+  paused: "·",
+  interrupted: "!",
+  failed: "!",
+  stopped: "!",
+  done: "✓",
+};
+
+const VIDEO_TONE: Record<VideoJobRowSymbol, string> = {
+  waiting: "text-state-waiting",
+  rendering: "text-state-active",
+  joining: "text-state-active",
+  stopping: "text-state-active",
+  paused: "text-state-waiting",
+  interrupted: "text-state-failed",
+  failed: "text-state-failed",
+  stopped: "text-state-failed",
+  done: "text-state-done",
+};
 
 /** The state colour class for the row's status line and glyph. */
 export function rowTone(row: QueueRow): string {
@@ -205,6 +239,7 @@ export function rowTone(row: QueueRow): string {
     if (job.status === "queued") return "text-state-waiting";
     return "text-state-active";
   }
+  if (row.shared.kind === "video_job") return VIDEO_TONE[videoSymbol(row)];
   return row.shared.kind === "download" ? "text-state-blocked" : "text-state-active";
 }
 

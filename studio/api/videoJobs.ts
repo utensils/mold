@@ -229,6 +229,15 @@ function videoJobNotFound(cause: unknown): boolean {
     (cause.body as { code?: unknown } | null)?.code === "VIDEO_JOB_NOT_FOUND"
   );
 }
+/** `progress_phase` is additive: absent on an older server, and a value this
+ * build does not know still reads as rendering. Only a non-string is dropped,
+ * so a malformed phase never refuses an otherwise valid job. */
+export function withCheckedProgressPhase(job: VideoJob): VideoJob {
+  if (job.progress_phase == null || typeof job.progress_phase === "string")
+    return job;
+  const { progress_phase: _dropped, ...rest } = job;
+  return rest;
+}
 export async function getVideoJob(
   owner: VideoJobOwner,
   id: string,
@@ -243,7 +252,7 @@ export async function getVideoJob(
       throw new Error(
         "This machine returned a different video job. Keep the original operation for recovery.",
       );
-    return job;
+    return withCheckedProgressPhase(job);
   } catch (cause) {
     if (videoJobNotFound(cause)) return null;
     throw cause;

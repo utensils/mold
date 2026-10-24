@@ -6,7 +6,11 @@ import type {
   VideoDurationAuthoring,
   VideoDurationScene,
 } from "../lib/videoDurationAuthoring";
-import { formatRequestedVideoDuration } from "../lib/videoRequestedDuration";
+import {
+  formatRequestedVideoDuration,
+  oneClipSceneSeconds,
+  singleGenerationSeconds,
+} from "../lib/videoRequestedDuration";
 const props = defineProps<{
   modelValue: VideoDurationAuthoring;
   prompt: string;
@@ -221,12 +225,18 @@ function onePrompt() {
       Define scenes
     </button>
     <template v-if="plan">
-      <p v-if="scenesActive">
-        Single generation: up to
-        {{ (plan.single_clip_max_frames / plan.fps).toFixed(2) }} seconds ·
-        {{ plan.clip_count }}
-        {{ plan.clip_count === "1" ? "clip" : "clips joined into one video" }}
-      </p>
+      <template v-if="scenesActive">
+        <p v-if="singleGenerationSeconds(plan)">
+          Single generation: up to {{ singleGenerationSeconds(plan) }} seconds
+        </p>
+        <p v-if="oneClipSceneSeconds(plan)" data-test="video-scene-limit">
+          Scenes up to {{ oneClipSceneSeconds(plan) }} s each stay one clip
+        </p>
+        <p>
+          {{ plan.clip_count }}
+          {{ plan.clip_count === "1" ? "clip" : "clips joined into one video" }}
+        </p>
+      </template>
       <p v-if="plan.join_mode === 'blended_shots' && plan.clip_count !== '1'">
         Shots blend together; motion does not carry between them.
       </p>
@@ -234,7 +244,13 @@ function onePrompt() {
         {{ sourceTitle ? "New total" : "Video" }}:
         {{ formatRequestedVideoDuration(plan.total_duration_ms) }} seconds
       </p>
-      <p v-for="(warning, index) in plan.warnings" :key="index">
+      <p
+        v-for="(warning, index) in plan.warnings"
+        :key="index"
+        class="duration-editor__warning"
+        data-test="video-plan-warning"
+        role="note"
+      >
         {{ warning }}
       </p>
     </template>
@@ -290,6 +306,13 @@ function onePrompt() {
 .duration-editor p {
   margin: 0;
   color: var(--mold-text-dim);
+}
+/* A plan warning ("…its action will repeat…") is advice the person must
+ * read before rendering: full text, wrapped, never clamped or dimmed. */
+.duration-editor .duration-editor__warning {
+  color: var(--mold-warning, var(--mold-text));
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .duration-editor .duration-editor__error {
   color: var(--mold-error);

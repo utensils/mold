@@ -137,60 +137,6 @@ private extension Array {
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
-struct NativeSequenceJobs: View {
-    @Bindable var session: NativeSequenceSession
-    let backend: (NativeSequenceSession.Job) -> (any MoldChainBackend)?
-    var open: ((MoldHost, String) -> Void)?
-    var restart: ((NativeSequenceSession.Job) -> Void)?
-    var discard: ((NativeSequenceSession.Job) -> Void)?
-    var canRestart: (NativeSequenceSession.Job) -> Bool = { _ in false }
-    var body: some View {
-        if let notice = session.historyNotice { Text(notice).fixedSize(horizontal: false, vertical: true) }
-        ForEach(session.jobs) { job in
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Video · \(job.host.name)", systemImage: "film.stack")
-                    .font(.headline)
-                if let script = job.detail?.script, let prompt = script.stage.first?.prompt {
-                    Text(prompt).font(.subheadline).lineLimit(2)
-                    Text(script.chain.model).font(.caption).foregroundStyle(sequenceSecondary)
-                }
-                Text(job.message).fixedSize(horizontal: false, vertical: true)
-                if let detail = job.detail {
-                    if let filename = detail.galleryFilename {
-                        if let open {
-                            Button("Show video in Library") { open(job.host, filename) }
-                        } else { Text(filename).font(.caption).textSelection(.enabled) }
-                    }
-                    if detail.state == .completed || detail.state == .cancelled {
-                        Button("Dismiss completed video") { session.dismiss(job) }.frame(minHeight: 44)
-                    }
-                    if let backend = backend(job) {
-                        if ChainJobRecoveryPolicy.canResume(state:detail.state,ephemeral:detail.ephemeral == true) {
-                            Button("Resume") { session.resume(job,backend:backend) }.frame(minHeight:44)
-                        }
-                        if ChainJobRecoveryPolicy.canCancel(state:detail.state) {
-                            Button("Stop",role:.destructive) { session.cancel(job,backend:backend) }
-                                .disabled(job.cancelling).frame(minHeight:44)
-                        }
-                        if canRestart(job) {
-                            if let restart, detail.state == .failed || detail.state == .interrupted || detail.state == .paused {
-                                Button("Start again…") {restart(job)}.frame(minHeight:44)
-                            }
-                            if let discard, detail.state == .failed || detail.state == .interrupted {
-                                Button("Delete job…",role:.destructive) {discard(job)}.frame(minHeight:44)
-                            }
-                        }
-                    }
-                } else if let backend = backend(job) {
-                    Button("Stop", role: .destructive) { session.cancel(job, backend: backend) }
-                        .disabled(job.cancelling).frame(minHeight: 44)
-                }
-            }
-            .padding(.vertical, 8)
-        }
-    }
-}
-
 private var sequenceSecondary: Color {
 #if os(iOS)
     .secondaryText

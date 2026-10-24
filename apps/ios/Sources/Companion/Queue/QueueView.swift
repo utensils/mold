@@ -10,6 +10,8 @@ struct QueueView: View {
     @Environment(AppRouter.self) private var router
     @Environment(GenerateController.self) private var generate
     @State private var emptying: [MoldHost.ID]?
+    /// The video rows' recovery sheet, Delete confirmation and details.
+    @State private var videoPresenter = NativeVideoQueuePresenter()
 
     var body: some View {
         Group {
@@ -40,11 +42,39 @@ struct QueueView: View {
         } message: {
             Text("Anything already rendering keeps going. Waiting and held jobs are cancelled.")
         }
-        .refreshable { await queue.reload(); await generate.discoverDurationVideos() }
+        .refreshable { await queue.reload(); await generate.discoverDurationVideos(); await videoQueue.recheck(force: true) }
         // A job just held asks for a decision: a warning, as on Generate.
         .sensoryFeedback(.warning, trigger: queue.heldCount) { old, new in new > old }
         .task(id: hosts.queueDiscoveryKey) { await queue.reload(); await generate.discoverSequences(); await generate.discoverDurationVideos() }
         .task { await queue.followRunning() }
+        // The per-video owner re-check that used to need a Check queue tap.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                await videoQueue.recheck()
+            }
+        }
+        .sheet(item: Binding(get: { videoPresenter.inspecting.map(VideoDetailID.init) },
+                             set: { videoPresenter.inspecting = $0?.id })) { target in
+            VideoQueueDetailSheet(queue: videoQueue, id: target.id)
+        }
+    }
+
+    private struct VideoDetailID: Identifiable { let id: String }
+
+    /// The video parents and authored sequences, drawn as ordinary rows.
+    private var videoQueue: NativeVideoQueue {
+        NativeVideoQueue(sequence: generate.sequence, videos: generate.videoJobs, restarts: generate.videoRestarts,
+            targets: hosts.hosts.compactMap { host in
+                guard let instance = hosts.instanceID(of: host.id) else { return nil }
+                return VideoRestartTarget(host: host, instanceId: instance)
+            }, backend: { target in
+                guard recoveryCurrent(target) else { return nil }
+                return hosts.backend(for: target.host)
+            }, current: recoveryCurrent, capabilities: { hosts.capabilities[$0] },
+            open: { host, filename in router.open(.print(host: host.id, filename: filename)) }, changed: {
+                Task { await generate.discoverSequences(); await generate.discoverDurationVideos() }
+            }, presenter: videoPresenter)
     }
 
     private func recoveryCurrent(_ target:VideoRestartTarget)->Bool {
@@ -60,17 +90,7 @@ struct QueueView: View {
 
     private var list: some View {
         List {
-            NativeVideoQueue(sequence:generate.sequence,videos:generate.videoJobs,restarts:generate.videoRestarts,
-                targets:hosts.hosts.compactMap {host in
-                    guard let instance=hosts.instanceID(of:host.id) else {return nil}
-                    return VideoRestartTarget(host:host,instanceId:instance)
-                },backend:{target in
-                    guard recoveryCurrent(target) else {return nil}
-                    return hosts.backend(for:target.host)
-                },current:recoveryCurrent,capabilities:{hosts.capabilities[$0]},
-                open:{host,filename in router.open(.print(host:host.id,filename:filename))},changed:{
-                    Task {await generate.discoverSequences();await generate.discoverDurationVideos()}
-                })
+            NativeVideoQueueNotices(queue: videoQueue, presenter: videoPresenter)
             FailureBanner()
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
@@ -86,8 +106,12 @@ struct QueueView: View {
             }
             ForEach(hosts.hosts) { host in
                 let groups = queue.groups(for: host.id)
-                if !groups.isEmpty {
+                let videos = videoQueue.items(on: host.id)
+                if !groups.isEmpty || !videos.isEmpty {
                     Section {
+                        ForEach(videos) { item in
+                            VideoQueueEntryRow(item: item, queue: videoQueue).moveDisabled(true)
+                        }
                         ForEach(groups) { group in
                             QueueGroupRows(group: group, host: host)
                                 .moveDisabled(!group.rows.allSatisfy { queue.canMove($0, on: host.id) })

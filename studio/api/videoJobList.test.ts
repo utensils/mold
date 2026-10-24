@@ -1,7 +1,10 @@
 import { beforeEach, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({ read: vi.fn(), owner: vi.fn() }));
 vi.mock("./client", () => ({ apiJsonTo: api.read }));
-vi.mock("./videoJobs", () => ({ assertVideoJobOwner: api.owner }));
+vi.mock("./videoJobs", async (original) => ({
+  ...(await original<typeof import("./videoJobs")>()),
+  assertVideoJobOwner: api.owner,
+}));
 import { listVideoJobs } from "./videoJobList";
 const owner = {
   hostId: "plato",
@@ -35,4 +38,35 @@ it("refuses an owner change or malformed paging response before publishing rows"
   await expect(listVideoJobs(owner, undefined, () => false)).rejects.toThrow(
     "changed",
   );
+});
+it("keeps a known progress phase and drops a malformed one", async () => {
+  const plan = {
+    validation_revision: "r",
+    model: "m",
+    width: 8,
+    height: 8,
+    fps: 24,
+    single_clip_max_frames: 345,
+    overlap_frames: 1,
+    join_mode: "continuous",
+    clip_count: "3",
+    part_count: "1",
+    added_frames: "1",
+    source_frames: "0",
+    total_frames: "1",
+    added_duration_ms: "1",
+    total_duration_ms: "1",
+    warnings: [],
+  };
+  api.read.mockResolvedValue({
+    jobs: [
+      { id: "a", state: "running", progress_phase: "waiting", plan },
+      { id: "b", state: "running", progress_phase: { odd: true }, plan },
+    ],
+    has_more: false,
+    next_cursor: null,
+  });
+  const page = await listVideoJobs(owner);
+  expect(page.jobs[0]!.progress_phase).toBe("waiting");
+  expect(page.jobs[1]!.progress_phase).toBeUndefined();
 });

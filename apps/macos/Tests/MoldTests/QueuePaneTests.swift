@@ -35,6 +35,15 @@ struct QueuePaneTests {
         #expect(QueueSummary.sentence([FakeFixtures.queueEntry("c", state: "complete")]) == "Idle")
     }
 
+    /// Video parents' clips never arrive as ordinary rows, so the header
+    /// said Idle while two GPUs rendered them.
+    @Test func theSubtitleCountsLiveVideoParents() {
+        #expect(QueueSummary.sentence([], videos: [.rendering, .joining]) == "2 rendering")
+        #expect(QueueSummary.sentence([FakeFixtures.queueEntry("a", state: "queued")], videos: [.waiting, .stopping])
+                == "2 waiting · 1 rendering")
+        #expect(QueueSummary.sentence([], videos: []) == "Idle")
+    }
+
     // MARK: - Grouping
 
     /// **Fails today** only in spirit -- `QueueGroup.build` already does

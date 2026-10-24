@@ -23,9 +23,5 @@ struct OptionsControls: View {
         }
         .accessibilityIdentifier("options-batch")
         } else { Text("1 joined video") }
-        if generate.sequence.draft == nil, !generate.usesVideoDuration, let temporal = recipe.temporal {
-            LengthChip(temporal: temporal)
-                .accessibilityIdentifier("options-length")
-        }
     }
 }

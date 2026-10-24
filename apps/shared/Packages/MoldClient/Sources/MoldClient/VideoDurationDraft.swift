@@ -43,10 +43,12 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
         let scenes = scenesEnabled ? scenes : []
         guard scenes.count <= 4_096 else { throw SequenceDraftError.invalid("Use at most 4,096 scenes in one video.") }
         var inputs: [VideoJobScene] = [], sum: UInt64 = 0
-        for scene in scenes {
-            guard !scene.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  scene.prompt.utf8.count <= 77_000 else {
-                throw SequenceDraftError.invalid("Every scene needs a prompt of at most 77,000 bytes.")
+        for (index, scene) in scenes.enumerated() {
+            guard !scene.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SequenceDraftError.invalid("Describe scene \(index + 1).")
+            }
+            guard scene.prompt.utf8.count <= 77_000 else {
+                throw SequenceDraftError.invalid("Scene \(index + 1)'s prompt is too long. Shorten it.")
             }
             let value = try Self.milliseconds(scene.seconds)
             let (next, overflow) = sum.addingReportingOverflow(value)

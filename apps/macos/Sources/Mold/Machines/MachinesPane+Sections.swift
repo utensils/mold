@@ -9,7 +9,7 @@ extension MachinesPane {
     /// here so a machine's page and its card count work by one rule.
     var fleet: MachineFleet {
         MachineFleet(hosts: hosts, machines: machines, queue: queue, models: models,
-                     activity: activity, upscales: upscales)
+                     activity: activity, upscales: upscales, generate: generate)
     }
 
 
@@ -139,7 +139,7 @@ extension MachinesPane {
     private func workCount(_ host: MoldHost) -> String {
         MachineFigures.workFigure(live: queue.hasLoaded(on: host.id)
             ? queue.entries(on: host.id).filter(\.state.isLive) : nil,
-            alsoRunning: fleet.alsoRunning(on: host))
+            videos: fleet.videos(on: host.id), alsoRunning: fleet.alsoRunning(on: host))
     }
 
     private func modelCount(_ host: MoldHost) -> String {

@@ -320,3 +320,24 @@ it("treats exact already-removed recovery data as deleted without a second mutat
   ).resolves.toBeUndefined();
   expect(fetch).not.toHaveBeenCalled();
 });
+
+it("accepts the additive progress phase and tolerates values it does not know", async () => {
+  json.mockResolvedValueOnce({ id: "known", progress_phase: "joining" });
+  expect((await getVideoJob(owner, "known"))?.progress_phase).toBe("joining");
+  json.mockResolvedValueOnce({ id: "known", progress_phase: "uploading" });
+  expect((await getVideoJob(owner, "known"))?.progress_phase).toBe("uploading");
+  json.mockResolvedValueOnce({ id: "known", progress_phase: 7 });
+  const malformed = await getVideoJob(owner, "known");
+  expect(malformed).not.toBeNull();
+  expect(malformed?.progress_phase).toBeUndefined();
+  json.mockResolvedValueOnce({ id: "known" });
+  expect((await getVideoJob(owner, "known"))?.progress_phase).toBeUndefined();
+});
+
+it("accepts the one-generation H3 plan ceiling", async () => {
+  const { checkedVideoJobPlan } = await import("./videoJobs");
+  expect(
+    checkedVideoJobPlan({ ...plan, single_clip_max_frames: 345 })
+      .single_clip_max_frames,
+  ).toBe(345);
+});

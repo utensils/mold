@@ -126,6 +126,86 @@ describe("ActivityStrip", () => {
     expect(wrapper.emitted("shared-open")?.[0]).toEqual([shared]);
   });
 
+  it("draws a video parent as an ordinary row and opens its own details", async () => {
+    const video = {
+      key: "render:video_job:v1",
+      id: "v1",
+      kind: "video_job",
+      execution: "video_job",
+      phase: "running",
+      model: "minimax-h3",
+      hostId: "render",
+      hostLabel: "Render box",
+      routeUrl: "http://render:7680",
+      instanceId: "render-instance",
+      stale: false,
+      hostError: null,
+      created_at_unix_ms: 1,
+      updated_at_unix_ms: 2,
+      current: 1,
+      total: 3,
+      can_cancel: true,
+    };
+    const wrapper = mount(ActivityStrip, {
+      props: { jobs: [], shared: [video], expanded: true },
+      global: { stubs: { VideoJobControl: true } },
+    });
+    const text = wrapper.get("[data-test='shared-live-activity']").text();
+    expect(text.replace(/\s+/g, " ")).toContain(
+      "Render box · Rendering clip 2 of 3 · 33%",
+    );
+    expect(text).not.toContain("running");
+    // No bespoke "Video details" card button: the row's own Details action.
+    expect(wrapper.text()).not.toContain("Video details");
+    expect(wrapper.findComponent({ name: "VideoJobControl" }).exists()).toBe(
+      false,
+    );
+    await wrapper
+      .get(`[data-test='activity-details-${video.key}']`)
+      .trigger("click");
+    const control = wrapper.findComponent({ name: "VideoJobControl" });
+    expect(control.props()).toMatchObject({
+      hostId: "render",
+      jobId: "v1",
+      instanceId: "render-instance",
+      autoOpen: true,
+      hideTrigger: true,
+    });
+    await wrapper.get("[data-test^='live-activity-select-']").trigger("click");
+    expect(wrapper.emitted("shared-open")).toBeUndefined();
+  });
+
+  it("measures a one-clip video by nothing rather than a 0% meter", () => {
+    const wrapper = mount(ActivityStrip, {
+      props: {
+        jobs: [],
+        shared: [
+          {
+            key: "render:video_job:v2",
+            id: "v2",
+            kind: "video_job",
+            phase: "running",
+            hostId: "render",
+            hostLabel: "Render box",
+            routeUrl: "http://render:7680",
+            instanceId: "i",
+            stale: false,
+            hostError: null,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            current: 0,
+            total: 1,
+            can_cancel: true,
+          },
+        ],
+      },
+      global: { stubs: { VideoJobControl: true } },
+    });
+    const text = wrapper.get("[data-test='shared-live-activity']").text();
+    expect(text).toContain("Render box · Rendering");
+    expect(text).not.toContain("%");
+  });
+
   it("does not label an authority-detached print as failed", () => {
     const wrapper = mount(ActivityStrip, {
       props: {

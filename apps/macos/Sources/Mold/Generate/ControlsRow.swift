@@ -20,12 +20,14 @@ struct ControlsRow: View {
     /// The HOST's own chain limits for this model, or `nil` on a host too old
     /// to publish them -- absence is where this app's ported constants belong.
     let chainLimits: ChainLimits?
+    /// The selected machine: whether Length writes a Duration video there.
+    var host: MoldHost? = nil
     @Binding var draft: RenderDraft
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             controls
-            if controller.videoDuration == nil, controller.sequence.draft == nil, let note = routing?.note {
+            if !durationLength, controller.sequence.draft == nil, let note = routing?.note {
                 Text(note).font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -41,10 +43,9 @@ struct ControlsRow: View {
         WrappingHStack(horizontalSpacing: 18, verticalSpacing: 10) {
             ControlLabel("Machine") { MachineControl() }
             shapeControl
-            if controller.videoDuration == nil, controller.sequence.draft == nil, let temporal = recipe.temporal, let routing {
-                ControlLabel("Length") {
-                    LengthControl(temporal: temporal, bounds: routing.bounds, draft: $draft)
-                }
+            if controller.sequence.draft == nil, let temporal = recipe.temporal, let routing {
+                length(temporal: temporal, routing: routing)
+                    .frame(width: 260, alignment: .leading)
             }
             if recipe.steps.hasSomethingToShow {
                 ControlLabel("Steps") { steps }
@@ -73,10 +74,32 @@ struct ControlsRow: View {
                     ReferenceWeightControl(control: weight, draft: $draft)
                 }
             }
-            ControlLabel("Seed", allowsMultipleRows: true) { SeedControl(draft: $draft) }
+            ControlLabel("Seed", allowsMultipleRows: true) { NativeSeedControl(draft: $draft) }
             if controller.sequence.draft == nil {
                 ControlLabel("Batch") { BatchControl(maximum: maxBatch, draft: $draft) }
             } else { Text("1 joined video").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
+    /// Length writes the Duration request on a machine that takes video
+    /// parents, else the ordinary frame count (which the router may chain).
+    private var durationLength: Bool { controller.offersDuration(on: host, recipe: recipe) }
+
+    @ViewBuilder private func length(temporal: TemporalProfile, routing: ClipRouting) -> some View {
+        if durationLength, let authoring = controller.videoDuration {
+            NativeLengthControl(
+                grid: VideoLengthGrid.duration(temporal: temporal, fps: draft.fps, limits: chainLimits,
+                                               plan: controller.videoPlanner.plan),
+                temporal: temporal, draft: $draft,
+                duration: Binding(get: { controller.videoDuration?.draft ?? authoring.draft },
+                                  set: { controller.videoDuration?.draft = $0 }),
+                prompt: draft.prompt,
+                authoritative: chainLimits != nil || controller.videoPlanner.plan != nil)
+        } else {
+            NativeLengthControl(
+                grid: VideoLengthGrid.resolve(temporal: temporal, fps: draft.fps, limits: nil,
+                                              ceiling: routing.bounds.max),
+                temporal: temporal, draft: $draft, prompt: draft.prompt)
         }
     }
 

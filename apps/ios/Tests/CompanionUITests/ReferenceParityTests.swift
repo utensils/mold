@@ -4,7 +4,7 @@ import XCTest
 final class ReferenceParityTests: XCTestCase {
     override func setUp() { super.setUp(); acceptCompanionPermissions() }
 
-    @MainActor func testLengthMenuUsesTheAuthoritativeFrameGridAndCurrentSelection() async throws {
+    @MainActor func testLengthSliderUsesTheAuthoritativeFrameGridAndCurrentSelection() async throws {
         continueAfterFailure = false
         let machine = try FixtureMachine(referenceFixture: true)
         let port = try await machine.start()
@@ -39,51 +39,25 @@ final class ReferenceParityTests: XCTestCase {
             return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width,
                           height: max(0, bottom - bounds.minY))
         }
-        func visible(_ predicate: String) -> XCUIElement? {
-            let viewport = touchViewport()
-            return app.buttons.matching(NSPredicate(format: predicate)).allElementsBoundByIndex.first {
-                !$0.frame.isEmpty && viewport.contains($0.frame) && $0.isHittable
-            }
-        }
-        for _ in 0..<8 where visible("label BEGINSWITH 'Length,'") == nil && visible("label IN {'Options', 'More Options'}") == nil {
+        let length = app.sliders["video-length"].firstMatch
+        for _ in 0..<8 where !length.exists || !length.isHittable || !touchViewport().contains(length.frame) {
             let viewport = touchViewport()
             let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: viewport.minX + viewport.width * 0.03, dy: viewport.midY + viewport.height * 0.2))
             start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -viewport.height * 0.4)))
         }
-        let before = XCTAttachment(string: app.debugDescription)
-        before.name = "Actual duration control hierarchy before native tap"; before.lifetime = .keepAlways; add(before)
-        let beforePixels = XCTAttachment(screenshot: app.screenshot())
-        beforePixels.name = "Actual duration control before native tap"; beforePixels.lifetime = .keepAlways; add(beforePixels)
-        let length: XCUIElement
-        let inOptions: Bool
-        if let inline = visible("label BEGINSWITH 'Length,'") {
-            length = inline; inOptions = false; length.tap()
-        } else {
-            let opener = try XCTUnwrap(visible("label IN {'Options', 'More Options'}"), "A rendered Options control must fit the composer viewport")
-            opener.tap()
-            XCTAssertTrue(app.navigationBars["More Options"].waitForExistence(timeout: 5))
-            length = app.buttons["options-length"].firstMatch; inOptions = true
-            let optionsForm = app.collectionViews["generation-options-form"].firstMatch
-            XCTAssertTrue(optionsForm.waitForExistence(timeout: 5))
-            for _ in 0..<6 where !length.exists || !length.isHittable { optionsForm.swipeUp() }
-            XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
-            tapMenu(length)
-        }
-        XCTAssertFalse(app.buttons["0 s"].exists)
-        XCTAssertFalse(app.buttons["1 s"].exists)
-        let current = app.buttons["5.2 s"].firstMatch
-        XCTAssertTrue(current.waitForExistence(timeout: 5), app.debugDescription)
-        let selected = app.buttons["8.7 s"].firstMatch
-        XCTAssertTrue(selected.exists, "Nine seconds snaps to the accepted 209-frame option")
-        let options = XCTAttachment(screenshot: app.screenshot())
-        options.name = "Authoritative H3 length options include the current frame count"
-        options.lifetime = .keepAlways; add(options)
-        selected.tap()
-        XCTAssertEqual(length.label, "Length, 8.7 seconds")
-        if inOptions { tapMenu(length) } else { length.tap() }
-        XCTAssertTrue(app.buttons["8.7 s"].firstMatch.exists)
+        let before = XCTAttachment(screenshot: app.screenshot())
+        before.name = "Length slider before native adjustment"; before.lifetime = .keepAlways; add(before)
+        XCTAssertTrue(length.waitForExistence(timeout: 5), app.debugDescription)
+        // 107...345 in steps of 17 is fifteen stops; the recipe default 124 is
+        // the second and reads 5.2 s, never a rounded-down whole second.
+        XCTAssertEqual(length.value as? String, "5.2 s")
+        // Nine seconds is not on the grid; the seventh stop (209 frames) is 8.7 s.
+        length.adjust(toNormalizedSliderPosition: 6.0 / 14.0)
+        XCTAssertEqual(length.value as? String, "8.7 s")
+        length.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertEqual(length.value as? String, "14.4 s", "the slider stops at one generation")
         let settled = XCTAttachment(screenshot: app.screenshot())
-        settled.name = "Selected snapped length remains checked"
+        settled.name = "Length slider snapped to the authoritative H3 grid"
         settled.lifetime = .keepAlways; add(settled)
         XCTAssertTrue(machine.generationRequests.isEmpty)
     }

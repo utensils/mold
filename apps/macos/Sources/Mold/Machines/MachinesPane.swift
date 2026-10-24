@@ -17,6 +17,7 @@ struct MachinesPane: View {
     @Environment(ModelStore.self) var models
     @Environment(ActivityStore.self) var activity
     @Environment(UpscaleStore.self) var upscales
+    @Environment(GenerateController.self) var generate
     @Environment(PairingStore.self) var pairing
     /// The same key the sidebar declares, over the same suite. Two views
     /// sharing one preference by name stay in sync with no plumbing.

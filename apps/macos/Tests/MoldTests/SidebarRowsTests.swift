@@ -165,7 +165,8 @@ struct SidebarRowsTests {
         let view = NSHostingView(rootView: Sidebar(destination: Binding(
             get: { destination }, set: { destination = $0 }))
             .environment(hosts).environment(library).environment(navigation).environment(engine)
-            .environment(QueueStore(hosts: hosts)))
+            .environment(QueueStore(hosts: hosts))
+            .environment(GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 700),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -194,7 +195,8 @@ struct SidebarRowsTests {
         let view = NSHostingView(rootView: Sidebar(destination: Binding(
             get: { destination }, set: { destination = $0 }))
             .environment(hosts).environment(library).environment(navigation)
-            .environment(MoldEngine()).environment(QueueStore(hosts: hosts)))
+            .environment(MoldEngine()).environment(QueueStore(hosts: hosts))
+            .environment(GenerateController(hosts: hosts, defaults: ConfigStore(hosts: hosts))))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 300, height: 700),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

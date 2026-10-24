@@ -124,8 +124,14 @@ extension RootView {
         } label: {
             Label { Text(destination.title) } icon: { Image(systemName: destination.symbol) }
         }
-        .badge(destination == .queue ? queue.badge : destination == .library ? library.unreadCount : 0)
+        .badge(destination == .queue ? queueBadge : destination == .library ? library.unreadCount : 0)
         .defaultVisibility(destination.showsInTabBar ? .visible : .hidden, for: .tabBar)
+    }
+
+    /// Live video parents count beside ordinary rows: their clips never
+    /// appear as queue rows of their own (`NativeVideoQueue.liveSymbols`).
+    var queueBadge: Int {
+        queue.badge + NativeVideoQueue.liveSymbols(videos: stores.generate.videoJobs, sequence: stores.generate.sequence).count
     }
 
     /// What `@SceneStorage` keeps when the Search tab was last selected.

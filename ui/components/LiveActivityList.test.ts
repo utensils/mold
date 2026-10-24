@@ -72,7 +72,7 @@ describe("LiveActivityList swipe actions", () => {
     });
 
     expect(wrapper.text()).toMatch(
-      /hal9000 · downloading · 3\.6 GB \/ 31\.4 GB\s+· 12%/,
+      /hal9000 · Downloading · 3\.6 GB \/ 31\.4 GB\s+· 12%/,
     );
     expect(wrapper.text()).not.toContain("3627980783/31375569558");
   });
@@ -156,5 +156,34 @@ describe("LiveActivityList swipe actions", () => {
     expect(source).toMatch(
       /\.live-activity-copy\s+span\s*\{[^}]*overflow:\s*hidden\s*;[^}]*text-overflow:\s*ellipsis\s*;[^}]*white-space:\s*nowrap\s*;/s,
     );
+  });
+
+  it("keeps captions in sentence case instead of capitalizing every word", () => {
+    const source = readFileSync(
+      join(import.meta.dirname, "LiveActivityList.vue"),
+      "utf8",
+    );
+    // `text-transform: capitalize` turned "Rendering clip 2 of 3" into
+    // "Rendering Clip 2 Of 3"; only the first letter is raised, in script.
+    expect(source).not.toMatch(/text-transform:\s*capitalize/);
+    const wrapper = mount(LiveActivityList, {
+      props: {
+        rows: [
+          row,
+          {
+            ...row,
+            key: "host-1:video_job:v1",
+            id: "v1",
+            kind: "video_job",
+            phase: "running",
+            current: 1,
+            total: 3,
+          },
+        ],
+      },
+    });
+    const text = wrapper.text().replace(/\s+/g, " ");
+    expect(text).toContain("hal9000 · Queued");
+    expect(text).toContain("hal9000 · Rendering clip 2 of 3 · 33%");
   });
 });

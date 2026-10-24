@@ -1,6 +1,7 @@
 import { apiJsonTo, type ApiTarget } from "./client";
 import { compareNewestSubmitted } from "../lib/activityOrder";
 import { formatByteProgress } from "../lib/formatBytes";
+import { videoJobActivityRow } from "../lib/videoJobRow";
 
 export interface ActiveWorkItem {
   id: string;
@@ -29,6 +30,9 @@ export interface ActiveWorkItem {
  * same snapshot is reduced to a generic phase on Create.
  */
 export function activeWorkPhaseLabel(row: ActiveWorkItem): string {
+  // A duration parent reads like any other Queue row: "Waiting", "Rendering
+  // clip 2 of 3", "Joining clips" — never the raw "running · 0/3".
+  if (row.kind === "video_job") return videoJobActivityRow(row).caption;
   if (row.phase === "preparing" && row.preparation_progress?.component) {
     return `Preparing · ${row.preparation_progress.component}`;
   }
