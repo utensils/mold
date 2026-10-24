@@ -21,11 +21,15 @@ anchor as a keyframe to cut back to, continuations carry the motion tail alone.
 
 ## Longer videos
 
-Enter one prompt and choose **Duration**. The apps show the selected model's
-single-render limit and how many clips will be joined. The normal short duration
-remains the default. Choose a longer duration, such as 30 seconds, to keep the
-same prompt across the whole movie. **Define scenes** optionally lets you enter
-different prompts and lengths.
+Enter one prompt and choose a length up to one generation: MiniMax H3 renders
+up to 14.4 seconds in a single clip. For a longer movie, turn on **Longer video**
+(native apps) or **Define scenes** (web and desktop) and give each scene its own
+prompt and length. Keep each scene at or under one generation, describe only
+what happens in that scene, and start it where the previous scene ended.
+
+A single prompt longer than one generation still works, but every clip replays
+that prompt, so its action repeats. The length summary warns when that happens
+and when a scene is shorter than the shortest generation.
 
 Library **Use settings** restores the original requested duration and optional
 scenes, exact seed, recipe controls and authenticated retained inputs. It prepares
@@ -36,8 +40,26 @@ where recorded. Missing historical settings or inputs are disclosed before a new
 generation, rather than silently shortening or flattening the movie.
 
 ```bash
-mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 30
+mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 12
+mold --host workstation run MODEL --scenes scenes.toml --dry-run
 ```
+
+A scenes file has one `[[scene]]` per part, each with `seconds` and its own
+`prompt`; the movie length is their sum, so `--duration` is not needed:
+
+```toml
+[[scene]]
+seconds = 12
+prompt = """A paper boat drifts down a sunlit stream past mossy stones."""
+
+[[scene]]
+seconds = 12
+prompt = """The boat tips over a small waterfall and spins in the foam below."""
+```
+
+The dry run prints the scene timeline, the clip count and any repeat warning.
+For MiniMax H3, Mold opens every scene that continues from the previous clip's
+last frame with the model's own frame-alignment line; do not write it yourself.
 
 Choose `MODEL` from that host's `mold list --json` results. Duration is in seconds
 and accepts decimal values. `--dry-run` checks the complete request without

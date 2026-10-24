@@ -116,6 +116,9 @@ impl VideoDurationPlan {
     pub fn clip_count(&self) -> u64 {
         self.clip_count
     }
+    pub fn added_frames(&self) -> u64 {
+        self.added_frames
+    }
     pub fn output_frames(&self) -> u64 {
         self.prefix_frames + self.added_frames
     }

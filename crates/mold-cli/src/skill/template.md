@@ -96,7 +96,9 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   IDs, defaults, dimensions, frame grids, or runtime availability.
 - For multi-scene video or a clip longer than one render, start with
   [Longer videos]({{reference_prefix}}/cli.md#longer-videos):
-  `mold --host HOST run MODEL "prompt" --duration 30` publishes one joined MP4.
+  up to one generation (MiniMax H3: 14.4 s), use one prompt and
+  `--duration N`; longer, write one scene of at most that length per part in a
+  `--scenes FILE.toml` so no prompt repeats. Both publish one MP4.
   Extend a Library movie with `--extend-library PRINT.mp4 --duration 10`.
   Apps offer **Duration**, optional **Define scenes**, and Library **Extend video**.
   Discord offers `/video make` and `/video extend`. Keep the printed video UUID;

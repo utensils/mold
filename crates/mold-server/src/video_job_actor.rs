@@ -7,6 +7,12 @@ use mold_core::{
     video_job_schedule::VideoJobPartPlan,
 };
 
+/// New H3 FL2VA parents prompt their carried clips as frame-referenced
+/// continuations (upstream `base-en.txt` §2.1).
+pub(crate) fn uses_continuation_instruction(model: &str) -> bool {
+    mold_core::minimax_h3::task_for_model(model) == Some(mold_core::minimax_h3::Task::Fl2va)
+}
+
 pub(crate) fn child_request(
     parent_id: &str,
     index: u64,
@@ -38,6 +44,8 @@ pub(crate) fn child_request(
     let first = index == 0 && incoming.is_none();
     let final_clip =
         index.checked_add(1).context("child index overflow")? == manifest.plan.clip_count;
+    let fps = template.fps;
+    let carried = incoming.is_some() && manifest.continuation_instruction;
     let stage = &mut template.stages[0];
     stage.prompt = part.prompt.clone();
     stage.frames = part.clips[0].frames;
@@ -60,6 +68,21 @@ pub(crate) fn child_request(
                 keyframe.frame = stage.frames - 1;
             }
         }
+    }
+    if carried {
+        // The carried frame is H3's <Picture 1>; upstream requires the prompt
+        // to open with its alignment line (base-en.txt §2.1).
+        let closing = stage
+            .keyframes
+            .as_ref()
+            .is_some_and(|frames| frames.iter().any(|frame| frame.frame != 0));
+        stage.prompt = mold_core::minimax_h3_instruction::with_frame_reference_instruction(
+            &stage.prompt,
+            true,
+            closing,
+            stage.frames,
+            fps,
+        );
     }
     template.continue_from = None;
     template.incoming_source = incoming;
@@ -1045,5 +1068,104 @@ mod tests {
             part.clips[0].frames - 1
         );
         assert_eq!(last.stages[0].seed_offset, Some(last_index));
+        assert_eq!(
+            last.stages[0].prompt, "walking",
+            "only H3 takes the alignment line"
+        );
+    }
+
+    #[test]
+    fn h3_continuation_clips_open_with_the_upstream_alignment_instruction() {
+        let row = crate::video_job_manifest::tests::fixture();
+        let mut manifest = crate::video_job_manifest::read_manifest(&row).unwrap();
+        let mut template = manifest.template.clone();
+        template.model = mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8.into();
+        assert!(uses_continuation_instruction(&template.model));
+        let legacy = child_request(
+            &row.job.id,
+            1,
+            &manifest,
+            template.clone(),
+            &mold_core::video_job_schedule::VideoJobSchedule::new(
+                &manifest.request,
+                manifest.envelope,
+                manifest.plan.fps,
+                0,
+            )
+            .unwrap()
+            .part(1)
+            .unwrap(),
+            Some(mold_core::chain::ChainIncomingSource {
+                parent_job_id: row.job.id.clone(),
+                source_sha256: "a".repeat(64),
+                source_frames: 96,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.stages[0].prompt, "walking",
+            "a parent sealed before the flag must resume with byte-identical children"
+        );
+        manifest.continuation_instruction = true;
+        let schedule = mold_core::video_job_schedule::VideoJobSchedule::new(
+            &manifest.request,
+            manifest.envelope,
+            manifest.plan.fps,
+            0,
+        )
+        .unwrap();
+        let incoming = || {
+            Some(mold_core::chain::ChainIncomingSource {
+                parent_job_id: row.job.id.clone(),
+                source_sha256: "a".repeat(64),
+                source_frames: 96,
+            })
+        };
+        let opening = child_request(
+            &row.job.id,
+            0,
+            &manifest,
+            template.clone(),
+            &schedule.part(0).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(opening.stages[0].prompt, "walking");
+        let next = child_request(
+            &row.job.id,
+            1,
+            &manifest,
+            template.clone(),
+            &schedule.part(1).unwrap(),
+            incoming(),
+        )
+        .unwrap();
+        assert_eq!(
+            next.stages[0].prompt,
+            "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\nwalking"
+        );
+        template.stages[0].keyframes = Some(vec![mold_core::KeyframeCondition {
+            frame: 96,
+            image: vec![2],
+            name: None,
+        }]);
+        let last_index = schedule.part_count() - 1;
+        let part = schedule.part(last_index).unwrap();
+        let last = child_request(
+            &row.job.id,
+            last_index,
+            &manifest,
+            template,
+            &part,
+            incoming(),
+        )
+        .unwrap();
+        assert!(
+            last.stages[0].prompt.starts_with(
+                "How the reference pictures align with the target video — Picture 1 (from Shot 1)"
+            ),
+            "{}",
+            last.stages[0].prompt
+        );
     }
 }

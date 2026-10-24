@@ -29,6 +29,12 @@ pub(crate) struct VideoJobManifest {
     #[serde(default)]
     pub prefix_audio: Option<mold_core::video_artifacts::VideoPcmArtifact>,
     pub plan: VideoJobPlan,
+    /// Sealed at admission: H3 FL2VA clips that carry the previous clip's
+    /// last frame open with upstream's alignment instruction. Absent (false)
+    /// on parents admitted before it existed, so their recorded children stay
+    /// byte-identical on Resume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continuation_instruction: bool,
 }
 
 fn literal_template<'de, D: serde::Deserializer<'de>>(

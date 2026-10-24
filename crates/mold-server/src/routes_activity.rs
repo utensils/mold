@@ -236,6 +236,71 @@ fn retained_stage_child_activity(job_dir: &std::path::Path, parent_id: &str) -> 
     (record.parent_id == parent_id && !record.child_id.is_empty()).then_some(record.child_id)
 }
 
+/// What a durable duration parent is really doing. Its `running` state only
+/// means the video actor holds it; the current clip may still be waiting for
+/// a GPU, so the clip's own scheduler work (or, for an H3 stage, its internal
+/// generation's registry state) decides between waiting and rendering.
+#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+pub(crate) fn video_parent_progress_phase(
+    state: &AppState,
+    job: &mold_core::video_job::VideoJob,
+) -> Option<mold_core::video_job::VideoJobProgressPhase> {
+    video_parent_progress_phase_with(state, &scheduler_activity(state), job)
+}
+
+fn video_parent_progress_phase_with(
+    state: &AppState,
+    scheduler: &SchedulerActivityIndex,
+    job: &mold_core::video_job::VideoJob,
+) -> Option<mold_core::video_job::VideoJobProgressPhase> {
+    use mold_core::video_job::{VideoJobProgressPhase, VideoJobState};
+    if job.state != VideoJobState::Running {
+        return None;
+    }
+    if job.completed_clips >= job.plan.clip_count {
+        return Some(VideoJobProgressPhase::Joining);
+    }
+    let Some(child) = job.active_child_id.as_deref() else {
+        // Between two clips the movie is still in progress; only a parent
+        // that has rendered nothing yet is honestly waiting.
+        return Some(if job.completed_clips > 0 {
+            VideoJobProgressPhase::Rendering
+        } else {
+            VideoJobProgressPhase::Waiting
+        });
+    };
+    let on_gpu = |phase: &str| matches!(phase, "running" | "loading");
+    if scheduler
+        .by_parent
+        .get(child)
+        .is_some_and(|activity| on_gpu(activity.phase))
+    {
+        return Some(VideoJobProgressPhase::Rendering);
+    }
+    let stage_generation = state
+        .metadata_db
+        .as_ref()
+        .as_ref()
+        .and_then(|db| mold_db::chain_jobs::get_job(db, child).ok().flatten())
+        .and_then(|row| retained_stage_child_activity(&row.job_dir, child));
+    let rendering = stage_generation.is_some_and(|generation| {
+        scheduler
+            .by_work
+            .get(&generation)
+            .or_else(|| scheduler.by_parent.get(&generation))
+            .is_some_and(|activity| on_gpu(activity.phase))
+            || state
+                .job_registry
+                .entry(&generation)
+                .is_some_and(|entry| entry.state == crate::job_registry::JobLifecycle::Running)
+    });
+    Some(if rendering {
+        VideoJobProgressPhase::Rendering
+    } else {
+        VideoJobProgressPhase::Waiting
+    })
+}
+
 /// Hide a stage only while its authoritative parent is present in this
 /// snapshot. Missing parent/database evidence keeps real work visible.
 fn collapse_chain_stage_activity(
@@ -492,6 +557,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                     unavailable_kinds.push("video_job_history".into());
                 }
                 for job in page.jobs {
+                    let progress = video_parent_progress_phase_with(&state, &scheduler, &job);
                     items.push(ActiveWorkItem {
                         id: job.id,
                         kind: "video_job".into(),
@@ -506,7 +572,13 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                                 "queued"
                             }
                             mold_core::video_job::VideoJobState::Running if job.can_cancel => {
-                                "running"
+                                if progress
+                                    == Some(mold_core::video_job::VideoJobProgressPhase::Waiting)
+                                {
+                                    "queued"
+                                } else {
+                                    "running"
+                                }
                             }
                             _ => "cancelling",
                         }

@@ -326,6 +326,7 @@ pub(crate) fn seal(
     let template =
         crate::chain_source_media::persist_video_parent(&root, &directory, id, prepared.template)
             .map_err(storage)?;
+    let template_model = template.model.clone();
     let manifest = VideoJobManifest {
         version: 1,
         request: prepared.request,
@@ -338,6 +339,9 @@ pub(crate) fn seal(
         retained_source,
         prefix_audio,
         plan: prepared.plan.clone(),
+        continuation_instruction: crate::video_job_actor::uses_continuation_instruction(
+            &template_model,
+        ),
     };
     let json = serde_json::to_string(&manifest).map_err(storage)?;
     let now = crate::video_jobs::now_ms();
@@ -356,6 +360,7 @@ pub(crate) fn seal(
             can_cancel: true,
             can_resume: false,
             can_delete: false,
+            progress_phase: None,
         },
         request_sha256: identity.into(),
         manifest_sha256: format!("{:x}", Sha256::digest(json.as_bytes())),

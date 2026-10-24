@@ -579,12 +579,17 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 \
   --first-frame pavilion.png --duration 5
 ```
 
-For one prompt across a longer video, use `--duration 45 --host HOST` with an
-updated H3 server advertising Duration support. It creates one durable parent
-and saves one MP4 with synchronized audio. Add `--dry-run` first for full
-read-only validation and the server's planned clip count and delivered length.
-Each child uses the selected recipe's normal short window; the final movie
-trims grid padding on H3's 24 FPS clock. FL2VA carries motion between clips and
+One H3 generation renders up to 14.4 seconds (345 frames), so `--duration 14
+--host HOST` is a single clip. For a longer video, write one `[[scene]]` of at
+most 14 seconds per part in a scenes file and run `--scenes scenes.toml --host
+HOST`; each scene prompt (in the three-field grammar) describes only its own
+seconds. Mold opens every scene that continues from the previous clip's last
+frame with H3's upstream frame-alignment line, so do not write it yourself. A
+single prompt longer than one generation repeats its action in every clip, and
+the plan warns about it. Duration creates one durable parent on an updated H3
+server and saves one MP4 with synchronized audio. Add `--dry-run` first for full
+read-only validation, the scene timeline, the planned clip count and the
+delivered length. The final movie trims grid padding on H3's 24 FPS clock. FL2VA carries motion between clips and
 accepts text-only prompts when no endpoints are attached. First and last frames
 belong to the outer boundaries of the whole movie. Ref2VA also supports Duration,
 using independent blended clips and retained ordered references rather than
