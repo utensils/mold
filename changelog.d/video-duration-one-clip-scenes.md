@@ -16,3 +16,9 @@
   `progress_phase` (`waiting`, `rendering`, `joining`) and `/api/activity`
   reports a waiting video as queued, so Queue no longer shows every accepted
   video as running while only some render.
+- **Chained videos no longer get darker with every clip.** Every H.264
+  encode and decode now uses one rounded BT.601 conversion instead of the
+  codec library's truncating helpers, which shaved about one code off every
+  channel per pass. The frame carried into each next clip went through
+  several passes, so a dark H3 scene lost roughly 13% of its brightness at
+  every clip boundary.

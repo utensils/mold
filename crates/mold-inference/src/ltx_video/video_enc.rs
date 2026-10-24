@@ -628,7 +628,7 @@ impl Mp4StreamEncoder {
             // silently shorten the track.
             .skip_frames(false)
             .profile(openh264::encoder::Profile::High)
-            .vui(VuiConfig::bt601()); // BT.601 limited range — matches YUVBuffer::from_rgb_source()
+            .vui(VuiConfig::bt601()); // BT.601 limited range — matches crate::bt601::rgb_to_yuv420()
 
         let api = openh264::OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config)
@@ -647,7 +647,7 @@ impl Mp4StreamEncoder {
     }
 
     pub fn push(&mut self, frame: &RgbImage) -> Result<()> {
-        use openh264::formats::{RgbSliceU8, YUVBuffer};
+        use openh264::formats::YUVSlices;
 
         anyhow::ensure!(
             frame.width() == self.width && frame.height() == self.height,
@@ -658,8 +658,11 @@ impl Mp4StreamEncoder {
             self.height,
         );
 
-        let rgb = RgbSliceU8::new(frame.as_raw(), (self.width as usize, self.height as usize));
-        let yuv = YUVBuffer::from_rgb_source(rgb);
+        // Rounded conversion: the crate's truncating helper darkened every
+        // carried chain boundary by about a code per encode.
+        let (y_plane, u_plane, v_plane) = crate::bt601::rgb_to_yuv420(frame);
+        let (w, h) = (self.width as usize, self.height as usize);
+        let yuv = YUVSlices::new((&y_plane, &u_plane, &v_plane), (w, h), (w, w / 2, w / 2));
         let bitstream = self
             .encoder
             .encode(&yuv)
@@ -986,7 +989,7 @@ mod mp4_mux {
             write_u16(&mut avc1, 0xFFFF); // pre_defined (-1)
                                           // avcC box
             avc1.extend_from_slice(&build_avc_c(sps, pps));
-            // colr box (BT.601/SMPTE 170M — matches YUVBuffer::from_rgb_source() conversion)
+            // colr box (BT.601/SMPTE 170M — matches crate::bt601::rgb_to_yuv420())
             let mut colr = Vec::new();
             colr.extend_from_slice(b"nclx");
             write_u16(&mut colr, 6); // colour_primaries (SMPTE 170M / BT.601)
