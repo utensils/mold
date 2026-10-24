@@ -280,7 +280,17 @@ pub(crate) async fn get(
         .map_err(internal)??;
     }
     kick(&state);
-    Ok((private_headers(&state), Json(load(&state, &id)?.job)))
+    Ok((
+        private_headers(&state),
+        Json(live(&state, load(&state, &id)?.job)),
+    ))
+}
+
+/// The stored projection plus what the parent is doing right now. The phase
+/// is never persisted; it is derived per read from live scheduler state.
+pub(crate) fn live(state: &AppState, mut job: VideoJob) -> VideoJob {
+    job.progress_phase = crate::routes_activity::video_parent_progress_phase(state, &job);
+    job
 }
 
 pub(crate) fn kick(state: &AppState) {
@@ -443,7 +453,7 @@ pub(crate) async fn list(
     Ok((
         private_headers(&state),
         Json(Listing {
-            jobs: page.jobs,
+            jobs: page.jobs.into_iter().map(|job| live(&state, job)).collect(),
             has_more: page.has_more,
             next_cursor,
         }),
@@ -561,12 +571,13 @@ pub(crate) async fn events(
                 yield Ok(axum::response::sse::Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
                 break;
             }};
-            if previous!=Some(row.revision) {
-                previous=Some(row.revision);
-                let data=serde_json::to_string(&row.job).expect("public video projection serializes");
+            let job=live(&state,row.job);
+            if previous!=Some((row.revision,job.progress_phase)) {
+                previous=Some((row.revision,job.progress_phase));
+                let data=serde_json::to_string(&job).expect("public video projection serializes");
                 yield Ok(axum::response::sse::Event::default().event("snapshot").data(data));
             }
-            if row.job.state.is_terminal() || row.job.state==mold_core::video_job::VideoJobState::Paused { break; }
+            if job.state.is_terminal() || job.state==mold_core::video_job::VideoJobState::Paused { break; }
         }
     };
     Ok((

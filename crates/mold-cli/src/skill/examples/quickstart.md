@@ -24,11 +24,16 @@ For a remote host, pick a saved one from `mold host list` and pass
 `--host NAME`; its saved credential is used, so nothing secret goes on the
 command line. Run `mold <command> --help` for anything not covered here.
 
-For a longer video, use one prompt and seconds:
+For a video up to one generation long (MiniMax H3: 14.4 s), use one prompt
+and seconds. Longer than that, write a `scenes.toml` with one `[[scene]]`
+(`seconds` and its own `prompt`) per part of at most one generation, as in
+[Longer videos](../references/cli.md#longer-videos):
 
 ```bash
 mold list --json --host workstation
-mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 30
+mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 12
+mold --host workstation run MODEL --scenes scenes.toml --dry-run
+mold --host workstation run MODEL --scenes scenes.toml
 ```
 
 Keep the printed video UUID and inspect it before retrying after a disconnect.

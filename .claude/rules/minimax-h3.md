@@ -142,7 +142,9 @@ if the request disconnects. Unsupported hosts retain the old canonical path.
 
 **CLI requested duration and legacy frame counts.** Remote `--duration` uses
 an owner-bound durable `/api/video-jobs` parent and requires affirmative server
-support. Use the selected recipe's normal short window for every child, retain
+support. Every child uses H3's full single-generation ceiling (345 frames, about
+14.4 s — not the 124-frame default; a 345-frame clip asks a ~24.3 GB device
+floor, so a smaller card holds the first clip with numbers), retain
 synchronized audio, and trim clip-grid padding to the requested length on the
 24 FPS output clock. FL2VA carries its final RGB boundary; Ref2VA uses independent
 blended clips with distinct seeds, preserving its ordered references without

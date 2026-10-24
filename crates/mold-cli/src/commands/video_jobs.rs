@@ -14,21 +14,81 @@ pub(crate) struct VideoJobFlags {
     #[arg(long, requires = "duration", conflicts_with_all = ["local", "extend", "video"], help_heading = "Video")]
     pub extend_library: Option<String>,
     /// Known operation UUID to reconcile after an uncertain submission.
-    #[arg(
-        long,
-        requires = "duration",
-        conflicts_with = "local",
-        help_heading = "Video"
-    )]
+    #[arg(long, conflicts_with = "local", help_heading = "Video")]
     pub operation_id: Option<uuid::Uuid>,
     /// Return after durable admission; monitor with `mold jobs show ID`.
-    #[arg(
-        long,
-        requires = "duration",
-        conflicts_with = "local",
-        help_heading = "Video"
-    )]
+    #[arg(long, conflicts_with = "local", help_heading = "Video")]
     pub detach: bool,
+    /// Scenes file for a longer video: one `[[scene]]` per part, each with
+    /// `seconds` and its own `prompt`. The video length is their sum.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["local", "script", "expand", "extend_library", "prompt"], help_heading = "Video")]
+    pub scenes: Option<std::path::PathBuf>,
+    #[arg(skip)]
+    pub parsed_scenes: Option<Vec<mold_core::video_job::VideoJobScene>>,
+}
+
+/// Read a `--scenes` TOML file:
+///
+/// ```toml
+/// [[scene]]
+/// seconds = 12
+/// prompt = """..."""
+/// ```
+pub(crate) fn read_scenes(
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<mold_core::video_job::VideoJobScene>> {
+    use anyhow::Context;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct File {
+        scene: Vec<Scene>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Scene {
+        seconds: toml::Value,
+        prompt: String,
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read scenes file {}", path.display()))?;
+    let file: File = toml::from_str(&text).map_err(|error| {
+        let hint = if text.contains("[[stages]]") || text.contains("schema") {
+            "\nThis looks like a chain script; run it with --script instead."
+        } else {
+            "\nExpected one [[scene]] table per scene, each with `seconds = 12` and `prompt = \"\"\"...\"\"\"`."
+        };
+        anyhow::anyhow!("{}: {}{hint}", path.display(), error.message())
+    })?;
+    anyhow::ensure!(
+        !file.scene.is_empty(),
+        "{}: add at least one [[scene]]",
+        path.display()
+    );
+    file.scene
+        .into_iter()
+        .enumerate()
+        .map(|(index, scene)| {
+            let number = index + 1;
+            let seconds = match &scene.seconds {
+                toml::Value::Integer(value) => value.to_string(),
+                toml::Value::Float(value) => value.to_string(),
+                toml::Value::String(value) => value.clone(),
+                _ => String::new(),
+            };
+            let duration_ms = parse_duration_ms(&seconds).map_err(|error| {
+                anyhow::anyhow!("{}: scene {number} seconds: {error}", path.display())
+            })?;
+            anyhow::ensure!(
+                !scene.prompt.trim().is_empty(),
+                "{}: scene {number} needs a prompt",
+                path.display()
+            );
+            Ok(mold_core::video_job::VideoJobScene {
+                prompt: scene.prompt,
+                duration_ms,
+            })
+        })
+        .collect()
 }
 
 pub(crate) struct VideoJobOptions {
@@ -68,6 +128,53 @@ pub(crate) fn parse_duration_ms(value: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scenes_file(text: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        file
+    }
+
+    #[test]
+    fn scenes_file_reads_exact_lengths_and_literal_prompts() {
+        let file = scenes_file(
+            "[[scene]]\nseconds = 12\nprompt = \"\"\"\nA cat walks.\n\"\"\"\n\n[[scene]]\nseconds = 4.458\nprompt = 'It sits.'\n",
+        );
+        let scenes = read_scenes(file.path()).unwrap();
+        assert_eq!(scenes.len(), 2);
+        assert_eq!(scenes[0].duration_ms, 12_000);
+        assert_eq!(scenes[0].prompt, "A cat walks.\n");
+        assert_eq!(scenes[1].duration_ms, 4_458);
+    }
+
+    #[test]
+    fn scenes_file_errors_say_how_to_fix_them() {
+        for (text, needle) in [
+            (
+                "[[scenes]]\nseconds = 5\nprompt = 'x'\n",
+                "one [[scene]] table per scene",
+            ),
+            (
+                "[[scene]]\nseconds = 5\nprompt = 'x'\nframes = 9\n",
+                "unknown field",
+            ),
+            ("[[scene]]\nseconds = 0\nprompt = 'x'\n", "scene 1 seconds"),
+            (
+                "[[scene]]\nseconds = 5\nprompt = '  '\n",
+                "scene 1 needs a prompt",
+            ),
+            (
+                "schema = \"mold.chain.v1\"\n[[stages]]\nprompt = 'x'\n",
+                "--script",
+            ),
+        ] {
+            let error = read_scenes(scenes_file(text).path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(needle), "{text:?} -> {error}");
+        }
+    }
 
     #[test]
     fn seconds_are_exact_positive_milliseconds_without_float_rounding() {
@@ -259,7 +366,7 @@ async fn admit_with_receipt(
                 retained_upload: None,
             }
         }),
-        scenes: None,
+        scenes: options.flags.parsed_scenes.clone(),
         validation_revision: None,
     };
     let plan = client.validate_video_job(&request, &instance).await?;
@@ -276,8 +383,31 @@ async fn admit_with_receipt(
         plan.total_duration_ms / 1000,
         plan.total_duration_ms % 1000
     );
-    status!("{} clips joined into one video; single-generation limit: {} frames at {} FPS; overlap: {} frames ({:?})",
-        plan.clip_count, plan.single_clip_max_frames, plan.fps, plan.overlap_frames, plan.join_mode);
+    let one_generation = f64::from(plan.single_clip_max_frames) / f64::from(plan.fps.max(1));
+    if plan.clip_count == 1 {
+        status!(
+            "One clip (one generation renders up to {one_generation:.1} s: {} frames at {} FPS)",
+            plan.single_clip_max_frames,
+            plan.fps
+        );
+    } else {
+        status!("{} clips joined into one video; one generation renders up to {one_generation:.1} s ({} frames at {} FPS); overlap: {} frames ({:?})",
+            plan.clip_count, plan.single_clip_max_frames, plan.fps, plan.overlap_frames, plan.join_mode);
+    }
+    if let Some(scenes) = &request.scenes {
+        let mut start = 0u64;
+        for (index, scene) in scenes.iter().enumerate() {
+            let end = start + scene.duration_ms;
+            status!(
+                "Scene {}: {:.1}-{:.1} s ({} words)",
+                index + 1,
+                start as f64 / 1000.0,
+                end as f64 / 1000.0,
+                scene.prompt.split_whitespace().count()
+            );
+            start = end;
+        }
+    }
     for warning in &plan.warnings {
         status!("{warning}");
     }

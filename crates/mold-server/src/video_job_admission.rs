@@ -82,8 +82,11 @@ fn plan_template_with_defaults(
     if fps == 0 || fps > 240 {
         return Err(ApiError::validation("fps must be between 1 and 240"));
     }
-    // Use the installed recipe's ordinary single-render envelope. The family
-    // ceiling can be much larger than its qualified default (H3: 345 vs 124).
+    // H3 renders 4-15 s in ONE pass (upstream README; mold caps the grid at
+    // 345 frames), so each H3 clip is that full ceiling rather than its
+    // 124-frame default: a 14 s request is one clip, never three short ones
+    // replaying one prompt. Other families keep their ordinary short window
+    // (legacy LTX-Video's longer single denoise is a separate one-shot path).
     // generation.frames may be a restored movie's total and is never this cap.
     let limits = crate::chain_limits::compute_limits(
         &generation.model,
@@ -92,9 +95,13 @@ fn plan_template_with_defaults(
         recipe_default_frames.or_else(|| defaults.and_then(|defaults| defaults.frames)),
         Some(fps),
     );
-    let clip_cap = limits
-        .frames_per_clip_recommended
-        .min(limits.frames_per_clip_cap);
+    let clip_cap = if mold_core::minimax_h3::is_family(family) {
+        limits.frames_per_clip_cap
+    } else {
+        limits
+            .frames_per_clip_recommended
+            .min(limits.frames_per_clip_cap)
+    };
     if !limits.supports_sequence {
         return Err(ApiError::validation(
             limits
@@ -174,7 +181,7 @@ fn plan_template_with_defaults(
         total_frames,
         added_duration_ms: request.duration_ms,
         total_duration_ms,
-        warnings: Vec::new(),
+        warnings: repeated_prompt_warnings(&schedule, request.scenes.is_some(), envelope, fps),
     };
     // Decode the ordinary chain shape without invoking legacy prompt escape
     // normalization. All original controls remain bound into this template.
@@ -199,6 +206,61 @@ fn plan_template_with_defaults(
     template.stages[0].keyframes = generation.keyframes.clone();
     template.stages[0].generation_references = generation.references.clone();
     Ok((plan, envelope, template))
+}
+
+/// Longest scene that always fits ONE generation, wherever it lands in the
+/// movie: a later clip spends `overlap_frames` on its incoming context.
+pub(crate) fn single_scene_max_seconds(envelope: ClipEnvelope, fps: u32) -> f64 {
+    let frames = envelope
+        .maximum_frames
+        .saturating_sub(envelope.overlap_frames);
+    // Floor to a tenth so the advertised figure is always safe to type back.
+    (f64::from(frames) * 10.0 / f64::from(fps.max(1))).floor() / 10.0
+}
+
+/// A prompt that spans several clips is rendered again for each of them, so
+/// its action replays. Say so before anything is queued (upstream H3's own
+/// long-form workflow splits any beat longer than one generation).
+fn repeated_prompt_warnings(
+    schedule: &VideoJobSchedule,
+    scenes: bool,
+    envelope: ClipEnvelope,
+    fps: u32,
+) -> Vec<String> {
+    let limit = single_scene_max_seconds(envelope, fps);
+    let shortest = f64::from(envelope.minimum_frames) / f64::from(fps.max(1));
+    let shortest = (shortest * 10.0).ceil() / 10.0;
+    let short = schedule
+        .scene_added_frames()
+        .enumerate()
+        .filter(|(_, frames)| *frames < u64::from(envelope.minimum_frames))
+        .map(|(index, _)| {
+            if scenes {
+                format!(
+                    "Scene {} is shorter than the shortest generation ({shortest} s); it still renders {shortest} s and keeps only its own part.",
+                    index + 1
+                )
+            } else {
+                format!("The shortest generation is {shortest} s; the extra footage is trimmed.")
+            }
+        });
+    let repeated = schedule
+        .scene_clip_counts()
+        .enumerate()
+        .filter(|(_, clips)| *clips > 1)
+        .map(move |(index, clips)| {
+            if scenes {
+                format!(
+                    "Scene {} is longer than {limit} s, so its prompt is reused for {clips} clips and its action will repeat. Split it into scenes of up to {limit} s.",
+                    index + 1
+                )
+            } else {
+                format!(
+                    "This prompt is reused for all {clips} clips, so its action will repeat. Define scenes of up to {limit} s, each describing only its own part."
+                )
+            }
+        });
+    repeated.chain(short).collect()
 }
 
 pub(crate) struct PreparedVideo {
@@ -384,6 +446,7 @@ pub(crate) async fn prepare(
         source_frames,
         recipe_default_frames,
     )?;
+    warnings.append(&mut plan.warnings);
     plan.warnings = warnings;
     if !planning_only {
         // Validate one legal clip, retaining the original endpoint locator in
@@ -427,6 +490,28 @@ pub(crate) async fn prepare(
         }
         mold_core::validation::validate_generate_request_with_family(&validation, Some(&family))
             .map_err(ApiError::validation)?;
+        // Every later scene renders as its own clip, so refuse a bad one now
+        // rather than after earlier clips have spent GPU time. A carried H3
+        // clip is checked with the alignment line it will actually receive.
+        for (index, scene) in request.scenes.iter().flatten().enumerate().skip(1) {
+            let mut later = validation.clone();
+            later.source_image = None;
+            later.prompt =
+                if crate::video_job_actor::uses_continuation_instruction(&request.generation.model)
+                {
+                    mold_core::minimax_h3_instruction::with_frame_reference_instruction(
+                        &scene.prompt,
+                        true,
+                        false,
+                        envelope.maximum_frames,
+                        fps,
+                    )
+                } else {
+                    scene.prompt.clone()
+                };
+            mold_core::validation::validate_generate_request_with_family(&later, Some(&family))
+                .map_err(|error| ApiError::validation(format!("Scene {}: {error}", index + 1)))?;
+        }
         let mut validation_template = template.clone();
         validation_template.stages[0].prompt = validation.prompt;
         validation_template.stages[0].source_image = validation.source_image;
@@ -786,12 +871,12 @@ fn source_reference_descriptors(
 mod tests {
     use super::*;
     #[test]
-    fn duration_uses_recipe_default_envelope_instead_of_model_ceiling_or_requested_frames() {
+    fn h3_duration_uses_its_single_generation_ceiling_others_their_default() {
         for (model, family, expected) in [
             (
                 mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8,
                 "minimax-h3",
-                124,
+                mold_core::minimax_h3::MAX_FRAMES,
             ),
             ("ltx-video-0.9.6:bf16", "ltx-video", 25),
         ] {
@@ -819,6 +904,67 @@ mod tests {
                 expected
             );
         }
+    }
+
+    fn h3_request(duration_ms: u64, scenes: Option<&[(u64, &str)]>) -> VideoJobRequest {
+        let mut value = serde_json::json!({
+            "generation":{"model":mold_core::minimax_h3::FL2VA_FASTH3_V2_INT8,"prompt":"scene","width":1344,"height":768,"steps":8},
+            "duration_ms":duration_ms.to_string()
+        });
+        if let Some(scenes) = scenes {
+            value["scenes"] = scenes
+                .iter()
+                .map(|(ms, prompt)| serde_json::json!({"prompt":prompt,"duration_ms":ms.to_string()}))
+                .collect();
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn h3_fourteen_seconds_is_one_clip_and_longer_videos_use_full_clips() {
+        for (duration_ms, clips) in [(14_000, 1), (14_375, 1), (28_000, 2), (30_000, 3)] {
+            let (plan, _, _) =
+                plan_template(&h3_request(duration_ms, None), "minimax-h3", None, 0).unwrap();
+            assert_eq!(plan.clip_count, clips, "{duration_ms} ms");
+        }
+    }
+
+    #[test]
+    fn a_prompt_spanning_several_clips_warns_that_it_will_repeat() {
+        let (plan, _, _) = plan_template(&h3_request(40_000, None), "minimax-h3", None, 0).unwrap();
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].contains("reused for all 3 clips"),
+            "{:?}",
+            plan.warnings
+        );
+        assert!(plan.warnings[0].contains("14.3 s"), "{:?}", plan.warnings);
+
+        let scenes = [(12_000, "one"), (12_000, "two"), (10_000, "three")];
+        let (plan, _, _) =
+            plan_template(&h3_request(34_000, Some(&scenes)), "minimax-h3", None, 0).unwrap();
+        assert_eq!(plan.clip_count, 3);
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+
+        let scenes = [(10_000, "one"), (30_000, "two")];
+        let (plan, _, _) =
+            plan_template(&h3_request(40_000, Some(&scenes)), "minimax-h3", None, 0).unwrap();
+        assert_eq!(plan.warnings.len(), 1);
+        assert!(
+            plan.warnings[0].starts_with("Scene 2 is longer"),
+            "{:?}",
+            plan.warnings
+        );
+
+        let scenes = [(12_000, "one"), (2_000, "two")];
+        let (plan, _, _) =
+            plan_template(&h3_request(14_000, Some(&scenes)), "minimax-h3", None, 0).unwrap();
+        assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+        assert!(
+            plan.warnings[0].starts_with("Scene 2 is shorter than the shortest generation (4.5 s)"),
+            "{:?}",
+            plan.warnings
+        );
     }
 
     #[test]

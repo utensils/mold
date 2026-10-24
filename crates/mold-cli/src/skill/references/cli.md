@@ -311,14 +311,54 @@ approved secret store at execution time.
 ## Longer videos
 
 Choose the requested host and a video model from `mold --host HOST list --json`.
-Use one prompt and a duration in seconds; decimal seconds are accepted:
+Follow these steps in order:
 
-```bash
-mold --host HOST run MODEL "a paper boat drifts down a sunlit stream" --duration 30
-```
+1. **Find one generation's length.** Run your command with `--dry-run`. It prints
+   `one generation renders up to N s` (MiniMax H3: 14.4 s) and the clip count.
+2. **Up to that length: one prompt plus `--duration`.** Decimal seconds are fine.
+   This renders ONE clip:
 
-The CLI prints the model's single-render limit and how many clips will be joined.
-The server renders one clip at a time and publishes one MP4 in its active
+   ```bash
+   mold --host HOST run MODEL "a paper boat drifts down a sunlit stream" --duration 14 --dry-run
+   ```
+
+3. **Longer: write a scenes file and pass `--scenes`.** One `[[scene]]` per part.
+   Keep every scene at or under one generation (for H3, 14 seconds or less).
+   Each `prompt` describes only what happens during its own seconds and starts
+   where the previous scene ended. Never repeat the same action in two scenes.
+   The video length is the sum of the scenes, so omit `--duration`:
+
+   ```toml
+   # scenes.toml
+   [[scene]]
+   seconds = 12
+   prompt = """A paper boat drifts down a sunlit stream past mossy stones."""
+
+   [[scene]]
+   seconds = 12
+   prompt = """The boat tips over a small waterfall and spins in the foam below."""
+
+   [[scene]]
+   seconds = 10
+   prompt = """The boat settles in a still pond as a frog climbs aboard."""
+   ```
+
+   ```bash
+   mold --host HOST run MODEL --scenes scenes.toml --dry-run
+   ```
+
+4. **Read the dry-run warnings.** "its action will repeat" means a scene is longer
+   than one generation: split it. "shorter than the shortest generation" means the
+   scene is padded and trimmed: lengthen it or merge it into a neighbour. Then
+   run the same command without `--dry-run`.
+
+For MiniMax H3, write each scene prompt in the family's three-field grammar.
+Do not write the `For the target video, ...` alignment line yourself: mold adds
+it to every scene that continues from the previous clip's last frame.
+
+A single prompt longer than one generation still works, but each clip replays
+that prompt, so its action repeats. The CLI prints the scene timeline and the
+clip count. The server renders one clip at a time and publishes one MP4 in its active
 `MOLD_HOME` Library. It carries motion context where the selected recipe supports
 it; independent clips use distinct seeds and a blended join. Duration has no
 fixed overall clip-count limit. The selected model, resolution and available
@@ -380,8 +420,9 @@ a replacement UUID or retry against another server installation. A pending
 submission can be stopped with `mold --host HOST jobs cancel UUID --video` even
 before it appears in Queue. Machine-local adapters require the original host.
 
-Apps default to one prompt plus **Duration** and show the single-render limit
-and planned clip count. **Define scenes** is optional. Library **Extend video**
+Apps default to one prompt plus a **Length** (up to one generation); turn on
+**Longer video** (native apps) or **Define scenes** (web and desktop) to author
+scenes, and they show the single-render limit and planned clip count. Library **Extend video**
 adds a prompt and duration. Discord `/video make` follows the same duration path;
 `/video extend` takes an exact Library filename. Discord recovery commands use
 the complete `UUID@INSTANCE_UUID` receipt printed before submission.

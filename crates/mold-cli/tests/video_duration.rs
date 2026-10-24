@@ -107,6 +107,86 @@ async fn h3_long_duration_dry_run_never_submits_or_expands() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scenes_file_sets_the_length_and_sends_each_scene_prompt() {
+    let env = TestEnv::new();
+    let server = MockServer::start().await;
+    parent_plan(&server, "minimax-h3-fl2va:fasth3-v2-int8", 26000, 1).await;
+    let scenes = env.home.join("scenes.toml");
+    std::fs::write(
+        &scenes,
+        "[[scene]]\nseconds = 12\nprompt = \"\"\"\nA tracking shot through a garden\n\"\"\"\n\n[[scene]]\nseconds = 14\nprompt = \"The gardener turns around\"\n",
+    )
+    .unwrap();
+    env.cmd()
+        .args(["run", "minimax-h3-fl2va:fasth3-v2-int8", "--scenes"])
+        .arg(&scenes)
+        .args(["--dry-run", "--host", &server.uri()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Scene 2: 12.0-26.0 s (4 words)"));
+    let requests = server.received_requests().await.unwrap();
+    let validation = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/video-jobs/validate")
+        .unwrap();
+    let request: serde_json::Value = serde_json::from_slice(&validation.body).unwrap();
+    assert_eq!(request["duration_ms"], "26000");
+    assert_eq!(request["scenes"][0]["duration_ms"], "12000");
+    assert_eq!(request["scenes"][1]["prompt"], "The gardener turns around");
+    assert_eq!(
+        request["generation"]["prompt"],
+        request["scenes"][0]["prompt"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scenes_file_refuses_a_contradicting_duration_or_a_second_prompt() {
+    let env = TestEnv::new();
+    let scenes = env.home.join("scenes.toml");
+    std::fs::write(&scenes, "[[scene]]\nseconds = 6\nprompt = 'one'\n").unwrap();
+    env.cmd()
+        .args([
+            "run",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+            "--duration",
+            "9",
+            "--scenes",
+        ])
+        .arg(&scenes)
+        .args(["--dry-run", "--host", "http://127.0.0.1:9"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("the scenes add up to 6 s"));
+    env.cmd()
+        .args([
+            "run",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+            "a prompt",
+            "--scenes",
+        ])
+        .arg(&scenes)
+        .args(["--dry-run", "--host", "http://127.0.0.1:9"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass only the model"));
+    env.cmd()
+        .args([
+            "run",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+            "--prompt",
+            "a",
+            "--prompt",
+            "b",
+            "--scenes",
+        ])
+        .arg(&scenes)
+        .args(["--dry-run", "--host", "http://127.0.0.1:9"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ltx_duration_dry_run_never_submits_or_expands() {
     let env = TestEnv::new();
     let server = MockServer::start().await;

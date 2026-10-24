@@ -319,9 +319,11 @@ black borders, `lanczos-resize` stretches.
 mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
 ```
 
-For longer videos, enter one prompt and choose **Duration** in the apps. The
-length summary shows the selected model's single-render limit and clip count.
-**Define scenes** optionally gives each scene its own prompt. Library **Extend
+For video, pick a **Length** up to one generation (MiniMax H3: 14.4 s, rendered
+as one clip). For anything longer, turn on **Longer video** (native apps) or
+**Define scenes** (web and desktop) and give each scene, at most one generation
+long, its own prompt, so no action repeats. The length summary shows the
+selected model's single-render limit and clip count. Library **Extend
 video** adds another prompt and duration, publishing the original plus extension
 as a new movie. The original stays in Library.
 **Use settings** restores the original requested duration, optional scenes, seed,
@@ -331,8 +333,9 @@ that movie as a prefix again. Missing historical settings or required inputs are
 explained before generation.
 
 ```bash
-mold --host plato run MODEL "a paper boat drifts along a sunlit stream" --duration 30
-mold --host plato run "the boat passes under a bridge" --extend-library PRINT.mp4 --duration 10
+mold --host workstation run MODEL "a paper boat drifts along a sunlit stream" --duration 12
+mold --host workstation run MODEL --scenes scenes.toml   # one [[scene]] (seconds + prompt) per part
+mold --host workstation run "the boat passes under a bridge" --extend-library PRINT.mp4 --duration 10
 ```
 
 The server renders one bounded clip at a time and publishes one joined MP4 in

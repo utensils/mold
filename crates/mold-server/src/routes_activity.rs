@@ -236,6 +236,94 @@ fn retained_stage_child_activity(job_dir: &std::path::Path, parent_id: &str) -> 
     (record.parent_id == parent_id && !record.child_id.is_empty()).then_some(record.child_id)
 }
 
+/// What a durable duration parent is really doing. Its `running` state only
+/// means the video actor holds it; the current clip may still be waiting for
+/// a GPU, so the clip's own scheduler work (or, for an H3 stage, its internal
+/// generation's registry state) decides between waiting and rendering.
+#[cfg_attr(not(feature = "mp4"), allow(dead_code))]
+pub(crate) fn video_parent_progress_phase(
+    state: &AppState,
+    job: &mold_core::video_job::VideoJob,
+) -> Option<mold_core::video_job::VideoJobProgressPhase> {
+    video_parent_progress_phase_with(state, &scheduler_activity(state), job)
+}
+
+fn video_parent_progress_phase_with(
+    state: &AppState,
+    scheduler: &SchedulerActivityIndex,
+    job: &mold_core::video_job::VideoJob,
+) -> Option<mold_core::video_job::VideoJobProgressPhase> {
+    use mold_core::video_job::{VideoJobProgressPhase, VideoJobState};
+    if job.state != VideoJobState::Running {
+        return None;
+    }
+    if job.completed_clips >= job.plan.clip_count {
+        return Some(VideoJobProgressPhase::Joining);
+    }
+    let Some(child) = job.active_child_id.as_deref() else {
+        // Between two clips the movie is still in progress; only a parent
+        // that has rendered nothing yet is honestly waiting.
+        return Some(if job.completed_clips > 0 {
+            VideoJobProgressPhase::Rendering
+        } else {
+            VideoJobProgressPhase::Waiting
+        });
+    };
+    let on_gpu = |phase: &str| matches!(phase, "running" | "loading");
+    if scheduler
+        .by_parent
+        .get(child)
+        .is_some_and(|activity| on_gpu(activity.phase))
+    {
+        return Some(VideoJobProgressPhase::Rendering);
+    }
+    let child_row = state
+        .metadata_db
+        .as_ref()
+        .as_ref()
+        .and_then(|db| mold_db::chain_jobs::get_job(db, child).ok().flatten());
+    // A clip whose stage already rendered is being encoded and appended on
+    // the CPU: the movie is still moving, so it never reads as waiting.
+    let clip_rendered = child_row.as_ref().is_some_and(|row| {
+        row.state == mold_core::chain_job::ChainJobState::Completed
+            || mold_core::chain_job::ChainJobManifest::read_from_dir(&row.job_dir).is_ok_and(
+                |manifest| {
+                    !manifest.stage_status.is_empty()
+                        && manifest
+                            .stage_status
+                            .iter()
+                            .all(|stage| stage.state == mold_core::chain_job::StageState::Completed)
+                },
+            )
+    });
+    if clip_rendered {
+        return Some(if job.completed_clips + 1 >= job.plan.clip_count {
+            VideoJobProgressPhase::Joining
+        } else {
+            VideoJobProgressPhase::Rendering
+        });
+    }
+    let stage_generation = child_row
+        .as_ref()
+        .and_then(|row| retained_stage_child_activity(&row.job_dir, child));
+    let rendering = stage_generation.is_some_and(|generation| {
+        scheduler
+            .by_work
+            .get(&generation)
+            .or_else(|| scheduler.by_parent.get(&generation))
+            .is_some_and(|activity| on_gpu(activity.phase))
+            || state
+                .job_registry
+                .entry(&generation)
+                .is_some_and(|entry| entry.state == crate::job_registry::JobLifecycle::Running)
+    });
+    Some(if rendering {
+        VideoJobProgressPhase::Rendering
+    } else {
+        VideoJobProgressPhase::Waiting
+    })
+}
+
 /// Hide a stage only while its authoritative parent is present in this
 /// snapshot. Missing parent/database evidence keeps real work visible.
 fn collapse_chain_stage_activity(
@@ -492,6 +580,7 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                     unavailable_kinds.push("video_job_history".into());
                 }
                 for job in page.jobs {
+                    let progress = video_parent_progress_phase_with(&state, &scheduler, &job);
                     items.push(ActiveWorkItem {
                         id: job.id,
                         kind: "video_job".into(),
@@ -506,7 +595,13 @@ pub async fn list_active_work(State(state): State<AppState>) -> Json<ActiveWorkS
                                 "queued"
                             }
                             mold_core::video_job::VideoJobState::Running if job.can_cancel => {
-                                "running"
+                                if progress
+                                    == Some(mold_core::video_job::VideoJobProgressPhase::Waiting)
+                                {
+                                    "queued"
+                                } else {
+                                    "running"
+                                }
                             }
                             _ => "cancelling",
                         }
@@ -611,6 +706,88 @@ mod tests {
             assert_eq!(parent.phase, phase);
             assert!(!parent.can_cancel);
         }
+    }
+
+    #[test]
+    fn a_video_parent_reads_waiting_only_before_its_movie_has_moved() {
+        use mold_core::video_job::{VideoJobProgressPhase as P, VideoJobState};
+        let home = tempfile::tempdir().unwrap();
+        let mut state = AppState::for_tests();
+        state.metadata_db =
+            std::sync::Arc::new(Some(mold_db::MetadataDb::open_in_memory().unwrap()));
+        let db = state.metadata_db.as_ref().as_ref().unwrap();
+        for (id, lifecycle) in [
+            ("rendered", mold_core::chain_job::ChainJobState::Completed),
+            ("queued", mold_core::chain_job::ChainJobState::Queued),
+        ] {
+            mold_db::chain_jobs::insert_job(
+                db,
+                &mold_db::chain_jobs::ChainJobRow {
+                    id: id.into(),
+                    state: lifecycle,
+                    model: "minimax-h3-fl2va:fasth3-v2-int8".into(),
+                    request_json: "{}".into(),
+                    job_dir: home.path().join(id),
+                    stage_count: 1,
+                    current_stage: 0,
+                    error: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                    finalized_at_ms: None,
+                },
+            )
+            .unwrap();
+        }
+        let job = |state: VideoJobState, done: u64, clips: u64, child: Option<&str>| {
+            let mut job: mold_core::video_job::VideoJob =
+                serde_json::from_value(serde_json::json!({
+                    "id":"parent","state":"running","completed_clips":"0","active_child_id":null,
+                    "output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,
+                    "updated_at_ms":1,"can_cancel":true,"can_resume":false,"can_delete":false,
+                    "plan":{"validation_revision":"proof","model":"m","width":1344,"height":768,
+                        "fps":24,"single_clip_max_frames":345,"overlap_frames":1,
+                        "join_mode":"continuous","clip_count":"1","part_count":"1",
+                        "added_frames":"1","source_frames":"0","total_frames":"1",
+                        "added_duration_ms":"1","total_duration_ms":"1","warnings":[]}
+                }))
+                .unwrap();
+            job.state = state;
+            job.completed_clips = done;
+            job.plan.clip_count = clips;
+            job.active_child_id = child.map(str::to_owned);
+            job
+        };
+        let phase = |job| video_parent_progress_phase(&state, &job);
+        assert_eq!(
+            phase(job(VideoJobState::Running, 0, 3, None)),
+            Some(P::Waiting)
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 0, 3, Some("queued"))),
+            Some(P::Waiting)
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 1, 3, None)),
+            Some(P::Rendering)
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 0, 3, Some("rendered"))),
+            Some(P::Rendering),
+            "a finished clip being appended is progress, not waiting"
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 2, 3, Some("rendered"))),
+            Some(P::Joining)
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 0, 1, Some("rendered"))),
+            Some(P::Joining)
+        );
+        assert_eq!(
+            phase(job(VideoJobState::Running, 3, 3, None)),
+            Some(P::Joining)
+        );
+        assert_eq!(phase(job(VideoJobState::Paused, 1, 3, None)), None);
     }
 
     #[tokio::test]

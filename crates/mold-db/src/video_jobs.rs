@@ -401,6 +401,7 @@ mod tests {
                 can_cancel: true,
                 can_resume: false,
                 can_delete: true,
+                progress_phase: None,
             },
             request_sha256: "request".into(),
             manifest_json: "{}".into(),

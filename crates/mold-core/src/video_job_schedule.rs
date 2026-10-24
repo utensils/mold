@@ -108,6 +108,15 @@ impl VideoJobSchedule {
     pub fn part_count(&self) -> u64 {
         self.part_count
     }
+    /// How many clips each authored scene (or the single prompt) occupies, in
+    /// order. More than one means that prompt is rendered again per clip.
+    pub fn scene_clip_counts(&self) -> impl Iterator<Item = u64> + '_ {
+        self.scenes.iter().map(|scene| scene.plan.clip_count())
+    }
+    /// New frames each scene delivers, in order.
+    pub fn scene_added_frames(&self) -> impl Iterator<Item = u64> + '_ {
+        self.scenes.iter().map(|scene| scene.plan.added_frames())
+    }
     pub fn part(&self, index: u64) -> Option<VideoJobPartPlan> {
         let (scene_index, scene) = self.scenes.iter().enumerate().find(|(_, scene)| {
             index >= scene.first_part && index - scene.first_part < scene.part_count

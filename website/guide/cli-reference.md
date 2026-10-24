@@ -82,6 +82,7 @@ prompt expansion for that run.
 | `--extend-library <PRINT.mp4>`                                                               | With Duration, publish the original Library movie plus added footage as a new movie on its captured host; retain the original.                                                                                                                      |
 | `--operation-id <UUID>`                                                                      | With Duration, reconcile an existing operation using this CLI installation’s private owner receipt; never create a replacement.                                                                                                                     |
 | `--detach`                                                                                   | With Duration, return after durable acceptance; inspect the printed operation with `mold jobs show`.                                                                                                                                                |
+| `--scenes <FILE>`                                                                            | One `[[scene]]` per part with `seconds` and its own `prompt`; the video length is their sum. Keep each scene within one generation so its action never repeats.                                                                                     |
 | `--predict-duration`                                                                         | Let a qualified LTX-2.5 model choose a clip length from 1–20 seconds                                                                                                                                                                                |
 | `--clip-frames <N>`                                                                          | Per-clip cap for chained video renders                                                                                                                                                                                                              |
 | `--motion-tail <N>`                                                                          | Overlap frames reused between chained clips                                                                                                                                                                                                         |
@@ -1175,7 +1176,11 @@ mold run minimax-h3-fl2va:fasth3-v2-int8 "A continuous tracking shot through a g
 Duration requires an updated server advertising `video_jobs` support and creates
 one durable parent. Its read-only plan reports the single-generation limit,
 joined clip count and delivered length. Each child uses the selected recipe's
-normal short window; the final movie trims grid padding on its FPS clock.
+normal short window, except MiniMax H3, which renders up to 14.4 s per clip;
+the final movie trims grid padding on its FPS clock. `--scenes FILE.toml` gives
+each part its own prompt (one `[[scene]]` with `seconds` and `prompt` each; the
+length is their sum), and the plan warns when one prompt would repeat across
+clips.
 H3 FL2VA without endpoints is text-to-video and carries motion between clips.
 H3 Ref2VA, text-only Wan and legacy LTX also support Duration through independent
 blended clips; they do not gain temporal continuity. H3 keeps synchronized audio.

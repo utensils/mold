@@ -12,7 +12,6 @@ use mp4_rs::{
     TrackType,
 };
 use openh264::decoder::{Decoder, DecoderConfig, Flush};
-use openh264::formats::YUVSource;
 
 use crate::ltx_video::video_enc;
 
@@ -483,12 +482,8 @@ fn decode_video_bounded_with_checkpoint(
                 selected_source_indices,
                 &mut selected_cursor,
             )? {
-                let mut rgb = vec![0; image.rgb8_len()];
-                image.write_rgb8(&mut rgb);
-                let frame =
-                    RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
-                        anyhow!("decoded H.264 frame size did not match track dimensions")
-                    })?;
+                let frame = crate::bt601::decoded_to_rgb(&image, video.width, video.height)
+                    .context("decoded H.264 frame size did not match track dimensions")?;
                 let frame = match frame_transform.as_deref_mut() {
                     Some(transform) => transform(frame)?,
                     None => resize_export_frame(frame, max_dimension),
@@ -523,12 +518,8 @@ fn decode_video_bounded_with_checkpoint(
                 selected_source_indices,
                 &mut selected_cursor,
             )? {
-                let mut rgb = vec![0; image.rgb8_len()];
-                image.write_rgb8(&mut rgb);
-                let frame =
-                    RgbImage::from_raw(video.width, video.height, rgb).ok_or_else(|| {
-                        anyhow!("flushed H.264 frame size did not match track dimensions")
-                    })?;
+                let frame = crate::bt601::decoded_to_rgb(&image, video.width, video.height)
+                    .context("flushed H.264 frame size did not match track dimensions")?;
                 let frame = match frame_transform.as_deref_mut() {
                     Some(transform) => transform(frame)?,
                     None => resize_export_frame(frame, max_dimension),

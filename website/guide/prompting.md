@@ -77,8 +77,8 @@ The expander budget is 700 words per route. Word limits below are the corpus def
 | `wan22-ti2v-5b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md`, `models/wan22-ti2v-5b.md` | 80 | 681 |
 | `wan22-t2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/text-to-video.md` | 100 | 574 |
 | `wan22-i2v-a14b` | `wan` | `shared.md`, `families/wan.md`, `wan/image-conditioned.md` | 80 | 584 |
-| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 653 |
-| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 702 |
+| `minimax-h3-fl2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/base-modes.md` | 250 | 650 |
+| `minimax-h3-ref2va` | `minimax-h3` | `shared.md`, `families/minimax-h3.md`, `minimax-h3/ref2va.md` | 300 | 699 |
 | `real-esrgan-x4plus` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-x4plus-anime` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
 | `real-esrgan-anime-v3` | `upscaler` | `shared.md`, `families/upscaler.md` | 20 | 229 |
@@ -1563,8 +1563,8 @@ and `<Audio n>` keep one meaning across every section.
 
 #### Generation context
 
-For one model clip, match the described action to that clip’s duration; upstream
-prompting examples describe four to fifteen seconds.
+Match the action to the clip’s four-to-fifteen-second duration; a longer
+video’s scene covers only its own seconds.
 `overall_soundscape` is one to four sentences of ambience, action sounds, and
 non-verbal sounds, never repeating dialogue or music. `non_diegetic_music`
 covers instrumentation, tempo, and dynamics; `N/A` when no score is wanted.
@@ -1595,8 +1595,12 @@ availability before promising speech.
 
 #### CLI
 
-Mold’s `--duration` can join many clips into a longer movie. Single-clip timing
-guidance and `max_runtime_seconds` do not cap that movie’s total duration.
+One generation renders up to 14.4 s (345 frames), so `--duration 14` is one
+clip. For a longer movie, write one `[[scene]]` of at most 14 s per part in a
+scenes file and pass `--scenes`; the length is their sum. Mold prepends the
+upstream `For the target video, ...` alignment line to every scene that
+continues from the previous clip's last frame, so never write it in a scene
+prompt. A dry run warns when a scene would repeat or is shorter than 4.5 s.
 
 Read exactly one direct task leaf from `SKILL.md`: base modes for FL2VA
 identities, or Ref2VA for reference-conditioned identities.
@@ -1604,6 +1608,8 @@ identities, or Ref2VA for reference-conditioned identities.
 ```bash
 # Feed a written Context-IR prompt from a file
 mold run minimax-h3-fl2va:comfy-pruned-int8-turbo-4step-768p "$(cat h3-prompt.txt)" --first-frame presenter.png --duration 5 --seed 83009
+# A 34 s movie from three scenes of at most 14 s, each in the three-field grammar
+mold run minimax-h3-fl2va:fasth3-v2-int8 --scenes scenes.toml --dry-run
 # Unprompted: the attached first frame is the whole conditioning
 mold run minimax-h3-fl2va:comfy-pruned-int8 --first-frame presenter.png
 ```
@@ -1611,6 +1617,7 @@ mold run minimax-h3-fl2va:comfy-pruned-int8 --first-frame presenter.png
 #### Sources
 
 - https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/SKILL.md
+- https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/3d-animation-short-generator/references/shot-table-spec.md
 - https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/base-en.txt
 - https://github.com/MiniMax-AI/MiniMax-H3/blob/main/skills/h3-prompt-writing/references/ref-en.txt
 - https://huggingface.co/MiniMaxAI/MiniMax-H3

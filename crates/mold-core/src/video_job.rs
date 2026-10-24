@@ -240,6 +240,22 @@ pub struct VideoJob {
     pub can_cancel: bool,
     pub can_resume: bool,
     pub can_delete: bool,
+    /// What a `running` parent is actually doing right now. `running` only
+    /// means the orchestrator holds the parent; its clip may still be waiting
+    /// for a GPU. Additive: absent from older servers and non-running parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_phase: Option<VideoJobProgressPhase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoJobProgressPhase {
+    /// The current clip has not reached a GPU yet.
+    Waiting,
+    /// A clip is loading or denoising on a GPU.
+    Rendering,
+    /// Every clip is done; the movie is being joined and published.
+    Joining,
 }
 
 impl VideoJobRequest {

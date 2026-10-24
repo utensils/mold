@@ -21,6 +21,7 @@
         mold_core::video_job::VideoJobPlan,
         mold_core::video_job::VideoJoinMode,
         mold_core::video_job::VideoJobState,
+        mold_core::video_job::VideoJobProgressPhase,
         mold_core::video_job::VideoJob,
         mold_core::video_job::VideoSourceUploadRef,
         crate::video_jobs::Listing,

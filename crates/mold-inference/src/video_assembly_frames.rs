@@ -185,12 +185,9 @@ fn visit(
             image.dimensions() == (usize::from(track.width()), usize::from(track.height())),
             "decoded canvas differs from track"
         );
-        let mut rgb = vec![0; image.rgb8_len()];
-        image.write_rgb8(&mut rgb);
         consume(
             index,
-            RgbImage::from_raw(track.width().into(), track.height().into(), rgb)
-                .context("invalid decoded picture")?,
+            crate::bt601::decoded_to_rgb(&image, track.width().into(), track.height().into())?,
             checkpoint,
         )?;
         index += 1;

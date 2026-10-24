@@ -3805,11 +3805,43 @@ async fn run(
                 .await;
             }
             // Fold single --prompt into prompt_rest when there's no positional prompt.
-            let prompt_rest = if prompt.len() == 1 && prompt_rest.is_empty() {
+            let mut prompt_rest = if prompt.len() == 1 && prompt_rest.is_empty() {
                 prompt.into_iter().collect()
             } else {
                 prompt_rest
             };
+            let mut duration = duration;
+            if let Some(path) = video_job.scenes.clone() {
+                let scenes = commands::video_jobs::read_scenes(&path)?;
+                let total = scenes
+                    .iter()
+                    .try_fold(0u64, |sum, scene| sum.checked_add(scene.duration_ms))
+                    .ok_or_else(|| anyhow::anyhow!("scene lengths overflow"))?;
+                if let Some(requested) = duration {
+                    anyhow::ensure!(
+                        requested == total,
+                        "--duration is {} s but the scenes add up to {} s; drop --duration (the scenes set the length) or fix the file",
+                        requested as f64 / 1000.0,
+                        total as f64 / 1000.0
+                    );
+                }
+                let config = mold_core::Config::load_or_default();
+                anyhow::ensure!(
+                    prompt_rest.is_empty()
+                        && model_or_prompt.as_deref().is_none_or(|first| {
+                            mold_core::manifest::is_known_model(first, &config)
+                        }),
+                    "with --scenes, pass only the model; every prompt comes from the scenes file"
+                );
+                // The opening scene is the movie's headline prompt (titles,
+                // Library search, Use Settings); every scene keeps its own.
+                prompt_rest = vec![scenes[0].prompt.clone()];
+                duration = Some(total);
+                video_job.parsed_scenes = Some(scenes);
+            }
+            if (video_job.detach || video_job.operation_id.is_some()) && duration.is_none() {
+                anyhow::bail!("--detach and --operation-id apply to --duration or --scenes videos");
+            }
             commands::run::run(
                 model_or_prompt,
                 prompt_rest,

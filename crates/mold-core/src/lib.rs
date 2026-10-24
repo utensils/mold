@@ -44,6 +44,7 @@ pub mod media_paths;
 pub mod mesh_workflow;
 pub mod metal_memory;
 pub mod minimax_h3;
+pub mod minimax_h3_instruction;
 pub mod model_policy;
 pub mod model_presentation;
 pub mod organization;
@@ -172,6 +173,7 @@ pub mod job_restart;
 pub mod queue_transfer;
 pub mod video_extension;
 pub mod video_job;
+pub mod video_job_row;
 
 pub mod video_job_schedule;
 
