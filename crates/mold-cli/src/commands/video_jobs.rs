@@ -125,9 +125,47 @@ pub(crate) fn parse_duration_ms(value: &str) -> Result<u64, String> {
         .ok_or_else(invalid)
 }
 
+/// One CLI line for a duration video, in the shared row wording
+/// (`docs/contracts/video-job-rows.json`): never "1/1 clips".
+pub(crate) fn video_job_line(job: &mold_core::video_job::VideoJob) -> String {
+    let row = mold_core::video_job_row::video_job_row(
+        mold_core::video_job_row::VideoJobRowInput::from_job(job, true),
+    );
+    format!("{} · {}", row.caption, row.detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_job_lines_use_the_shared_row_wording() {
+        let job = |state: &str,
+                   done: &str,
+                   clips: &str,
+                   total_ms: &str|
+         -> mold_core::video_job::VideoJob {
+            serde_json::from_value(serde_json::json!({
+                "id":"v","state":state,"completed_clips":done,"active_child_id":null,
+                "output_filename":null,"error":null,"error_detail":null,"created_at_ms":1,
+                "updated_at_ms":1,"can_cancel":state == "running","can_resume":false,"can_delete":true,
+                "plan":{"validation_revision":"p","model":"m","width":1,"height":1,"fps":24,
+                    "single_clip_max_frames":345,"overlap_frames":1,"join_mode":"continuous",
+                    "clip_count":clips,"part_count":clips,"added_frames":"1","source_frames":"0",
+                    "total_frames":"1","added_duration_ms":total_ms,"total_duration_ms":total_ms,"warnings":[]}
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            video_job_line(&job("completed", "1", "1", "14000")),
+            "Done · 14 s video"
+        );
+        assert_eq!(
+            video_job_line(&job("running", "1", "3", "40000")),
+            "Rendering clip 2 of 3 · 40 s video · 3 clips"
+        );
+        assert!(!video_job_line(&job("paused", "0", "1", "5000")).contains("clips"));
+    }
 
     fn scenes_file(text: &str) -> tempfile::NamedTempFile {
         use std::io::Write;
@@ -446,15 +484,9 @@ pub(crate) async fn observe(
     }
     let mut shown = None;
     while !job.state.is_terminal() {
-        let progress = (job.state, job.completed_clips);
+        let progress = (job.state, job.completed_clips, job.progress_phase);
         if shown != Some(progress) {
-            status!(
-                "Video {}: {:?}, {}/{} clips",
-                job.id,
-                job.state,
-                job.completed_clips,
-                job.plan.clip_count
-            );
+            status!("Video {}: {}", job.id, video_job_line(&job));
             shown = Some(progress);
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
