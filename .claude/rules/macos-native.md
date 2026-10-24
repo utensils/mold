@@ -276,6 +276,8 @@ Known Secure credential fingerprints are retained across native mode changes and
 
 Whole-batch cancellation rechecks identity but follows current child lifecycle changes while earlier cancellations await. Queued-to-running/held transitions must not skip an otherwise cancellable sibling. Individual held-only cancellation and Pause/Resume retain their narrower state guards.
 
+The Photos-style Filter menu's model is MoldClient's `LibraryFilter`: ONE pick (All Items, Favourites, Photos/Videos/3D, In a / Not in a Collection, Made from a Source, Has Tags / Untagged, Portrait/Landscape/Square) that replaces only the pick tokens and keeps machines, families, collections, tags and text; `LibraryFamilies` lists only the families the Library holds (canonical slugs via `GalleryPrint.familySlug`, colours via `Model.familyColor(forFamily:)`) and toggles `.family` tokens, which widen each other. Family colour appears as Finder-tag-style dots in that submenu and beside the model in Info/viewer, never on grid tiles.
+
 Library machine and media toolbar menus keep their current query selection visible,
 even under the toolbar’s icon-only label style. Preserve native selection checkmarks,
 multi-token summaries, bounded long host names and full accessible/help labels.

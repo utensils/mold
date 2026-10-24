@@ -18,6 +18,15 @@ public enum LibraryToken: Hashable, Sendable, Identifiable {
     /// because a print's `collections` are its own host's ids -- filtering
     /// with another machine's id matches nothing and reads as an empty shelf.
     case collection(slug: String, name: String, ids: [MoldHost.ID: String])
+    /// A model family, by canonical slug (`GalleryPrint.familySlug`).
+    case family(slug: String, name: String)
+    /// In any collection (true) or in none (false), on any copy.
+    case filed(Bool)
+    /// Made from existing media (`OutputMetadata.usedSourceMedia`).
+    case fromSource
+    /// Carries a tag (true) or none (false).
+    case tagged(Bool)
+    case orientation(PrintOrientation)
 
     public var id: String {
         switch self {
@@ -26,6 +35,11 @@ public enum LibraryToken: Hashable, Sendable, Identifiable {
         case let .kind(kind): "kind:\(kind.rawValue)"
         case .favorite: "favorite"
         case let .collection(slug, _, _): "collection:\(slug)"
+        case let .family(slug, _): "family:\(slug)"
+        case let .filed(filed): filed ? "filed" : "unfiled"
+        case .fromSource: "from-source"
+        case let .tagged(tagged): tagged ? "tagged" : "untagged"
+        case let .orientation(orientation): "orientation:\(orientation.rawValue)"
         }
     }
 
@@ -43,6 +57,11 @@ public enum LibraryToken: Hashable, Sendable, Identifiable {
             case .mesh: "cube"
             }
         case .collection: "rectangle.stack"
+        case .family: "circle.fill"
+        case let .filed(filed): filed ? "rectangle.stack" : "rectangle.stack.badge.minus"
+        case .fromSource: "photo.badge.arrow.down"
+        case let .tagged(tagged): tagged ? "tag" : "tag.slash"
+        case let .orientation(orientation): LibraryFilter.symbol(for: orientation)
         }
     }
 
@@ -54,6 +73,11 @@ public enum LibraryToken: Hashable, Sendable, Identifiable {
         case let .kind(kind): kind.rawValue.capitalized
         case .favorite: "Favourite"
         case let .collection(_, name, _): name
+        case let .family(_, name): name
+        case let .filed(filed): filed ? "In a Collection" : "Not in a Collection"
+        case .fromSource: "Made from a Source"
+        case let .tagged(tagged): tagged ? "Has Tags" : "Untagged"
+        case let .orientation(orientation): orientation.rawValue.capitalized
         }
     }
 }

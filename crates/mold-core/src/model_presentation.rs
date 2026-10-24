@@ -67,9 +67,38 @@ pub const FAMILY_LABELS: &[(&str, &str)] = &[
     ("upscaler", "Upscaler"),
 ];
 
+/// Each family's identifying colour, as sRGB: the dot beside a family in
+/// the native Library's filter and Info, and the CLI's `mold list` column.
+/// Keyed by canonical slug; one colour per LABEL (`sd3` and `sd3.5` are one
+/// family to a person). Spread by hue and lightness so neighbours in a menu
+/// never read as the same family, and mid-luminance so a dot holds on both
+/// a light and a dark background. The generated client tables carry it.
+pub const FAMILY_COLORS: &[(&str, [u8; 3])] = &[
+    ("flux", [0xC2, 0x4C, 0xF6]),            // orchid
+    ("flux2", [0x7C, 0x5C, 0xFA]),           // violet
+    ("sd15", [0xA3, 0xC6, 0x39]),            // olive lime
+    ("sd3", [0x5B, 0xD4, 0x7A]),             // green
+    ("sd3.5", [0x5B, 0xD4, 0x7A]),           // green
+    ("sdxl", [0xE5, 0xB0, 0x21]),            // gold
+    ("z-image", [0x14, 0xC8, 0xC8]),         // cyan
+    ("qwen-image", [0x4C, 0x8D, 0xFF]),      // blue
+    ("qwen-image-edit", [0x8D, 0xB4, 0xFF]), // light blue
+    ("qwen-image21", [0x2E, 0x5F, 0xD0]),    // deep blue
+    ("wuerstchen", [0xC9, 0x8A, 0x55]),      // sand
+    ("ltx-video", [0xEE, 0x5A, 0x5A]),       // red
+    ("ltx2", [0xFF, 0x8C, 0x50]),            // orange
+    ("wan", [0x2E, 0x9E, 0x7A]),             // teal
+    ("minimax-h3", [0x38, 0xB6, 0xFF]),      // sky
+    ("hunyuan3d", [0x9C, 0x6B, 0x4A]),       // bronze
+    ("controlnet", [0xE4, 0x6F, 0xA0]),      // rose
+    ("qwen3-expand", [0x9A, 0xA3, 0xAE]),    // slate
+    ("upscaler", [0xA7, 0x8B, 0xFA]),        // lavender
+];
+
 /// Older spellings that still reach this function from configs and wire
-/// payloads, mapped onto their canonical slug.
-const FAMILY_ALIASES: &[(&str, &str)] = &[
+/// payloads, mapped onto their canonical slug. Public so the generated
+/// client tables canonicalize old prints exactly as the server does.
+pub const FAMILY_ALIASES: &[(&str, &str)] = &[
     ("qwen_image", "qwen-image"),
     ("wuerstchen-v2", "wuerstchen"),
     ("ltx_video", "ltx-video"),
@@ -81,14 +110,28 @@ const FAMILY_ALIASES: &[(&str, &str)] = &[
 /// contexts. `None` for a family this build does not know, so callers keep
 /// their own fallback (the slug) rather than inventing a name.
 pub fn family_label(family: &str) -> Option<&'static str> {
-    let canonical = FAMILY_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == family)
-        .map_or(family, |(_, slug)| *slug);
+    let canonical = canonical_family(family);
     FAMILY_LABELS
         .iter()
         .find(|(slug, _)| *slug == canonical)
         .map(|(_, label)| *label)
+}
+
+/// The canonical slug for a family spelling; an unknown family is itself.
+pub fn canonical_family(family: &str) -> &str {
+    FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == family)
+        .map_or(family, |(_, slug)| *slug)
+}
+
+/// A family's identifying colour (`FAMILY_COLORS`), through its aliases.
+pub fn family_color(family: &str) -> Option<[u8; 3]> {
+    let canonical = canonical_family(family);
+    FAMILY_COLORS
+        .iter()
+        .find(|(slug, _)| *slug == canonical)
+        .map(|(_, rgb)| *rgb)
 }
 
 /// The presentation of one curated checkpoint.
@@ -463,6 +506,37 @@ mod tests {
                 manifest.family
             );
         }
+    }
+
+    #[test]
+    fn every_labelled_family_has_its_own_colour() {
+        let mut by_colour: HashMap<[u8; 3], &str> = HashMap::new();
+        for (slug, label) in FAMILY_LABELS {
+            let colour = family_color(slug).unwrap_or_else(|| panic!("{slug} has no colour"));
+            // Two slugs that share a label (sd3 / sd3.5) are one family to a
+            // person, so they share a colour; any two labels never do.
+            if let Some(other) = by_colour.insert(colour, label) {
+                assert_eq!(other, *label, "{label} and {other} share {colour:?}");
+            }
+        }
+        for (slug, _) in FAMILY_COLORS {
+            assert!(
+                family_label(slug).is_some(),
+                "{slug} is coloured but never named"
+            );
+        }
+        for (alias, slug) in FAMILY_ALIASES {
+            assert_eq!(family_color(alias), family_color(slug), "{alias}");
+        }
+        assert_eq!(family_color("companion"), None);
+    }
+
+    #[test]
+    fn aliases_resolve_to_their_canonical_slug() {
+        assert_eq!(canonical_family("ltx_video"), "ltx-video");
+        assert_eq!(canonical_family("minimaxh3"), "minimax-h3");
+        assert_eq!(canonical_family("flux"), "flux");
+        assert_eq!(canonical_family("not-a-family"), "not-a-family");
     }
 
     #[test]
