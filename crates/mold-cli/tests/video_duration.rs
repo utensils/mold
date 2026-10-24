@@ -171,6 +171,21 @@ async fn scenes_file_refuses_a_contradicting_duration_or_a_second_prompt() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("pass only the model"));
+    env.cmd()
+        .args([
+            "run",
+            "minimax-h3-fl2va:fasth3-v2-int8",
+            "--prompt",
+            "a",
+            "--prompt",
+            "b",
+            "--scenes",
+        ])
+        .arg(&scenes)
+        .args(["--dry-run", "--host", "http://127.0.0.1:9"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

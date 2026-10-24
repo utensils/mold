@@ -118,7 +118,7 @@ pub fn video_job_row(input: VideoJobRowInput) -> VideoJobRow {
 /// `14000` → `14 s`, `14375` → `14.4 s` (one decimal, trailing zero dropped).
 fn seconds(milliseconds: u64) -> String {
     let tenths = (milliseconds + 50) / 100;
-    if tenths % 10 == 0 {
+    if tenths.is_multiple_of(10) {
         format!("{} s", tenths / 10)
     } else {
         format!("{}.{} s", tenths / 10, tenths % 10)

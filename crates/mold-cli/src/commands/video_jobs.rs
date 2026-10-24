@@ -21,7 +21,7 @@ pub(crate) struct VideoJobFlags {
     pub detach: bool,
     /// Scenes file for a longer video: one `[[scene]]` per part, each with
     /// `seconds` and its own `prompt`. The video length is their sum.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["local", "script", "expand", "extend_library"], help_heading = "Video")]
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["local", "script", "expand", "extend_library", "prompt"], help_heading = "Video")]
     pub scenes: Option<std::path::PathBuf>,
     #[arg(skip)]
     pub parsed_scenes: Option<Vec<mold_core::video_job::VideoJobScene>>,
