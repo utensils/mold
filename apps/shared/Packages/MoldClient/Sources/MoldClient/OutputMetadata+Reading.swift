@@ -27,6 +27,17 @@ public extension OutputMetadata {
             || !identityDigests.isEmpty
     }
 
+    /// Whether the print was made FROM existing media: a source picture or
+    /// video, an edit or typed reference, a keyframe, an identity photo, a
+    /// control image or an audio track. Any recorded input is evidence; the
+    /// Library's "Made from a Source" filter reads this.
+    var usedSourceMedia: Bool {
+        sourceImageName != nil || sourceImageSha256 != nil || !editImageDigests.isEmpty
+            || !(references ?? generationReferences ?? []).isEmpty || !(keyframes ?? []).isEmpty
+            || carriedAFace || controlModel != nil || sourceVideoPath != nil
+            || extendVideoPath != nil || audioFilePath != nil
+    }
+
     /// Whether the print was stitched from several clips, however it was
     /// authored. `chain_job_id` is present only for a DURABLE sequence, so it
     /// cannot answer this for an auto-chained one-shot.

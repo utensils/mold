@@ -80,11 +80,21 @@ public struct LibraryQuery: Hashable, Sendable {
         var machines: [LibraryToken] = []
         var kinds: [LibraryToken] = []
         var collections: [LibraryToken] = []
+        var families: [LibraryToken] = []
+        var orientations: [LibraryToken] = []
         for token in tokens {
             switch token {
             case .machine: machines.append(token)
             case .kind: kinds.append(token)
             case .collection: collections.append(token)
+            case .family: families.append(token)
+            case .orientation: orientations.append(token)
+            case let .filed(filed):
+                guard entry.everyCopy.contains(where: { !$0.print.collectionList.isEmpty }) == filed else { return false }
+            case .fromSource:
+                guard entry.everyCopy.contains(where: \.print.metadata.usedSourceMedia) else { return false }
+            case let .tagged(tagged):
+                guard entry.everyCopy.contains(where: { !$0.print.tagList.isEmpty }) == tagged else { return false }
             case let .tag(name):
                 guard entry.everyCopy.contains(where: { copy in
                     copy.print.tagList.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
@@ -93,7 +103,7 @@ public struct LibraryQuery: Hashable, Sendable {
                 guard entry.everyCopy.contains(where: \.print.isFavorite) else { return false }
             }
         }
-        for group in [machines, kinds, collections] where !group.isEmpty {
+        for group in [machines, kinds, collections, families, orientations] where !group.isEmpty {
             guard group.contains(where: { matches($0, entry) }) else { return false }
         }
         return true
@@ -110,7 +120,11 @@ public struct LibraryQuery: Hashable, Sendable {
             entry.everyCopy.contains { copy in
                 ids[copy.hostID].map { copy.print.collectionList.contains($0) } ?? false
             }
-        case .tag, .favorite:
+        case let .family(slug, _):
+            entry.everyCopy.contains { $0.print.familySlug == slug }
+        case let .orientation(orientation):
+            entry.print.orientation == orientation
+        case .tag, .favorite, .filed, .fromSource, .tagged:
             true
         }
     }

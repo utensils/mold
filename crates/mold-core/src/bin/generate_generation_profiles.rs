@@ -176,6 +176,17 @@ public enum ModelPresentationTable {\n",
     for (slug, label) in family_rows().iter().copied() {
         let _ = writeln!(out, "        {}: {},", quoted(slug), quoted(label));
     }
+    out.push_str("    ]\n\n    public static let familyAliases: [String: String] = [\n");
+    for (alias, slug) in mold_core::model_presentation::FAMILY_ALIASES
+        .iter()
+        .copied()
+    {
+        let _ = writeln!(out, "        {}: {},", quoted(alias), quoted(slug));
+    }
+    out.push_str("    ]\n\n    /// sRGB `0xRRGGBB` per canonical family slug.\n    public static let familyColors: [String: UInt32] = [\n");
+    for (slug, [r, g, b]) in mold_core::model_presentation::FAMILY_COLORS.iter().copied() {
+        let _ = writeln!(out, "        {}: 0x{r:02X}{g:02X}{b:02X},", quoted(slug));
+    }
     out.push_str("    ]\n}\n");
     out
 }

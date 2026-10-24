@@ -14,27 +14,14 @@ pub(crate) fn family_label(family: &str) -> &str {
     mold_core::model_presentation::family_label(family).unwrap_or(family)
 }
 
+/// A family's label in its identifying colour. The colours are the shared
+/// `mold_core::model_presentation::FAMILY_COLORS`, so the CLI and the native
+/// Library's family dots always agree; an unknown family stays uncoloured.
 pub(crate) fn format_family_padded(family: &str, width: usize) -> String {
     let padded = format!("{:<width$}", family_label(family), width = width);
-    match family {
-        "flux" => padded.bright_magenta().to_string(),
-        "flux2" => padded.magenta().to_string(),
-        "sd15" => padded.green().to_string(),
-        "sd3" | "sd3.5" => padded.bright_green().to_string(),
-        "sdxl" => padded.yellow().to_string(),
-        "z-image" => padded.cyan().to_string(),
-        "qwen-image" | "qwen_image" | "qwen-image-edit" | "qwen-image21" => {
-            padded.bright_blue().to_string()
-        }
-        "wuerstchen" | "wuerstchen-v2" => padded.bright_yellow().to_string(),
-        "ltx-video" | "ltx_video" => padded.red().to_string(),
-        "ltx2" => padded.truecolor(255, 140, 80).to_string(),
-        "wan" => padded.truecolor(120, 200, 120).to_string(),
-        "minimax-h3" | "minimax_h3" | "minimaxh3" => padded.truecolor(80, 190, 255).to_string(),
-        "controlnet" => padded.bright_red().to_string(),
-        "qwen3-expand" => padded.bright_cyan().to_string(),
-        "upscaler" => padded.bright_purple().to_string(),
-        _ => padded,
+    match mold_core::model_presentation::family_color(family) {
+        Some([r, g, b]) => padded.truecolor(r, g, b).to_string(),
+        None => padded,
     }
 }
 

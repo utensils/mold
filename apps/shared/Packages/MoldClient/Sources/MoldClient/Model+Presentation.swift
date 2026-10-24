@@ -70,7 +70,19 @@ public extension Model {
     /// A bare family slug's label, for a section keyed by `family`. A family
     /// the authority has never heard of shows its own slug.
     static func familyLabel(forFamily family: String) -> String {
-        ModelPresentationTable.familyLabels[family] ?? family
+        ModelPresentationTable.familyLabels[canonicalFamily(family)] ?? family
+    }
+
+    /// The canonical slug for a family spelling (`ltx_video` -> `ltx-video`),
+    /// through the generated alias table; an unknown family is itself.
+    static func canonicalFamily(_ family: String) -> String {
+        ModelPresentationTable.familyAliases[family] ?? family
+    }
+
+    /// A family's identifying colour, through its aliases. nil for a family
+    /// the authority does not colour.
+    static func familyColor(forFamily family: String) -> FamilyColor? {
+        ModelPresentationTable.familyColors[canonicalFamily(family)].map(FamilyColor.init(rgb:))
     }
 
     /// The order family sections appear in: by the label their header shows,

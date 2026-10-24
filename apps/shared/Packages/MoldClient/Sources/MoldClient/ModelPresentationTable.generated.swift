@@ -254,4 +254,35 @@ public enum ModelPresentationTable {
         "qwen3-expand": "Prompt expansion",
         "upscaler": "Upscaler",
     ]
+
+    public static let familyAliases: [String: String] = [
+        "qwen_image": "qwen-image",
+        "wuerstchen-v2": "wuerstchen",
+        "ltx_video": "ltx-video",
+        "minimax_h3": "minimax-h3",
+        "minimaxh3": "minimax-h3",
+    ]
+
+    /// sRGB `0xRRGGBB` per canonical family slug.
+    public static let familyColors: [String: UInt32] = [
+        "flux": 0xC24CF6,
+        "flux2": 0x7C5CFA,
+        "sd15": 0xA3C639,
+        "sd3": 0x5BD47A,
+        "sd3.5": 0x5BD47A,
+        "sdxl": 0xE5B021,
+        "z-image": 0x14C8C8,
+        "qwen-image": 0x4C8DFF,
+        "qwen-image-edit": 0x8DB4FF,
+        "qwen-image21": 0x2E5FD0,
+        "wuerstchen": 0xC98A55,
+        "ltx-video": 0xEE5A5A,
+        "ltx2": 0xFF8C50,
+        "wan": 0x2E9E7A,
+        "minimax-h3": 0x38B6FF,
+        "hunyuan3d": 0x9C6B4A,
+        "controlnet": 0xE46FA0,
+        "qwen3-expand": 0x9AA3AE,
+        "upscaler": 0xA78BFA,
+    ]
 }
