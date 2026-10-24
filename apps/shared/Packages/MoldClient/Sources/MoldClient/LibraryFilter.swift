@@ -97,6 +97,32 @@ public enum LibraryFilter: String, CaseIterable, Identifiable, Sendable {
         return next
     }
 
+    /// The Filter button's visible title: the pick, then the families, so
+    /// the state reads without opening the menu.
+    public static func summary(for query: LibraryQuery) -> String {
+        let pick = selected(in: query)
+        let families = query.tokens.compactMap { if case let .family(_, name) = $0 { name } else { nil } }
+        var parts: [String] = []
+        if pick != .all { parts.append(pick?.title ?? String(localized: "Multiple Filters")) }
+        if families.count == 1 { parts.append(families[0]) }
+        if families.count > 1 { parts.append(String(localized: "\(families.count) Families")) }
+        return parts.isEmpty ? Self.all.title : parts.joined(separator: " · ")
+    }
+
+    /// Whether the menu narrows anything (a pick or a family).
+    public static func isActive(_ query: LibraryQuery) -> Bool {
+        query.tokens.contains { token in
+            if case .family = token { return true }
+            return isPick(token)
+        }
+    }
+
+    /// Clear Filters: drops the pick and the families, keeping machines,
+    /// collections, tags and text, which have their own controls.
+    public static func clearing(_ query: LibraryQuery) -> LibraryQuery {
+        LibraryFamilies.clearing(all.applying(to: query))
+    }
+
     static func isPick(_ token: LibraryToken) -> Bool {
         switch token {
         case .favorite, .kind, .filed, .fromSource, .tagged, .orientation: true

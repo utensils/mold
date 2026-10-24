@@ -7,11 +7,15 @@ public struct PrintDetailRow: Equatable, Sendable {
     /// Prose rather than a figure. A prompt is a paragraph and wraps; a seed
     /// is a number and sits on the baseline beside its label.
     public let isProse: Bool
+    /// A colour drawn as a dot beside the value (a model family's), sRGB
+    /// `0xRRGGBB`. nil for every other row.
+    public let swatch: UInt32?
 
-    public init(_ label: String, _ value: String, isProse: Bool = false) {
+    public init(_ label: String, _ value: String, isProse: Bool = false, swatch: UInt32? = nil) {
         self.label = label
         self.value = value
         self.isProse = isProse
+        self.swatch = swatch
     }
 
     /// What its contextual menu calls copying it, the way the Finder names

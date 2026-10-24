@@ -1,4 +1,5 @@
 import MoldClient
+import MoldStyle
 import SwiftUI
 
 /// Everything one print recorded about itself.
@@ -57,6 +58,13 @@ struct InspectorDetails: View {
     }
 
     private func value(_ row: PrintDetailRow) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            if let swatch = row.swatch { FamilySwatch(rgb: swatch).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 } }
+            text(row)
+        }
+    }
+
+    private func text(_ row: PrintDetailRow) -> some View {
         Text(row.value)
             .textSelection(.enabled)
             .monospacedDigit()

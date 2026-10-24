@@ -15,7 +15,10 @@ extension LibraryPane {
             LibraryMachineFilter(query: navigation.query, hosts: hosts.hosts, choose: { chooseMachine($0) })
         }
         ToolbarItem {
-            LibraryMediaTypeFilter(query: $navigation.query, didChange: { clearSelection() })
+            LibraryFilterMenu(query: $navigation.query,
+                              families: library.familyCache.facets(in: pool, revision: library.countEpoch.rows,
+                                                                  partition: navigation.scope.isTrash ? .trash : .all),
+                              didChange: { clearSelection() })
         }
         ToolbarItem {
             Menu {

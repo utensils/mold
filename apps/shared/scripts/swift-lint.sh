@@ -23,8 +23,11 @@ done
 
 case "$check" in
 color)
-  if grep -rnE 'Color\((red|hue|white):|Color\(hex|UIColor\((red|white|hue):|NSColor\((red|white|calibratedRed|srgbRed):' \
-    "$@" --include='*.swift'; then
+  # FamilySwatch.swift is the one exception: it turns the GENERATED family
+  # colour table (mold_core::model_presentation::FAMILY_COLORS) into colours,
+  # so the palette is still owned by one authority, just not by the system.
+  if grep -rnE 'Color\((red|hue|white):|Color\(hex|UIColor\((red|white|hue):|NSColor\((red|white|calibratedRed|srgbRed):|Color\(\.sRGB' \
+    "$@" --include='*.swift' | grep -v '/MoldStyle/Sources/MoldStyle/FamilySwatch.swift:'; then
     echo "COLOR VIOLATION: use a semantic color, a material, or an asset-catalog color"
     exit 1
   fi
