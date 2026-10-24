@@ -9,6 +9,7 @@ import SwiftUI
 /// Mail use for the same thing. Filing is a drag onto a row.
 struct Sidebar: View {
     @Environment(QueueStore.self) private var queue
+    @Environment(GenerateController.self) private var generate
     @Environment(HostStore.self) private var hosts
     @Environment(LibraryStore.self) private var library
     @Environment(LibraryNavigation.self) private var navigation
@@ -29,12 +30,18 @@ struct Sidebar: View {
         pendingDestruction = destruction
     }
 
+    /// Live video parents count beside ordinary rows: their clips never
+    /// appear as rows of their own (`NativeVideoQueue.liveSymbols`).
+    private var queueBadge: Int {
+        queue.badge + NativeVideoQueue.liveSymbols(videos: generate.videoJobs, sequence: generate.sequence).count
+    }
+
     var body: some View {
         List(selection: selection) {
             Section {
                 ForEach(SidebarRows.destinations) { item in
                     Label(item.title, systemImage: item.symbol)
-                        .badge(item == .queue ? queue.badge : 0)
+                        .badge(item == .queue ? queueBadge : 0)
                         // List reads the outer row's tag. The badge otherwise
                         // exposes ForEach's Destination ID, not SidebarRow.
                         .tag(SidebarRow.destination(item))

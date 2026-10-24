@@ -22,3 +22,42 @@ export interface VideoDurationSummary {
   single_clip_max_frames: number;
   clip_count: string;
 }
+function validRate(plan: { fps: number; single_clip_max_frames: number }) {
+  return (
+    Number.isFinite(plan.fps) &&
+    plan.fps > 0 &&
+    Number.isSafeInteger(plan.single_clip_max_frames) &&
+    plan.single_clip_max_frames >= 1
+  );
+}
+/** The longest video the model makes in one generation, in exact seconds
+ * (`345` frames at 24 fps → `14.375`). */
+export function singleGenerationSeconds(plan: {
+  fps: number;
+  single_clip_max_frames: number;
+}): string | null {
+  if (!validRate(plan)) return null;
+  return (
+    formatRequestedVideoDuration(
+      String(Math.floor((plan.single_clip_max_frames * 1000) / plan.fps)),
+    ) || null
+  );
+}
+/** The longest scene that always stays one clip: one generation less the
+ * frames a following clip overlaps, floored to a tenth of a second so a scene
+ * of exactly this length never spills into a second clip. */
+export function oneClipSceneSeconds(plan: {
+  fps: number;
+  single_clip_max_frames: number;
+  overlap_frames?: number;
+}): string | null {
+  if (!validRate(plan) || !Number.isSafeInteger(plan.overlap_frames))
+    return null;
+  const tenths = Math.floor(
+    ((plan.single_clip_max_frames - plan.overlap_frames!) * 10) / plan.fps,
+  );
+  if (tenths <= 0) return null;
+  return tenths % 10 === 0
+    ? String(tenths / 10)
+    : `${Math.floor(tenths / 10)}.${tenths % 10}`;
+}

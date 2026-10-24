@@ -44,6 +44,15 @@ errors with an interpretation or expose secret field contents.
   during this source audit. Tooltips alone do not require behavioral tests;
   final app compilation and live hover checks validate their integration.
 
+**2026-10-23 update.** The seed control is the shared `NativeSeedControl`
+(`Random | Fixed`, an editable number and a dice New seed button) on both
+native apps; its words come from MoldClient's `SeedChoice`. Length is the
+shared `NativeLengthControl` slider with Automatic from prompt and Longer
+video. Video parents and authored sequences are ordinary Queue rows
+(`Queue/VideoQueueRow.swift`) with icon-only Stop / Resume / Open in Library /
+Dismiss buttons; the old Check queue text button is gone. Line numbers for
+these entries are omitted (`—`); they were not re-hovered live in this change.
+
 ## Live hover record
 
 The rebuilt Debug app was exercised in an isolated preferences domain on
@@ -108,7 +117,9 @@ surrounding implementation is the authority for the complete text.
 | `Generate/ModelPicker.swift`               |   30 | `.help("Choose the model that will create your result")`                                                                                                                                                  |
 | `Generate/NumberControls.swift`            |   43 | `.help("Choose how many refinement steps to run. More steps take longer and may change the result.")`                                                                                                     |
 | `Generate/NumberControls.swift`            |   57 | `.help("Choose how strongly the result follows your prompt. Higher is not always better.")`                                                                                                               |
-| `Generate/NumberControls.swift`            |   87 | `.help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.value) frames per second.")`                                                      |
+| `../shared/NativeSequence/NativeLengthControl.swift` | — | `.help("Let the model choose the clip length from your prompt.")` |
+| `../shared/NativeSequence/NativeLengthControl.swift` | — | `.help("Write the video as scenes, each up to \(…) seconds with its own prompt.")` |
+| `../shared/NativeSequence/NativeLengthControl.swift` | — | `.help("Choose the length. It uses \(frames) frames at \(grid.fps) frames per second.")` |
 | `Generate/NumberControls.swift`            |  112 | `.help("Choose how many different results to make with one click")`                                                                                                                                       |
 | `Generate/OptionalNumberRow.swift`         |   28 | `.help("Override \(title.lowercased()). Leave the field empty to use the model’s normal setting.")`                                                                                                       |
 | `Generate/OutputGroup.swift`               |   19 | `.help("Keep new results in the Library. When off, they go to Recently Deleted.")`                                                                                                                        |
@@ -142,9 +153,9 @@ surrounding implementation is the authority for the complete text.
 | `Generate/SamplerGroup+Guidance.swift`     |   54 | `.help("Choose which model layers the guidance changes, using a comma-separated list. Leave empty to use the model’s normal choice.")`                                                                    |
 | `Generate/SamplerGroup.swift`              |   44 | `.help("Choose the method used to refine the image; Default uses the model’s normal choice")`                                                                                                             |
 | `Generate/SamplerGroup.swift`              |   59 | `.help("Try a different way of following the prompt, without changing the number of steps.")`                                                                                                             |
-| `Generate/SeedControl.swift`               |   40 | `.help("Random each time makes a new variation. Keep this seed reuses the starting number to help repeat a result with the same model and settings. In a batch, each result uses the next seed number.")` |
-| `Generate/SeedControl.swift`               |   49 | `.help("The starting seed for the next render. A batch uses this number, then adds one for each additional result.")`                                                                                     |
-| `Generate/SeedControl.swift`               |   56 | `.help("Choose a different random seed and keep it for future renders. This does not start a render.")`                                                                                                   |
+| `../shared/NativeSequence/NativeSeedControl.swift` | — | `.help(SeedChoice.help)` — "Random picks a new seed each render. Fixed repeats a result with the same model and settings. In a batch, each result uses the next seed number." |
+| `../shared/NativeSequence/NativeSeedControl.swift` | — | `.help("The starting seed for the next render. A batch uses this number, then adds one for each additional result.")` |
+| `../shared/NativeSequence/NativeSeedControl.swift` | — | `.help(SeedChoice.newSeedHelp)` — "Choose a different random seed and keep it for future renders. This does not start a render." |
 | `Generate/ShapeControl.swift`              |   54 | `.help("Choose a square, portrait or landscape shape")`                                                                                                                                                   |
 | `Generate/ShapeControl.swift`              |   76 | `.help("Choose the image dimensions in pixels; larger images take more memory and time")`                                                                                                                 |
 | `Generate/SourceFitRow.swift`              |   24 | `.help("Choose how the source picture fits the new canvas: crop it, add space around it, or stretch it")`                                                                                                 |
@@ -203,6 +214,11 @@ surrounding implementation is the authority for the complete text.
 | `Queue/QueueDetailSheet+Layout.swift`      |   93 | `Button("Resume") { act(.resume, current) }.help("Resume this paused job")`                                                                                                                               |
 | `Queue/QueueDetailSheet+Layout.swift`      |   97 | `.help("Cancel this job on its machine")`                                                                                                                                                                 |
 | `Queue/QueueDetailSheet+Layout.swift`      |  102 | `.help("Close job details; the job keeps its current state")`                                                                                                                                             |
+| `Queue/VideoQueueRow.swift` | — | `.help("Resume this video from its last finished clip")` |
+| `Queue/VideoQueueRow.swift` | — | `.help("Show the finished video in the Library")` |
+| `Queue/VideoQueueRow.swift` | — | `.help("Dismiss this finished video from the Queue on this Mac")` |
+| `Queue/VideoQueueRow.swift` | — | `.help("Stop this video. Finished clips are kept so it can resume.")` |
+| `Queue/VideoQueueRow.swift` | — | `.help("Show this video’s progress, settings and available actions")` |
 | `Queue/QueueDetailSheet.swift`             |   69 | `.help("Try loading the full settings for this job again")`                                                                                                                                               |
 | `Queue/QueueHoldRow.swift`                 |   50 | `.help("Cancel this job")`                                                                                                                                                                                |
 | `Queue/QueueHoldRow.swift`                 |   60 | `.help("Show this job’s details and why it is waiting")`                                                                                                                                                  |

@@ -44,9 +44,14 @@ export type VideoJobState =
   | "failed"
   | "interrupted"
   | "cancelled";
+/** What a running parent is really doing. Absent on an older server (read it
+ * as rendering); a value this build does not know also reads as rendering. */
+export type VideoJobProgressPhase = "waiting" | "rendering" | "joining";
 export interface VideoJob {
   id: string;
   state: VideoJobState;
+  /** Present only while `state == running`. */
+  progress_phase?: VideoJobProgressPhase | (string & {}) | null;
   plan: VideoJobPlan;
   completed_clips: string;
   active_child_id?: string | null;

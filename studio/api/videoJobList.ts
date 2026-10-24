@@ -3,6 +3,7 @@ import {
   assertVideoJobOwner,
   checkedVideoJobPlan,
   type VideoJobOwner,
+  withCheckedProgressPhase,
 } from "./videoJobs";
 import type { VideoJob } from "../lib/api/videoJobTypes";
 export interface VideoJobPage {
@@ -64,5 +65,5 @@ export async function listVideoJobs(
     )
       throw new Error("This machine returned an unsupported video job state.");
   }
-  return value;
+  return { ...value, jobs: value.jobs.map(withCheckedProgressPhase) };
 }

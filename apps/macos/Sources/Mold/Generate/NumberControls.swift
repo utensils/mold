@@ -58,57 +58,6 @@ struct GuidanceControl: View {
     }
 }
 
-/// Clip length in seconds, because nobody thinks in frames.
-///
-/// The slider moves in frames so it can only ever land on the grid the family
-/// accepts, but the readout is the duration that means something to a person.
-struct LengthControl: View {
-    let temporal: TemporalProfile
-    /// What admission will really accept at this rate, and the tier's own
-    /// single-clip ceiling -- NOT the advertised `frames.max`, which for
-    /// LTX-2 is the figure at 120 fps and for wan is a resource guard
-    /// (`ClipLengthBounds`, findings 01#3 and 02#3).
-    let bounds: ClipLengthBounds
-    @Binding var draft: RenderDraft
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if draft.supportsDurationPrediction {
-                Toggle("Automatic from prompt", isOn: $draft.prefersAutomaticDuration)
-                    .toggleStyle(.checkbox)
-                    .help("Let the model choose the clip length from your prompt.")
-            }
-        SliderControl(
-            name: "Length",
-            value: Binding(
-                get: { Double(draft.frames ?? temporal.frames.default) },
-                set: { draft.prefersAutomaticDuration = false; draft.frames = min(temporal.snap(Int($0.rounded())), bounds.max) }
-            ),
-            range: Double(bounds.min)...Double(max(bounds.max, bounds.min + 1)),
-            step: Double(max(temporal.frames.step, 1))
-        ) {
-            Text(seconds)
-        }
-        .disabled(draft.usesAutomaticDuration)
-        .onChange(of: draft.fps) {
-            draft.fps = temporal.fps.resolvedRate(draft.fps)
-            draft.frames = min(max(temporal.snap(draft.frames ?? temporal.frames.default), bounds.min), bounds.max)
-        }
-        .onChange(of: bounds) {
-            draft.frames = min(max(temporal.snap(draft.frames ?? temporal.frames.default), bounds.min), bounds.max)
-        }
-        .accessibilityValue(seconds)
-        .help("Choose the clip’s length. It currently uses \(draft.frames ?? temporal.frames.default) frames at \(temporal.fps.resolvedRate(draft.fps)) frames per second.")
-        }
-    }
-
-    private var seconds: String {
-        if draft.usesAutomaticDuration { return "Auto" }
-        let duration = Double(draft.frames ?? temporal.frames.default) / Double(temporal.fps.resolvedRate(draft.fps))
-        return duration.formatted(.number.precision(.fractionLength(1))) + "s"
-    }
-}
-
 /// How many pictures one press makes.
 struct BatchControl: View {
     let maximum: Int

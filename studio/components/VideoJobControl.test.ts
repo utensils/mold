@@ -79,9 +79,10 @@ it("makes an unanswered saved attempt reachable and persists lost Stop intent", 
   api.get.mockRejectedValue(
     new ApiError("cancelled", 410, { code: "VIDEO_OPERATION_CANCELLED" }),
   );
-  Array.from(document.body.querySelectorAll("button"))
-    .find((button) => button.textContent?.trim() === "Check queue")!
-    .click();
+  // No "Check queue" button: the open details keep reading the job live,
+  // even after a failed Stop.
+  expect(document.body.textContent).not.toContain("Check queue");
+  await new Promise((resolve) => setTimeout(resolve, 2100));
   await flushPromises();
   expect(readVideoJobOperations()).toEqual([]);
   expect(document.body.textContent).toContain("Cancelled before queueing");
@@ -241,4 +242,92 @@ it("preserves completed recovery data when the Library connection is unavailable
     "no longer in this machine's Library",
   );
   expect(document.body.textContent).toContain("Delete recovery data");
+});
+it.each([
+  [
+    {
+      state: "running",
+      progress_phase: "rendering",
+      completed_clips: "1",
+      can_cancel: true,
+      plan: { model: "m", clip_count: "3", total_duration_ms: "40000" },
+    },
+    "Rendering clip 2 of 3",
+    "40 s video · 3 clips",
+  ],
+  [
+    {
+      state: "paused",
+      completed_clips: "0",
+      plan: { model: "m", clip_count: "1", total_duration_ms: "14375" },
+    },
+    "Paused",
+    "14.4 s video",
+  ],
+])(
+  "words details with the shared video row contract",
+  async (job, caption, detail) => {
+    api.get.mockResolvedValue({ id: "known", ...job });
+    const wrapper = mount(VideoJobControl, {
+      props: { owner, jobId: "known", isCurrent: () => true, autoOpen: true },
+      attachTo: document.body,
+    });
+    wrappers.push(wrapper);
+    await flushPromises();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain(caption);
+    expect(text).toContain(detail);
+    expect(text).not.toMatch(/\d+ of \d+ clips ·/);
+    expect(text).not.toContain("1 clips");
+  },
+);
+
+it("reads like an ordinary job's details: name, caption, machine, technical id, one action row", async () => {
+  api.get.mockResolvedValue({
+    id: "known",
+    state: "running",
+    progress_phase: "rendering",
+    completed_clips: "2",
+    can_cancel: true,
+    can_resume: false,
+    can_delete: false,
+    plan: { model: "flux-dev:q4", clip_count: "3", total_duration_ms: "40000" },
+  });
+  const wrapper = mount(VideoJobControl, {
+    props: { owner, jobId: "known", isCurrent: () => true, autoOpen: true },
+    attachTo: document.body,
+  });
+  wrappers.push(wrapper);
+  await flushPromises();
+  const panel = document.body.querySelector("[data-test='video-job-detail']")!;
+  expect(panel).toBeTruthy();
+  const title = panel.querySelector("h2")!;
+  expect(title.textContent?.trim()).toBe("FLUX.1 Dev Q4");
+  expect(title.getAttribute("title")).toBe("flux-dev:q4");
+  const text = panel.textContent ?? "";
+  expect(text).toContain("Rendering clip 3 of 3");
+  expect(text).toContain("40 s video · 3 clips");
+  expect(text).toContain("Plato");
+  const technical = panel.querySelector(
+    "[data-test='video-job-technical-details']",
+  )!;
+  expect(technical.textContent).toContain("Plato · Job known");
+  const actions = panel.querySelector("[data-test='video-job-actions']")!;
+  const stop = Array.from(actions.querySelectorAll("button")).find(
+    (button) => button.textContent?.trim() === "Stop video",
+  )!;
+  expect(stop.classList.contains("vjd__danger")).toBe(true);
+  expect(text).not.toContain("Check queue");
+  expect(
+    Array.from(document.body.querySelectorAll("button")).filter(
+      (button) => button.textContent?.trim() === "Close",
+    ),
+  ).toHaveLength(0);
+  (
+    panel.querySelector("[aria-label='Close video details']") as HTMLElement
+  ).click();
+  await flushPromises();
+  expect(document.body.querySelector("[data-test='video-job-detail']")).toBe(
+    null,
+  );
 });

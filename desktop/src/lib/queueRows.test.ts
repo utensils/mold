@@ -271,3 +271,44 @@ it("prioritizes stall and accepted cancellation evidence over denoise counters a
   expect(rowStatusLine(pending)).toBe("Cancel requested; device still held");
   expect(rowProgressFraction(pending)).toBeNull();
 });
+
+/*
+ * A duration parent is an ordinary queue row: the shared video row contract
+ * words its caption, and its glyph, tone and meter agree with those words.
+ */
+describe("a video parent reads like any other queue row", () => {
+  const video = (part: Record<string, unknown>) =>
+    shared({ kind: "video_job", execution: "video_job", total: 3, current: 0, ...part });
+
+  it("waits, renders clip by clip, joins, and pauses in the shared words", () => {
+    const waiting = video({ phase: "queued" });
+    expect(rowStatusLine(waiting)).toBe("Waiting");
+    expect(rowGlyph(waiting)).toBe("·");
+    expect(rowTone(waiting)).toBe("text-state-waiting");
+    expect(rowProgressFraction(waiting)).toBeNull();
+
+    const rendering = video({ phase: "running", current: 1 });
+    expect(rowStatusLine(rendering)).toBe("Rendering clip 2 of 3");
+    expect(rowGlyph(rendering)).toBe("⠂");
+    expect(rowTone(rendering)).toBe("text-state-active");
+    expect(rowProgressFraction(rendering)).toBeCloseTo(1 / 3, 5);
+
+    expect(rowStatusLine(video({ phase: "running", current: 3 }))).toBe("Joining clips");
+
+    const paused = video({ phase: "paused", current: 1, can_cancel: false });
+    expect(rowStatusLine(paused)).toBe("Paused · 1 of 3 clips done");
+    expect(rowTone(paused)).toBe("text-state-waiting");
+    expect(rowProgressFraction(paused)).toBeNull();
+
+    const failed = video({ phase: "failed", can_cancel: false });
+    expect(rowStatusLine(failed)).toBe("Failed");
+    expect(rowGlyph(failed)).toBe("!");
+    expect(rowTone(failed)).toBe("text-state-failed");
+  });
+
+  it("never counts a one-clip video as clips or draws a 0% meter for it", () => {
+    const single = video({ phase: "running", current: 0, total: 1 });
+    expect(rowStatusLine(single)).toBe("Rendering");
+    expect(rowProgressFraction(single)).toBeNull();
+  });
+});

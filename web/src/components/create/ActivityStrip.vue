@@ -8,7 +8,7 @@ import VideoJobControl from "@studio/components/VideoJobControl.vue";
  * capped at two. Hidden entirely when nothing is in flight and nothing failed
  * recently. The per-GPU lane view lives in host detail.
  */
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import VideoRestartControl from "@studio/components/VideoRestartControl.vue";
 import QueueMoveToControl from "@studio/components/QueueMoveToControl.vue";
 import QueueDownloadControl from "@studio/components/QueueDownloadControl.vue";
@@ -113,6 +113,28 @@ const emit = defineEmits<{
   "shared-inspect": [row: FleetActiveWork, opener: HTMLElement];
   inspect: [job: Job, opener: HTMLElement];
 }>();
+
+/** A video parent has no canvas to land on: selecting its row (or its
+ * Details action) opens its own details — Stop, Resume, Start again,
+ * Delete — on whichever page drew the row. */
+const videoDetails = ref<{
+  hostId: string;
+  id: string;
+  instanceId: string | null;
+  token: string;
+} | null>(null);
+function openVideoDetails(row: FleetActiveWork) {
+  videoDetails.value = {
+    hostId: row.hostId,
+    id: row.id,
+    instanceId: row.instanceId,
+    token: crypto.randomUUID(),
+  };
+}
+function selectShared(row: FleetActiveWork) {
+  if (row.kind === "video_job") openVideoDetails(row);
+  else emit("shared-open", row);
+}
 
 /** Failed prints go through the shared partition so their rows expire on the
  * shared clock. Running/queued prints keep the strip's own chrome. */
@@ -262,18 +284,22 @@ const active = computed(
 
 <template>
   <div v-if="active" class="activity" data-test="activity-strip">
+    <VideoJobControl
+      v-if="videoDetails"
+      :key="videoDetails.token"
+      :host-id="videoDetails.hostId"
+      :job-id="videoDetails.id"
+      :instance-id="videoDetails.instanceId"
+      :auto-open="true"
+      :hide-trigger="true"
+      @removed="videoDetails = null"
+    />
     <div class="activity__head">
       <div class="activity__kicker">Activity</div>
     </div>
 
     <template v-for="row in activeRows" :key="row.key">
       <div v-if="row.kind === 'shared'" class="activity__shared">
-        <VideoJobControl
-          v-if="row.shared.kind === 'video_job'"
-          :host-id="row.shared.hostId"
-          :job-id="row.shared.id"
-          :instance-id="row.shared.instanceId"
-        />
         <VideoRestartControl
           :host-id="row.shared.hostId"
           :job-id="row.shared.id"
@@ -321,8 +347,18 @@ const active = computed(
           :rows="[row.shared]"
           :model-label="sharedModelLabel"
           interactive
-          @select="emit('shared-open', $event)"
+          @select="selectShared"
         />
+        <button
+          v-if="expanded && row.shared.kind === 'video_job'"
+          type="button"
+          class="activity__row-action"
+          :aria-label="`Details for ${sharedModelLabel(row.shared)} on ${row.shared.hostLabel}`"
+          :data-test="`activity-details-${row.shared.key}`"
+          @click="openVideoDetails(row.shared)"
+        >
+          Details
+        </button>
         <button
           v-if="
             expanded &&

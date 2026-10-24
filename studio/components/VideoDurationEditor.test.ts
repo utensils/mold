@@ -74,3 +74,58 @@ it("discloses that reusing an extended movie makes fresh footage", () => {
     "original video is not attached",
   );
 });
+
+const plan = {
+  validation_revision: "r",
+  model: "minimax-h3",
+  width: 768,
+  height: 432,
+  fps: 24,
+  single_clip_max_frames: 345,
+  overlap_frames: 1,
+  join_mode: "continuous" as const,
+  clip_count: "3",
+  part_count: "1",
+  added_frames: "960",
+  source_frames: "0",
+  total_frames: "960",
+  added_duration_ms: "40000",
+  total_duration_ms: "40000",
+  warnings: [
+    "Scene 2 is 40 s but one generation is 14.4 s, so its prompt is reused for 3 clips and the action will repeat. Split it into scenes of 14 s or less.",
+    "Scene 3 is 1 s, shorter than the shortest generation, so it is rendered longer and trimmed.",
+  ],
+};
+it("states the one-generation limit, the one-clip scene length and every warning in full", () => {
+  const wrapper = mount(VideoDurationEditor, {
+    props: {
+      modelValue: {
+        durationMs: "40000",
+        scenesEnabled: true,
+        scenes: [
+          { id: "a", prompt: "one", durationMs: "20000" },
+          { id: "b", prompt: "two", durationMs: "20000" },
+        ],
+      },
+      prompt: "",
+      plan,
+    },
+  });
+  const text = wrapper.text();
+  expect(text).toContain("Single generation: up to 14.375 seconds");
+  expect(text).toContain("Scenes up to 14.3 s each stay one clip");
+  for (const warning of plan.warnings) {
+    const row = wrapper
+      .findAll('[data-test="video-plan-warning"]')
+      .find((node) => node.text() === warning);
+    expect(row, warning).toBeTruthy();
+  }
+});
+it("keeps the one-prompt duration on the shared single-generation sentence", () => {
+  const wrapper = mount(VideoDurationEditor, {
+    props: { modelValue: initial, prompt: "", plan },
+  });
+  expect(wrapper.text()).toContain("Single generation: up to 14.375 seconds");
+  expect(wrapper.text()).not.toContain("stay one clip");
+  expect(wrapper.findAll('[data-test="video-plan-warning"]')).toHaveLength(2);
+});

@@ -15,7 +15,14 @@ extension GenerateController {
             && target.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true
     }
 
-    var usesVideoDuration: Bool { kind == .clip && sequence.draft == nil && (canAuthorVideoDuration || videoDuration != nil) }
+    /// Whether Length writes a Duration request on this machine.
+    var offersVideoDuration: Bool { kind == .clip && sequence.draft == nil && (canAuthorVideoDuration || videoDuration != nil) }
+
+    /// Automatic from prompt lets the model choose one clip's length: an
+    /// ordinary render. Extend always stays a video parent.
+    var usesVideoDuration: Bool {
+        offersVideoDuration && !(draft.usesAutomaticDuration && videoDuration?.draft.source == nil)
+    }
 
     var durationOwner: VideoJobOwner? {
         guard let host = target, let instance = hosts.instanceID(of: host.id), !instance.isEmpty else { return nil }

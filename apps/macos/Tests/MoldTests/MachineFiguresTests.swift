@@ -49,4 +49,13 @@ struct MachineFiguresTests {
         // Unknown queue stays unknown whatever else is reported.
         #expect(MachineFigures.workFigure(live: nil, alsoRunning: 1) == "—")
     }
+
+    /// Video parents render clips that never arrive as queue rows; a
+    /// machine rendering two of them is not "Nothing queued".
+    @Test func liveVideoParentsCountAsWork() {
+        #expect(MachineFigures.workFigure(live: [], videos: [.rendering, .waiting]) == "1 queued, 1 running")
+        let live = [FakeFixtures.queueEntry("a", state: "running")]
+        #expect(MachineFigures.workFigure(live: live, videos: [.joining]) == "0 queued, 2 running")
+        #expect(MachineFigures.workFigure(live: nil, videos: [.rendering]) == "—")
+    }
 }

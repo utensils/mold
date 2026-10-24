@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import {
   formatRequestedVideoDuration,
   parseRequestedVideoDuration,
+  singleGenerationSeconds,
   type VideoDurationSummary,
 } from "../lib/videoRequestedDuration";
 const props = defineProps<{
@@ -32,20 +33,9 @@ watch(
 const invalid = computed(
   () => touched.value && parseRequestedVideoDuration(text.value) === null,
 );
-const safeSeconds = computed(() => {
-  const plan = props.plan;
-  if (
-    !plan ||
-    !Number.isFinite(plan.fps) ||
-    plan.fps <= 0 ||
-    !Number.isSafeInteger(plan.single_clip_max_frames) ||
-    plan.single_clip_max_frames < 1
-  )
-    return null;
-  return formatRequestedVideoDuration(
-    String(Math.floor((plan.single_clip_max_frames * 1000) / plan.fps)),
-  );
-});
+const safeSeconds = computed(() =>
+  props.plan ? singleGenerationSeconds(props.plan) : null,
+);
 const count = computed(() =>
   props.plan && /^[1-9]\d*$/.test(props.plan.clip_count)
     ? props.plan.clip_count

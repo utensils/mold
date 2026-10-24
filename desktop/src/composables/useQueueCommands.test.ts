@@ -817,3 +817,56 @@ describe("useQueueCommands — the pause scopes stay apart", () => {
     expect(labels(menu.entries)).not.toContain("Pause");
   });
 });
+
+describe("useQueueCommands — a video parent is an ordinary row", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    __resetQueueCommandState();
+    readyLocalHost();
+    push.mockReset();
+  });
+
+  const videoRow = {
+    kind: "shared",
+    shared: {
+      kind: "video_job",
+      execution: "video_job",
+      phase: "running",
+      id: "video-1",
+      key: "local:video_job:video-1",
+      hostId: "local",
+      routeUrl: "http://127.0.0.1:7680",
+      instanceId: "i-1",
+      current: 1,
+      total: 3,
+      can_cancel: true,
+      stale: false,
+    },
+  } as never;
+
+  it("opens the video's own details in place rather than navigating", () => {
+    const api = commands();
+    api.open(videoRow);
+    expect(push).not.toHaveBeenCalled();
+    expect(api.videoDetails.value).toMatchObject({
+      hostId: "local",
+      id: "video-1",
+      instanceId: "i-1",
+    });
+  });
+
+  it("offers its Stop/Resume/Delete controls through the row menu's details", () => {
+    const api = commands();
+    const menu = useContextMenuStore();
+    const open = vi.spyOn(menu, "open");
+    api.contextMenu(new MouseEvent("contextmenu"), videoRow);
+    const entries = open.mock.calls[0]![1] as MenuEntry[];
+    const labels = entries.flatMap((entry) => ("label" in entry ? [entry.label] : []));
+    expect(labels).toContain("Show details");
+    // No disabled ordinary Stop that can never act on a video parent.
+    expect(labels).not.toContain("Stop");
+    const details = entries.find((entry) => "label" in entry && entry.label === "Show details");
+    (details as { action: () => void }).action();
+    expect(api.videoDetails.value?.id).toBe("video-1");
+  });
+});

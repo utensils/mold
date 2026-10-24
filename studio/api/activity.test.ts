@@ -7,6 +7,27 @@ import {
 } from "./activity";
 
 describe("activeWorkPhaseLabel", () => {
+  it("reads a video parent through the shared video row contract", () => {
+    const video = (phase: string, current: number, total: number) =>
+      activeWorkPhaseLabel({
+        id: "video-1",
+        kind: "video_job",
+        execution: "video_job",
+        phase,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 2,
+        current,
+        total,
+        can_cancel: phase !== "cancelling",
+      });
+    expect(video("queued", 0, 3)).toBe("Waiting");
+    expect(video("running", 1, 3)).toBe("Rendering clip 2 of 3");
+    expect(video("running", 0, 1)).toBe("Rendering");
+    expect(video("running", 3, 3)).toBe("Joining clips");
+    expect(video("paused", 1, 3)).toBe("Paused · 1 of 3 clips done");
+    expect(video("cancelling", 1, 3)).toBe("Stopping");
+  });
+
   it("prefers the backend stage over a generic running phase", () => {
     expect(
       activeWorkPhaseLabel({

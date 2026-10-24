@@ -60,19 +60,7 @@ private struct SamplerSection: View {
                 LabeledSlider(title: String(localized: "Stick to my words"), value: $generate.draft.guidance,
                               range: recipe.guidance.min ... recipe.guidance.max, step: recipe.guidance.step)
             }
-            Picker("Seed", selection: $generate.draft.locksSeed) {
-                Text("Random").tag(false)
-                Text("Fixed").tag(true)
-            }
-            .pickerStyle(.menu)
-            if generate.draft.locksSeed {
-                AdaptiveRow { Text("Seed") } value: {
-                    TextField("Seed", value: $generate.draft.seed, format: .number.grouping(.never))
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                        .font(.body.monospacedDigit())
-                }
-            }
+            NativeSeedControl(draft: $generate.draft, showsTitle: true, showsFootnote: true)
             if recipe.capabilities.negativePrompt?.isAvailable ?? true {
                 TextField("Avoid (optional)", text: $generate.draft.negativePrompt, axis: .vertical)
                     .lineLimit(1 ... 4)

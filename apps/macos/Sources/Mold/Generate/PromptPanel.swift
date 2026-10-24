@@ -81,6 +81,8 @@ struct PromptPanel: View {
                                     get: { controller.videoDuration?.draft ?? authoring.draft },
                                     set: { controller.videoDuration?.draft = $0 }),
                                     planner: controller.videoPlanner, prompt: draft.prompt,
+                                    grid: recipe.temporal.map { VideoLengthGrid.duration(temporal: $0, fps: draft.fps, limits: chainLimits,
+                                                                                         plan: controller.videoPlanner.plan) },
                                     reuseNotice: controller.videoDuration?.reuseNotice,
                                     sourceTitle: controller.videoDuration?.sourceOwner?.title,
                                     sourceMachine: host?.name, busy: controller.durationSubmitting,
@@ -107,7 +109,7 @@ struct PromptPanel: View {
                         }
                         Divider()
                         ControlsRow(recipe: recipe, model: model, maxBatch: maxBatch,
-                                    chainLimits: chainLimits, draft: $draft)
+                                    chainLimits: chainLimits, host: host, draft: $draft)
                             .disabled(controller.sequence.continuation != nil || controller.sequence.preparing)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)

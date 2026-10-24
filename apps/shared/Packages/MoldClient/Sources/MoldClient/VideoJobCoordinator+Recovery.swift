@@ -43,6 +43,24 @@ public extension VideoJobCoordinator {
         }
     }
 
+    /// The per-job owner re-check the Queue runs on its ordinary refresh and
+    /// poll (it replaced a per-row "Check queue" button). Live parents are
+    /// re-read; a finished one re-verifies its saved Library video only when
+    /// `force` (the pane's own refresh), since its status cannot change.
+    func recheck(backend: (VideoJobOwner) -> (any MoldBackend)?,
+                 current: @escaping @MainActor (VideoJobOwner) -> Bool, force: Bool = false) async {
+        for job in jobs where !job.cancelledBeforeAdmission {
+            let owner = job.owner
+            guard !Task.isCancelled, let service = backend(owner), current(owner) else { continue }
+            if job.detail?.isSettled != true {
+                await refresh(job.operationId, owner: owner, backend: service, current: { current(owner) })
+            }
+            guard let live = jobs.first(where: { $0.id == job.id && $0.owner == owner }),
+                  live.detail?.outputFilename != nil else { continue }
+            await checkOutput(live, backend: service, current: { current(owner) }, force: force)
+        }
+    }
+
     func dismiss(_ job: ObservedVideoJob) {
         guard let live = jobs.first(where: { $0.id == job.id && $0.owner == job.owner }),
               live.cancelledBeforeAdmission || live.detail?.state == .completed else { return }

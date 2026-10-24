@@ -36,7 +36,10 @@ const chipLabel = computed(() => {
   const parts: string[] = [];
   if (counts.making > 0) parts.push(`Making ${counts.making}`);
   if (counts.waiting > 0) parts.push(`${counts.waiting} waiting`);
-  if (counts.attention > 0) parts.push(`${counts.attention} need you`);
+  if (counts.attention > 0)
+    parts.push(
+      `${counts.attention} ${counts.attention === 1 ? "needs" : "need"} you`,
+    );
   return parts.join(" · ");
 });
 const emit = defineEmits<{ select: [row: FleetActiveWork] }>();

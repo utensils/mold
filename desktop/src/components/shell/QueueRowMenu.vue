@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import VideoJobControl from "@studio/components/VideoJobControl.vue";
 /* The ⋯ at the end of a queue row: opens the row's actions as the app's own
  * context menu, anchored to the button. */
 import VideoRestartControl from "@studio/components/VideoRestartControl.vue";
@@ -14,12 +13,6 @@ const hosts = useHostsStore();
 </script>
 
 <template>
-  <VideoJobControl
-    v-if="row.kind === 'shared' && row.shared.kind === 'video_job'"
-    :host-id="row.shared.hostId"
-    :job-id="row.shared.id"
-    :instance-id="row.shared.instanceId"
-  />
   <VideoRestartControl
     :host-id="
       row.kind === 'shared' ? row.shared.hostId : (row.print.hostId ?? hosts.primaryHost?.id)

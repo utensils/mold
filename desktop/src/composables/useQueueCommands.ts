@@ -59,6 +59,17 @@ export interface QueueCommands {
   open(row: QueueRow): void;
   contextMenu(event: MouseEvent, row: QueueRow): void;
   cancellingShared: Ref<string[]>;
+  /** The video parent whose details (Stop, Resume, Start again, Delete) are
+   * open. One `VideoJobControl` in App.vue renders it for every surface. */
+  videoDetails: Ref<VideoDetailsSelection | null>;
+}
+
+export interface VideoDetailsSelection {
+  hostId: string;
+  id: string;
+  instanceId: string | null;
+  /** A fresh mount per opening, so reopening the same video rereads it. */
+  token: string;
 }
 
 /*
@@ -76,12 +87,14 @@ export interface QueueCommands {
  * Pinia does not reset these between tests; `__resetQueueCommandState()` does.
  */
 const cancellingShared = ref<string[]>([]);
+const videoDetails = ref<VideoDetailsSelection | null>(null);
 const stopEverythingOpen = ref(false);
 const stopEverythingBusy = ref(false);
 
 /** Clear the module-scoped queue state. Tests only. */
 export function __resetQueueCommandState(): void {
   cancellingShared.value = [];
+  videoDetails.value = null;
   stopEverythingOpen.value = false;
   stopEverythingBusy.value = false;
 }
@@ -633,6 +646,15 @@ export function useQueueCommands(): QueueCommands {
 
   function open(row: QueueRow) {
     if (row.kind === "print") openPrint(row.print);
+    // A video parent has no canvas to land on; its own details hold its
+    // Stop, Resume, Start again and Delete, wherever the row was clicked.
+    else if (row.shared.kind === "video_job")
+      videoDetails.value = {
+        hostId: row.shared.hostId,
+        id: row.shared.id,
+        instanceId: row.shared.instanceId,
+        token: crypto.randomUUID(),
+      };
     else void openLiveWork(row.shared);
   }
 
@@ -670,6 +692,8 @@ export function useQueueCommands(): QueueCommands {
       sharedEntry.retryable !== false &&
       !!sharedEntry.batch_id?.trim() &&
       !!sharedEntry.client_batch_id?.trim();
+    if (row.kind === "shared" && row.shared.kind === "video_job")
+      return [{ label: "Show details", action: () => open(row) }];
     if (row.kind === "shared") {
       return [
         { label: "Show details", action: () => open(row) },
@@ -778,5 +802,6 @@ export function useQueueCommands(): QueueCommands {
     open,
     contextMenu: openContextMenu,
     cancellingShared,
+    videoDetails,
   };
 }

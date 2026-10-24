@@ -32,6 +32,17 @@ public enum VideoJobState: String, Codable, Hashable, Sendable {
     }
 }
 
+/// Present only while a parent is `running`; unknown future values stay open.
+public enum VideoJobProgressPhase: String, OpenWireEnum {
+    case waiting, rendering, joining, unknown
+}
+
+public extension VideoJobState {
+    /// Still going somewhere on its own or waiting on the person: what Queue
+    /// headers and badges count. Settled history does not.
+    var isLive: Bool { self == .queued || self == .running || self == .paused }
+}
+
 /// Public status excludes retained inputs and private manifests.
 public struct VideoJob: Codable, Hashable, Sendable, Identifiable {
     public let id: String
@@ -47,6 +58,9 @@ public struct VideoJob: Codable, Hashable, Sendable, Identifiable {
     public let canCancel: Bool
     public let canResume: Bool
     public let canDelete: Bool
+    /// What a `running` parent is really doing. Additive: absent on an older
+    /// server, which every reader treats as rendering.
+    public var progressPhase: VideoJobProgressPhase? = nil
     public var isSettled: Bool { [.completed, .failed, .interrupted, .cancelled].contains(state) }
 }
 

@@ -3,7 +3,17 @@ import MoldClient
 extension GenerateController {
     func usesDuration(on host: MoldHost?, recipe: GenerationRecipe?) -> Bool {
         guard recipe?.temporal != nil, sequence.draft == nil else { return false }
+        // Automatic from prompt lets the model choose one clip's length: an
+        // ordinary render. Extend always stays a video parent.
+        if draft.usesAutomaticDuration, videoDuration?.draft.source == nil { return false }
         return videoDuration != nil || host.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true
+    }
+
+    /// Whether the Length control writes a Duration request on this machine
+    /// (with Automatic from prompt off).
+    func offersDuration(on host: MoldHost?, recipe: GenerationRecipe?) -> Bool {
+        guard recipe?.temporal != nil, sequence.draft == nil else { return false }
+        return videoDuration?.draft.source != nil || host.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true
     }
 
     func ensureDuration(recipe: GenerationRecipe?, host: MoldHost?) {

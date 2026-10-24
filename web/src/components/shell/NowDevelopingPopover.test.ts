@@ -99,7 +99,7 @@ describe("the live-work chip's words", () => {
       attachTo: document.body,
     });
     expect(wrapper.get("[data-test='now-developing-trigger']").text()).toBe(
-      "Making 1 · 1 need you",
+      "Making 1 · 1 needs you",
     );
     wrapper.unmount();
   });

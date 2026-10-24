@@ -4,10 +4,15 @@ import MoldClient
 /// exact wording without a rendered pane. A held row is never "waiting": it
 /// is not going anywhere until something about it changes.
 enum QueueSummary {
-    static func sentence(_ entries: [QueueEntry]) -> String {
+    /// `videos` are the live video parents' row symbols: their clips never
+    /// arrive as ordinary rows, so without them the header said Idle while
+    /// two GPUs rendered clips.
+    static func sentence(_ entries: [QueueEntry], videos: [VideoJobRow.Symbol] = []) -> String {
         func count(_ state: QueueState) -> Int { entries.filter { $0.state == state }.count }
+        let waiting = videos.count { $0 == .waiting }
+        let rendering = videos.count { [.rendering, .joining, .stopping].contains($0) }
         let clauses = [
-            (count(.queued), "waiting"), (count(.running), "rendering"), (count(.held), "held"),
+            (count(.queued) + waiting, "waiting"), (count(.running) + rendering, "rendering"), (count(.held), "held"),
         ].compactMap { n, word in n > 0 ? "\(n) \(word)" : nil }
         return clauses.isEmpty ? "Idle" : clauses.joined(separator: " · ")
     }

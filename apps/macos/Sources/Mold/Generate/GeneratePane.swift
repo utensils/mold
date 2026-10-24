@@ -209,11 +209,14 @@ extension GeneratePane {
         let owner: VideoJobOwner?
         let recipe: GenerationRecipe?
         let capable: Bool
+        /// Automatic from prompt is an ordinary render, so it re-plans too.
+        let automatic: Bool
     }
     var durationPlanKey: DurationPlanKey {
         .init(request: try? controller.durationRequest(on: host, planning: true),
               owner: controller.durationOwner(host), recipe: recipe,
-              capable: host.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true)
+              capable: host.flatMap { hosts.capabilities[$0.id] }?.canCreateVideoJob == true,
+              automatic: controller.draft.usesAutomaticDuration)
     }
 }
 

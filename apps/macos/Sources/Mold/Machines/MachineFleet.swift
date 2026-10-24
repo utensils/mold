@@ -16,6 +16,9 @@ struct MachineFleet {
     let models: ModelStore
     let activity: ActivityStore
     let upscales: UpscaleStore
+    /// Live video parents are counted like the Queue counts them; absent in
+    /// tests that build a fleet with no Generate controller.
+    var generate: GenerateController? = nil
 
     var cards: [MachineCard] {
         MachineCard.sorted(hosts.hosts.map(card(for:)))
@@ -32,6 +35,7 @@ struct MachineFleet {
             // different fact from an empty answer (`MachineFigures`).
             live: queue.hasLoaded(on: host.id)
                 ? queue.entries(on: host.id).filter(\.state.isLive) : nil,
+            videos: videos(on: host.id),
             alsoRunning: alsoRunning(on: host),
             models: models.hasLoaded(on: host.id) ? models.ready(on: host.id) : nil
         )
@@ -39,8 +43,17 @@ struct MachineFleet {
 
     /// The Queue pane's own **Also Running** rows for this machine, counted
     /// by the same rule it draws them with.
+    func videos(on host: MoldHost.ID) -> [VideoJobRow.Symbol] {
+        guard let generate else { return [] }
+        return NativeVideoQueue.liveSymbols(videos: generate.videoJobs, sequence: generate.sequence, on: host)
+    }
+
     func alsoRunning(on host: MoldHost) -> Int {
-        let queued = [host.id: Set(queue.entries(on: host.id).map(\.id))]
+        var drawn = Set(queue.entries(on: host.id).map(\.id))
+        if let generate {
+            drawn.formUnion(NativeVideoQueue.operationIDs(videos: generate.videoJobs, sequence: generate.sequence, on: host.id))
+        }
+        let queued = [host.id: drawn]
         return AlsoRunning.rows(reported: activity.rows, queuedIDs: queued,
                                 upscales: upscales.live, stills: upscales.liveStills)
             .count { $0.host == host.id && !$0.isSettled }

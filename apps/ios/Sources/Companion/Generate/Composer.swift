@@ -149,10 +149,15 @@ struct Composer: View {
                generate.videoDuration?.draft.source == nil || !generate.usesVideoDuration {
                 NativeVideoSourceFailure(message: error, keepDraft: generate.keepDraftAfterSourceFailure)
             }
+            if generate.kind == .clip, generate.sequence.draft == nil, let temporal = generate.recipe?.temporal {
+                ComposerLength(temporal: temporal)
+            }
             if generate.usesVideoDuration, let authoring = generate.videoDuration {
                 NativeDurationEditor(draft: Binding(get: { generate.videoDuration?.draft ?? authoring.draft }, set: {
                     generate.videoDuration?.draft = $0
                 }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
+                    grid: generate.recipe?.temporal.map { VideoLengthGrid.duration(temporal: $0, fps: generate.draft.fps,
+                        limits: generate.sequenceLimits, plan: generate.videoPlanner.plan) },
                     reuseNotice: generate.videoDuration?.reuseNotice, sourceTitle: generate.videoDuration?.sourceOwner?.title,
                     sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
                     busy: generate.durationTask != nil,
@@ -281,9 +286,6 @@ struct ChipRow: View {
                                 range: 1 ... max(1, generate.target.flatMap { generate.hosts.capabilities[$0.id]?.maxBatchOutputs } ?? 4)) {
                         generate.draft.batchSize = $0
                     }
-                }
-                if generate.sequence.draft == nil, !generate.usesVideoDuration, let temporal = recipe.temporal {
-                    LengthChip(temporal: temporal)
                 }
             }
             Button { showsOptions = true } label: {

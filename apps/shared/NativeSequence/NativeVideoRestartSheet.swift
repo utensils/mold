@@ -45,9 +45,7 @@ struct NativeVideoRestartSheet: View {
                     if let destination {
                         LabeledContent("Destination", value: destination.host.name)
                         if let detail = controller.parentDetail {
-                            Text(
-                                "\(detail.state.rawValue.capitalized) · \(detail.completedClips) of \(detail.plan.clipCount) clips"
-                            )
+                            Text(VideoJobRow(detail, current: true).caption)
                         } else if let detail = controller.detail {
                             Text(detail.state.rawValue.capitalized)
                         } else {
@@ -128,7 +126,7 @@ struct NativeVideoRestartSheet: View {
 
     @ViewBuilder private func receiptActions(_ destination: VideoRestartTarget) -> some View {
         if let target = backend(destination), current(destination) {
-            Button("Check queue") {
+            Button("Check again") {
                 Task {
                     await controller.refresh(
                         destination: destination, backend: target, current: { current(destination) })

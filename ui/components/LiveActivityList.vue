@@ -5,6 +5,7 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import { resolveSwipeAxis, type SwipePhase } from "@studio/lib/swipeAction";
+import { videoJobActivityRow } from "@studio/lib/videoJobRow";
 
 const props = withDefaults(
   defineProps<{
@@ -88,10 +89,24 @@ function title(row: FleetActiveWork): string {
     return model ? `Pulling ${model}` : "Model download";
   if (row.kind === "sequence") return model ? `${model} sequence` : "Sequence";
   if (row.kind === "generation") return model ?? "Generation";
+  if (row.kind === "video_job") return model ?? "Video";
   return model ?? row.kind.replaceAll("_", " ");
 }
 
+/** Sentence case: a host's raw phase ("queued") reads "Queued", while an
+ * authored caption ("Rendering clip 2 of 3") keeps its own lower-case words. */
+function caption(row: FleetActiveWork): string {
+  const label = activeWorkPhaseLabel(row);
+  return label.charAt(0).toLocaleUpperCase() + label.slice(1);
+}
+
 function progress(row: FleetActiveWork): number | null {
+  // A video parent's meter is the shared row contract's: completed clips of a
+  // multi-clip movie while it renders, nothing for one clip or a held parent.
+  if (row.kind === "video_job") {
+    const fraction = videoJobActivityRow(row).progress;
+    return fraction === null ? null : Math.round(fraction * 100);
+  }
   if (!row.total || row.current == null) return null;
   return Math.max(
     0,
@@ -142,7 +157,7 @@ function progress(row: FleetActiveWork): number | null {
         <span class="live-activity-copy">
           <strong>{{ title(row) }}</strong>
           <span>
-            {{ row.hostLabel }} · {{ activeWorkPhaseLabel(row) }}
+            {{ row.hostLabel }} · {{ caption(row) }}
             <template v-if="progress(row) !== null">
               · {{ progress(row) }}%</template
             >
@@ -270,7 +285,6 @@ function progress(row: FleetActiveWork): number | null {
   color: var(--mold-text-dim);
   font-size: 0.6875rem;
   text-overflow: ellipsis;
-  text-transform: capitalize;
   white-space: nowrap;
 }
 .live-activity-list--compact .live-activity-surface {

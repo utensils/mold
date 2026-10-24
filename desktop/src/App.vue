@@ -18,6 +18,7 @@ import StatusBar from "./components/shell/StatusBar.vue";
 import Toasts from "./components/shell/Toasts.vue";
 import CommandPalette from "./components/shell/CommandPalette.vue";
 import ConfirmDialog from "@ui/components/ConfirmDialog.vue";
+import VideoJobControl from "@studio/components/VideoJobControl.vue";
 import ContextMenu from "./components/shell/ContextMenu.vue";
 import UpdateBanner from "./components/shell/UpdateBanner.vue";
 import LicenseAcceptanceDialog from "@studio/components/LicenseAcceptanceDialog.vue";
@@ -540,6 +541,18 @@ onUnmounted(() => {
       :busy="queueCommands.stopEverythingBusy.value"
       @confirm="queueCommands.confirmStopEverything()"
       @cancel="queueCommands.cancelStopEverything()"
+    />
+    <!-- A video parent's details (Stop, Resume, Start again, Delete) open from
+         its row on the rail or the Queue view, like any other row's. -->
+    <VideoJobControl
+      v-if="queueCommands.videoDetails.value"
+      :key="queueCommands.videoDetails.value.token"
+      :host-id="queueCommands.videoDetails.value.hostId"
+      :job-id="queueCommands.videoDetails.value.id"
+      :instance-id="queueCommands.videoDetails.value.instanceId"
+      :auto-open="true"
+      :hide-trigger="true"
+      @removed="queueCommands.videoDetails.value = null"
     />
     <ContextMenu />
     <LicenseAcceptanceDialog :open-external="openExternal" />

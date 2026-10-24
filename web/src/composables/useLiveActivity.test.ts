@@ -86,4 +86,21 @@ describe("shell-owned live activity", () => {
     expect(listActiveWork).toHaveBeenCalledTimes(2);
     shell.stop();
   });
+
+  it("reads a machine the moment it becomes ready instead of a poll later", async () => {
+    const { useLiveActivity } = await import("./useLiveActivity");
+    const hosts = routing();
+    (hosts.hosts.value[0] as { status: string }).status = "connecting";
+    const shell = useLiveActivity(hosts);
+    shell.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // The first poll ran before the readiness probe answered.
+    expect(listActiveWork).not.toHaveBeenCalled();
+    expect(shell.rows.value).toEqual([]);
+    hosts.hosts.value = [{ ...hosts.hosts.value[0]!, status: "ready" }];
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listActiveWork).toHaveBeenCalledTimes(1);
+    expect(shell.rows.value[0]?.id).toBe("work");
+    shell.stop();
+  });
 });

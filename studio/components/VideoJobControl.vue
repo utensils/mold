@@ -7,7 +7,9 @@ import { createVideoJobRun } from "../composables/useVideoJobRun";
 import { type VideoJobAdmission, type VideoJobOwner } from "../api/videoJobs";
 import { videoLibraryOutputExists } from "../api/videoLibraryOutput";
 import { VIDEO_LIBRARY_NAVIGATION } from "../lib/videoLibraryNavigation";
-import { formatRequestedVideoDuration } from "../lib/videoRequestedDuration";
+import { videoJobRowFromJob } from "../lib/videoJobRow";
+import { modelDisplayName } from "../lib/modelDisplay";
+import { copyTextToClipboard } from "../lib/notificationClipboard";
 const props = defineProps<{
   hostId?: string | undefined;
   jobId?: string | null | undefined;
@@ -68,6 +70,34 @@ function current(owner: VideoJobOwner): boolean {
 }
 const run = createVideoJobRun((owner) => open.value && current(owner));
 const { detail, error, cancelledBeforeAdmission, admission } = run;
+const copied = ref(false);
+const modelName = computed(() =>
+  detail.value?.plan?.model
+    ? modelDisplayName({ name: detail.value.plan.model })
+    : "Video",
+);
+/** The state chip an ordinary job's details wear, from the row contract. */
+const stateCode = computed(() =>
+  cancelledBeforeAdmission.value
+    ? "CANCELLED"
+    : (row.value?.symbol.toUpperCase() ?? "CHECKING"),
+);
+const technical = computed(() =>
+  [
+    `${captured.value?.label ?? ""} · Job ${props.jobId ?? ""}`,
+    detail.value?.plan?.model ? `Model ${detail.value.plan.model}` : "",
+    detail.value?.error_detail ?? detail.value?.error ?? "",
+  ]
+    .filter(Boolean)
+    .join("\n"),
+);
+async function copyDetails() {
+  copied.value = await copyTextToClipboard(technical.value);
+  if (copied.value) setTimeout(() => (copied.value = false), 2000);
+}
+const row = computed(() =>
+  detail.value ? videoJobRowFromJob(detail.value) : null,
+);
 function finishRemoval() {
   if (!run.removed.value || removedEmitted || !props.jobId) return false;
   removedEmitted = true;
@@ -125,7 +155,9 @@ async function refresh(attempt = revision) {
   if (finishRemoval()) return;
   await checkOutput();
   if (attempt !== revision || !open.value || !current(owner)) return;
-  if (!settled.value && !error.value && document.visibilityState !== "hidden")
+  // The details read the job live, even after a failed action, so a lost
+  // Stop reply reconciles without a manual "Check queue".
+  if (!settled.value && document.visibilityState !== "hidden")
     timer = setTimeout(() => void refresh(attempt), 2000);
 }
 function close() {
@@ -164,7 +196,7 @@ async function show() {
   if (attempt !== revision || !open.value || !current(owner)) return;
   if (finishRemoval()) return;
   await checkOutput();
-  if (attempt === revision && open.value && !settled.value && !error.value)
+  if (attempt === revision && open.value && !settled.value)
     timer = setTimeout(() => void refresh(attempt), 2000);
 }
 async function action(kind: "cancel" | "resume" | "delete") {
@@ -242,118 +274,178 @@ onBeforeUnmount(() => {
   </button>
   <Teleport to="body"
     ><div v-if="open" class="video-job-overlay">
-      <ModalPanel :open="open" label="Video details" @close="close">
-        <template #title>Video · {{ captured?.label }}</template>
-        <p v-if="!detail && !error" role="status">
-          {{
-            cancelledBeforeAdmission
-              ? "Cancelled before queueing"
-              : "Checking this video…"
-          }}
-        </p>
-        <template v-if="detail">
-          <p>{{ detail.plan.model }}</p>
-          <p role="status">
-            {{
-              detail.state === "completed"
-                ? detail.output_filename
-                  ? outputState === "available"
-                    ? "Saved to Library"
-                    : "Completed"
-                  : "Completed, but no saved Library video was reported."
-                : `${detail.state.charAt(0).toUpperCase()}${detail.state.slice(1)}`
-            }}
-          </p>
-          <p>
-            {{ detail.completed_clips }} of {{ detail.plan.clip_count }} clips ·
-            {{ formatRequestedVideoDuration(detail.plan.total_duration_ms) }}
-            seconds
-          </p>
-          <p v-if="detail.error_detail || detail.error">
-            {{ detail.error_detail ?? detail.error }}
-          </p>
-          <p v-if="outputState === 'missing'" role="status">
-            This video is no longer in this machine's Library. Its recovery data
-            can still be removed.
-          </p>
-          <p v-if="outputState === 'checking'" role="status">
-            Checking the saved video…
-          </p>
-          <p v-if="outputError" role="alert">{{ outputError }}</p>
-          <div class="video-job-actions">
-            <ParentVideoRestart
-              v-if="
-                captured &&
-                ['failed', 'paused', 'interrupted', 'cancelled'].includes(
-                  detail.state,
-                )
-              "
-              :owner="captured"
-              :job-id="detail.id"
-            />
+      <ModalPanel
+        :open="open"
+        :width="720"
+        label="Video details"
+        @close="close"
+      >
+        <div class="vjd" data-test="video-job-detail">
+          <header class="vjd__head">
+            <span class="vjd__state" :data-state="row?.symbol ?? 'checking'">{{
+              stateCode
+            }}</span>
+            <h2 class="vjd__title" :title="detail?.plan?.model">
+              {{ modelName }}
+            </h2>
             <button
-              v-if="
-                detail.output_filename &&
-                captured &&
-                openLibrary &&
-                outputState === 'available'
-              "
-              :disabled="busy"
               type="button"
-              @click="showSaved"
+              class="vjd__close"
+              aria-label="Close video details"
+              @click="close"
             >
-              View in Library
+              ✕
             </button>
-            <button
-              v-if="detail.can_cancel"
-              type="button"
-              :disabled="busy"
-              @click="action('cancel')"
+          </header>
+          <div class="vjd__body">
+            <p v-if="!detail && !error" role="status" class="vjd__caption">
+              {{
+                cancelledBeforeAdmission
+                  ? "Cancelled before queueing"
+                  : "Checking this video…"
+              }}
+            </p>
+            <template v-if="detail">
+              <p role="status" class="vjd__caption">
+                {{
+                  detail.state === "completed"
+                    ? detail.output_filename
+                      ? outputState === "available"
+                        ? "Saved to Library"
+                        : "Completed"
+                      : "Completed, but no saved Library video was reported."
+                    : row?.caption
+                }}
+              </p>
+              <dl class="vjd__facts">
+                <div>
+                  <dt>Video</dt>
+                  <dd>{{ row?.detail }}</dd>
+                </div>
+                <div>
+                  <dt>Machine</dt>
+                  <dd>{{ captured?.label }}</dd>
+                </div>
+              </dl>
+              <p
+                v-if="detail.error_detail || detail.error"
+                class="vjd__problem"
+                role="alert"
+              >
+                {{ detail.error_detail ?? detail.error }}
+              </p>
+              <p
+                v-if="outputState === 'missing'"
+                role="status"
+                class="vjd__hint"
+              >
+                This video is no longer in this machine's Library. Its recovery
+                data can still be removed.
+              </p>
+              <p
+                v-if="outputState === 'checking'"
+                role="status"
+                class="vjd__hint"
+              >
+                Checking the saved video…
+              </p>
+            </template>
+            <details
+              class="vjd__technical"
+              data-test="video-job-technical-details"
             >
-              Stop video
-            </button>
-            <button
-              v-if="detail.can_resume"
-              type="button"
-              :disabled="busy"
-              @click="action('resume')"
-            >
-              Resume video
-            </button>
-            <button
-              v-if="detail.can_delete"
-              type="button"
-              :disabled="busy"
-              @click="deleting = true"
-            >
-              Delete recovery data…
-            </button>
+              <summary>Technical details</summary>
+              <pre>{{ technical }}</pre>
+            </details>
           </div>
-          <div v-if="deleting" role="alert">
-            <p>Delete this job's recovery data? Saved Library videos remain.</p>
-            <button type="button" :disabled="busy" @click="action('delete')">
-              Delete recovery data
-            </button>
-            <button type="button" :disabled="busy" @click="deleting = false">
-              Keep job
-            </button>
-          </div>
-        </template>
-        <button
-          v-if="!detail && admission && !cancelledBeforeAdmission"
-          type="button"
-          :disabled="busy"
-          @click="action('cancel')"
-        >
-          Stop video
-        </button>
-        <p v-if="error" role="alert">{{ error }}</p>
-        <button type="button" :disabled="busy" @click="refresh()">
-          Check queue
-        </button>
-        <template #footer
-          ><button type="button" @click="close">Close</button></template
-        >
+          <footer class="vjd__foot">
+            <p v-if="error" role="alert" class="vjd__error">{{ error }}</p>
+            <p v-if="outputError" role="alert" class="vjd__error">
+              {{ outputError }}
+            </p>
+            <div v-if="deleting" role="alert" class="vjd__confirm">
+              <p class="vjd__hint">
+                Delete this job's recovery data? Saved Library videos remain.
+              </p>
+              <div class="vjd__actions">
+                <button
+                  type="button"
+                  :disabled="busy"
+                  @click="deleting = false"
+                >
+                  Keep job
+                </button>
+                <button
+                  type="button"
+                  class="vjd__danger"
+                  :disabled="busy"
+                  @click="action('delete')"
+                >
+                  Delete recovery data
+                </button>
+              </div>
+            </div>
+            <div class="vjd__actions" data-test="video-job-actions">
+              <button
+                v-if="
+                  detail?.output_filename &&
+                  captured &&
+                  openLibrary &&
+                  outputState === 'available'
+                "
+                :disabled="busy"
+                type="button"
+                @click="showSaved"
+              >
+                View in Library
+              </button>
+              <ParentVideoRestart
+                v-if="
+                  detail &&
+                  captured &&
+                  ['failed', 'paused', 'interrupted', 'cancelled'].includes(
+                    detail.state,
+                  )
+                "
+                :owner="captured"
+                :job-id="detail.id"
+              />
+              <button type="button" @click="copyDetails">
+                {{ copied ? "Copied" : "Copy details" }}
+              </button>
+              <button
+                v-if="detail?.can_resume"
+                type="button"
+                :disabled="busy"
+                @click="action('resume')"
+              >
+                Resume video
+              </button>
+              <button
+                v-if="detail?.can_delete && !deleting"
+                type="button"
+                class="vjd__danger"
+                :disabled="busy"
+                @click="deleting = true"
+              >
+                Delete recovery data…
+              </button>
+              <button
+                v-if="
+                  detail
+                    ? detail.can_cancel
+                    : admission && !cancelledBeforeAdmission
+                "
+                type="button"
+                class="vjd__danger"
+                :disabled="busy"
+                @click="action('cancel')"
+              >
+                Stop video
+              </button>
+            </div>
+          </footer>
+        </div>
       </ModalPanel>
     </div></Teleport
   >
@@ -364,8 +456,20 @@ onBeforeUnmount(() => {
   inset: 0;
   z-index: var(--mold-z-modal);
 }
-.video-job-control,
-.video-job-overlay button {
+.video-job-overlay :deep(.ms-modal) {
+  padding: 12px;
+}
+.video-job-overlay :deep(.ms-modal__panel) {
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.video-job-overlay :deep(.ms-modal__body) {
+  min-height: 0;
+  overflow: auto;
+}
+.video-job-control {
   min-height: 44px;
   font: inherit;
   color: var(--mold-text);
@@ -374,9 +478,156 @@ onBeforeUnmount(() => {
   border-radius: var(--mold-radius-2);
   padding: 8px 12px;
 }
-.video-job-actions {
+/* The same anatomy and button styles as QueueEntryDetail (`.qed`), so a video
+ * parent's details read like any other job's. */
+.vjd {
   display: flex;
+  min-width: 0;
+  flex-direction: column;
+  color: var(--mold-text-2, currentColor);
+}
+.vjd__head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--mold-border, var(--mold-border-control));
+}
+.vjd__state {
+  padding: 2px 6px;
+  border: 1px solid var(--line, var(--mold-border-control));
+  border-radius: var(--mold-radius-2);
+  font-size: var(--mold-fs-micro);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.vjd__state:is(
+  [data-state="rendering"],
+  [data-state="joining"],
+  [data-state="stopping"]
+) {
+  border-color: var(--mold-blue);
+  color: var(--mold-blue);
+}
+.vjd__state:is([data-state="paused"], [data-state="interrupted"]) {
+  border-color: var(--mold-warning);
+  color: var(--mold-warning);
+}
+.vjd__title {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  color: var(--mold-text);
+  font-size: var(--mold-fs-md);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vjd__close {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.vjd__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.vjd__caption {
+  margin: 0;
+  color: var(--mold-text);
+  font-weight: 600;
+}
+.vjd__facts {
+  display: grid;
+  margin: 0;
+  gap: 6px 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.vjd__facts dt {
+  color: var(--mold-text-dim, currentColor);
+  font-size: var(--mold-fs-xs);
+}
+.vjd__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.vjd__problem {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--mold-error);
+  border-radius: var(--mold-radius-2);
+  color: var(--mold-error);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.vjd__technical {
+  min-width: 0;
+  user-select: text;
+}
+.vjd__technical summary {
+  cursor: pointer;
+}
+.vjd__technical pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--mold-fs-xs);
+}
+.vjd__foot {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--mold-border, var(--mold-border-control));
+}
+.vjd__error {
+  margin: 0;
+  color: var(--mold-error);
+  word-break: break-word;
+}
+.vjd__hint {
+  margin: 0;
+  color: var(--mold-text-dim, currentColor);
+  line-height: 1.4;
+}
+.vjd__confirm {
+  display: grid;
+  gap: 8px;
+}
+.vjd__actions {
+  display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 8px;
+}
+/* Direct children only: ParentVideoRestart's own dialog renders beside its
+ * trigger and keeps its own buttons. */
+.vjd__actions > button,
+.vjd__actions > :deep(button) {
+  min-height: 44px;
+  flex: 1 1 auto;
+  padding: 0 10px;
+  border: 1px solid var(--line, var(--mold-border-control));
+  border-radius: var(--mold-radius-2);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.vjd__actions > button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.vjd__actions > .vjd__danger {
+  border-color: var(--mold-error);
+  color: var(--mold-error);
 }
 </style>

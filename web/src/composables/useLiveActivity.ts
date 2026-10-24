@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch, type WatchStopHandle } from "vue";
 import {
   listActiveWork,
   mergeFleetActivity,
@@ -33,12 +33,18 @@ const epochs: Record<string, number> = {};
 let timer: ReturnType<typeof setTimeout> | null = null;
 let consumers = 0;
 let refreshing = false;
+let refreshAgain = false;
 let pollEpoch = 0;
+let stopReadiness: WatchStopHandle | null = null;
 
 export function useLiveActivity(routing: HostRouting) {
   let started = false;
-  async function refresh() {
-    if (refreshing) return;
+  async function refresh(afterCurrent = false) {
+    if (refreshing) {
+      // A host became ready mid-read: read once more, after this one.
+      if (afterCurrent) refreshAgain = true;
+      return;
+    }
     refreshing = true;
     const routes = routing.hosts.value;
     try {
@@ -83,6 +89,10 @@ export function useLiveActivity(routing: HostRouting) {
     } finally {
       refreshing = false;
     }
+    if (refreshAgain) {
+      refreshAgain = false;
+      await refresh();
+    }
   }
 
   return {
@@ -100,6 +110,21 @@ export function useLiveActivity(routing: HostRouting) {
           timer = setTimeout(poll, POLL_MS);
       };
       timer = setTimeout(poll, 0);
+      // The shell's first poll runs before any readiness probe has answered,
+      // so every host reads "offline" and the Queue showed nothing for a whole
+      // poll while the saved-video list (which waits for readiness) did.
+      // Read a host the moment it becomes ready.
+      const readyKeys = () =>
+        routing.hosts.value
+          .filter((host) => host.status === "ready")
+          .map((host) => `${host.id}|${host.url}`);
+      // Already-ready hosts are covered by the first poll above.
+      let ready = new Set(readyKeys());
+      stopReadiness = watch(readyKeys, (now) => {
+        const fresh = now.some((key) => !ready.has(key));
+        ready = new Set(now);
+        if (fresh && consumers > 0 && epoch === pollEpoch) void refresh(true);
+      });
     },
     stop() {
       if (!started) return;
@@ -107,6 +132,8 @@ export function useLiveActivity(routing: HostRouting) {
       consumers = Math.max(0, consumers - 1);
       if (consumers) return;
       pollEpoch += 1;
+      stopReadiness?.();
+      stopReadiness = null;
       if (timer !== null) clearTimeout(timer);
       timer = null;
     },

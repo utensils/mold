@@ -2,6 +2,8 @@ import { expect, it } from "vitest";
 import {
   parseRequestedVideoDuration,
   formatRequestedVideoDuration,
+  oneClipSceneSeconds,
+  singleGenerationSeconds,
 } from "./videoRequestedDuration";
 
 it("keeps requested milliseconds exact rather than snapping to a model frame grid", () => {
@@ -42,4 +44,18 @@ it("round-trips the full server millisecond range without JavaScript rounding", 
   expect(parseRequestedVideoDuration("9007199254740.992")).toBe(
     "9007199254740992",
   );
+});
+
+it("states the one-generation ceiling and the always-one-clip scene length", () => {
+  const h3 = { fps: 24, single_clip_max_frames: 345, overlap_frames: 1 };
+  expect(singleGenerationSeconds(h3)).toBe("14.375");
+  // (345 - 1) / 24 = 14.33…, floored to a tenth so a scene this long never
+  // spills into a second clip.
+  expect(oneClipSceneSeconds(h3)).toBe("14.3");
+  expect(oneClipSceneSeconds({ ...h3, overlap_frames: 9 })).toBe("14");
+  expect(singleGenerationSeconds({ ...h3, fps: 0 })).toBeNull();
+  expect(oneClipSceneSeconds({ ...h3, overlap_frames: 345 })).toBeNull();
+  expect(
+    oneClipSceneSeconds({ fps: 24, single_clip_max_frames: 345 }),
+  ).toBeNull();
 });

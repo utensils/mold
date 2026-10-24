@@ -167,3 +167,29 @@ extension VideoJobCoordinatorTests {
         #expect(coordinator.jobs.first?.outputAvailable == nil)
     }
 }
+
+extension VideoJobCoordinatorTests {
+    @Test func queueRecheckRereadsLiveParentsAndOnlyForcedRefreshRechecksSavedVideos() async throws {
+        let (backend, owner, defaults) = try setup()
+        let coordinator = VideoJobCoordinator(defaults: defaults)
+        coordinator.publish(try detail("live"), owner: owner)
+        coordinator.publish(try finishedOutput(), owner: owner)
+        var progressed = try JSONSerialization.jsonObject(with: MoldJSON.encoder.encode(detail("live"))) as! [String: Any]
+        progressed["completed_clips"] = "2"
+        progressed["progress_phase"] = "rendering"
+        let next = try MoldJSON.decoder.decode(VideoJob.self, from: JSONSerialization.data(withJSONObject: progressed))
+        backend.stub("videoJob(id:)", returning: next)
+        backend.stub("gallery(etag:)", returning: Fetched<[GalleryPrint]>.fresh([try outputPrint()], etag: nil))
+        await coordinator.recheck(backend: { _ in backend }, current: { _ in false })
+        #expect(backend.count("videoJob(id:)") == 0, "a refused owner keeps its last-known row")
+        await coordinator.recheck(backend: { _ in backend }, current: { _ in true })
+        #expect(backend.count("videoJob(id:)") == 1, "a completed parent is not re-read")
+        #expect(coordinator.jobs.first { $0.operationId == "live" }?.detail?.completedClips == 2)
+        #expect(coordinator.jobs.first { $0.operationId == "done" }?.outputAvailable == true)
+        backend.stub("gallery(etag:)", returning: Fetched<[GalleryPrint]>.fresh([], etag: nil))
+        await coordinator.recheck(backend: { _ in backend }, current: { _ in true })
+        #expect(coordinator.jobs.first { $0.operationId == "done" }?.outputAvailable == true, "poll trusts the known answer")
+        await coordinator.recheck(backend: { _ in backend }, current: { _ in true }, force: true)
+        #expect(coordinator.jobs.first { $0.operationId == "done" }?.outputAvailable == false)
+    }
+}

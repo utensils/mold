@@ -1,10 +1,21 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
+import LiveActivityList from "@ui/components/LiveActivityList.vue";
+import type { FleetActiveWork } from "../api/activity";
 import { apiJsonTo } from "../api/client";
 import { listVideoJobs } from "../api/videoJobList";
 import type { VideoJobOwner, VideoJobAdmission } from "../api/videoJobs";
 import type { VideoJob } from "../lib/api/videoJobTypes";
 import { readVideoJobOperations } from "../lib/videoJobRecovery";
+import { videoJobActivityItem } from "../lib/videoJobRow";
+import { modelDisplayNameForId } from "../lib/modelDisplay";
 import { useHeldQueueTransfer } from "../composables/useHeldQueueTransfer";
 import VideoJobControl from "./VideoJobControl.vue";
 const props = defineProps<{ existingKeys?: string[] }>();
@@ -13,6 +24,28 @@ const visibleJob = (owner: VideoJobOwner, job: VideoJob) =>
   !props.existingKeys?.includes(
     `${owner.hostId}:${owner.instanceId}:${job.id}`,
   );
+/** A saved parent drawn through the same row as live Queue work. */
+function asRow(owner: VideoJobOwner, job: VideoJob): FleetActiveWork {
+  return {
+    ...videoJobActivityItem(job),
+    key: `${owner.hostId}:video_job:${job.id}`,
+    hostId: owner.hostId,
+    hostLabel: owner.label,
+    routeUrl: owner.target.baseUrl,
+    instanceId: owner.instanceId ?? null,
+    stale: false,
+    hostError: null,
+  };
+}
+const modelLabel = (row: FleetActiveWork) =>
+  row.model ? modelDisplayNameForId(row.model, []) : "Video";
+/** Which saved row's details are open. Re-choosing a row closes and reopens. */
+const openKey = ref<string | null>(null);
+async function openRow(row: FleetActiveWork) {
+  openKey.value = null;
+  await nextTick();
+  openKey.value = row.key;
+}
 interface HostPage {
   owner: VideoJobOwner;
   jobs: VideoJob[];
@@ -164,8 +197,13 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <section aria-label="Saved video jobs">
-    <button type="button" :disabled="busy" @click="check">
+  <section aria-label="Saved video jobs" class="video-job-history">
+    <button
+      type="button"
+      class="video-job-history__check"
+      :disabled="busy"
+      @click="check"
+    >
       {{ busy ? "Checking video jobs…" : "Check saved video jobs" }}
     </button>
     <p v-if="error" role="alert">{{ error }}</p>
@@ -173,7 +211,7 @@ onBeforeUnmount(() => {
       v-for="record in unanswered"
       :key="`${record.hostId}:${record.instanceId}:${record.operationId}`"
     >
-      <p>
+      <p class="video-job-history__note">
         Unanswered video attempt · {{ record.hostId }} ·
         {{ record.operationId }}
       </p>
@@ -189,26 +227,32 @@ onBeforeUnmount(() => {
       v-for="page in pages"
       :key="`${page.owner.hostId}:${page.owner.instanceId}`"
     >
-      <article
+      <div
         v-for="job in page.jobs.filter((job) => visibleJob(page.owner, job))"
         :key="job.id"
+        class="video-job-history__row"
       >
-        <p>
-          {{ page.owner.label }} · {{ job.state }} ·
-          {{ job.completed_clips }} of {{ job.plan.clip_count }} clips
-        </p>
-        <p v-if="job.error_detail || job.error">
+        <LiveActivityList
+          :rows="[asRow(page.owner, job)]"
+          :model-label="modelLabel"
+          interactive
+          @select="openRow"
+        />
+        <p v-if="job.error_detail || job.error" class="video-job-history__note">
           {{ job.error_detail ?? job.error }}
         </p>
         <VideoJobControl
           :owner="page.owner"
           :job-id="job.id"
+          :auto-open="openKey === asRow(page.owner, job).key"
+          hide-trigger
           @changed="check"
         />
-      </article>
+      </div>
       <button
         v-if="page.more"
         type="button"
+        class="video-job-history__check"
         :disabled="busy || !current(page.owner)"
         @click="more(page)"
       >
@@ -217,3 +261,32 @@ onBeforeUnmount(() => {
     </div>
   </section>
 </template>
+<style scoped>
+.video-job-history {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+.video-job-history__row {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+.video-job-history__check {
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid var(--mold-border-control);
+  border-radius: var(--mold-radius-2);
+  background: transparent;
+  color: var(--mold-text-dim);
+  font: inherit;
+  font-size: var(--mold-fs-sm);
+  cursor: pointer;
+}
+.video-job-history__note {
+  margin: 0;
+  color: var(--mold-text-dim);
+  font-size: var(--mold-fs-sm);
+}
+</style>

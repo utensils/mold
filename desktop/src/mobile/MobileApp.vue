@@ -242,6 +242,11 @@ import {
   type FleetActiveWork,
 } from "@studio/api/activity";
 import {
+  isLiveVideoJobActivity,
+  liveVideoJobCounts,
+  videoJobActivityRow,
+} from "@studio/lib/videoJobRow";
+import {
   cancelQueueJob,
   getQueueJob,
   findQueueEntryById,
@@ -3506,6 +3511,7 @@ function sharedQueueTitle(row: FleetActiveWork): string {
 
 /** A machine's own row answers the same way: a sentence while it works. */
 function sharedQueueRunning(row: FleetActiveWork): boolean {
+  if (row.kind === "video_job") return isLiveVideoJobActivity(row) && row.phase !== "queued";
   return row.phase !== "queued" && row.phase !== "paused";
 }
 
@@ -3521,6 +3527,10 @@ function sharedQueueStatus(row: FleetActiveWork): string {
 }
 
 function sharedQueueProgress(row: FleetActiveWork): number | null {
+  if (row.kind === "video_job") {
+    const fraction = videoJobActivityRow(row).progress;
+    return fraction === null ? null : Math.round(fraction * 100);
+  }
   if (
     row.kind === "generation" &&
     liveQueues.value[row.hostId]?.entries.find((entry) => entry.id === row.id)?.stall
@@ -3951,10 +3961,15 @@ const waitingRowCount = computed(
   () =>
     activityRows.value.filter((row) => mobilePrintPhase(row.print, row.live) !== "running").length,
 );
-const activityCounts = computed(() => ({
-  running: runningRowCount.value,
-  waiting: waitingRowCount.value,
-}));
+// A video parent is server-owned, so it is never one of this session's print
+// rows; counting only those said "No active generations" while clips rendered.
+const activityCounts = computed(() => {
+  const video = liveVideoJobCounts(sharedMobileActivity.value);
+  return {
+    running: runningRowCount.value + video.running,
+    waiting: waitingRowCount.value + video.waiting,
+  };
+});
 const activeGeneration = computed(() => {
   if (selectedQueueRender.value) return null;
   if (selectedDurableGenerationClientId !== null) {
@@ -15144,12 +15159,6 @@ watch(
                      meter, which made the fleet's work read as a lesser kind
                      of job on the one screen that exists to compare them. -->
                 <div v-else class="mobile-generation-row">
-                  <VideoJobControl
-                    v-if="entry.shared.kind === 'video_job'"
-                    :host-id="entry.shared.hostId"
-                    :job-id="entry.shared.id"
-                    :instance-id="entry.shared.instanceId"
-                  />
                   <VideoRestartControl
                     :host-id="entry.shared.hostId"
                     :job-id="entry.shared.id"
