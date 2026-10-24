@@ -144,11 +144,9 @@ async fn jobs_list(
     if let Some(page) = videos {
         for job in page.jobs {
             println!(
-                "{}  {:?}  {}/{} clips{}",
+                "{}  {}{}",
                 job.id,
-                job.state,
-                job.completed_clips,
-                job.plan.clip_count,
+                crate::commands::video_jobs::video_job_line(&job),
                 job.output_filename
                     .map(|name| format!("  {name}"))
                     .unwrap_or_default()
@@ -169,8 +167,9 @@ async fn jobs_show(client: &MoldClient, id: &str, json: bool, script: bool) -> R
             println!("{}", serde_json::to_string_pretty(&job)?);
         } else {
             println!(
-                "{}: {:?}, {}/{} clips",
-                job.id, job.state, job.completed_clips, job.plan.clip_count
+                "{}: {}",
+                job.id,
+                crate::commands::video_jobs::video_job_line(&job)
             );
             if let Some(name) = job.output_filename {
                 println!("Library: {name}");
