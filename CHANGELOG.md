@@ -11,6 +11,262 @@ Pull requests do not edit the `[Unreleased]` section directly: each adds a
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-24
+
+- **`mold jobs list`/`show` and video progress use the shared queue wording.** Duration videos read "Rendering clip 2 of 3 · 40 s video · 3 clips" or "Done · 14 s video" instead of "Running, 0/1 clips", matching every app.
+- **Native video Queue rows, Length slider and one seed control.** In Mold
+  Studio for Mac and the iPhone/iPad Companion, duration videos and authored
+  multi-clip videos are now ordinary Queue rows in their machine's section,
+  worded like every other surface ("Waiting", "Rendering clip 2 of 4",
+  "Joining clips", never "1 clips"), with Stop, Resume, Start again… and
+  Delete job… as row buttons, swipes and context-menu items, and a details
+  sheet. The "Check queue" button is gone: Queue re-checks each video on
+  refresh and while open, and its header, badges and Machines counts include
+  live videos so they no longer read Idle while clips render. Clip length is
+  one **Length** slider: exact tenths of a second up to one generation of
+  the machine's video plan (14.3 s for MiniMax H3), or the model's frame grid
+  for an ordinary clip with **Automatic from prompt** and a **Longer
+  video** scenes editor whose per-scene sliders stop at the longest scene
+  that stays one clip. Both apps share one seed control: Random | Fixed, an
+  editable full-range number and a dice New seed button.
+- **Long videos read like any other Queue row in the browser, desktop and phone
+  apps.** A video made of several clips now says "Waiting", "Rendering clip 2
+  of 3", "Joining clips" or "Paused · 1 of 3 clips done" in the ordinary row,
+  with the ordinary meter, and opens its Stop, Resume, Start again and Delete
+  controls from the row like any other job. A one-clip video never reads
+  "1 clips", the Queue header no longer calls a video waiting for a GPU "being
+  made" or a stopped one "Making", and the phone's queue announcement counts
+  rendering videos. The scenes editor states how long a scene can be and still
+  stay one clip, and shows every plan warning in full.
+- **MiniMax H3 Duration videos up to 14.4 s render as one clip.** A Duration
+  request now plans H3 clips at its full single-generation length (345 frames)
+  instead of the 124-frame default, so `--duration 14` is one clip rather than
+  three short clips replaying the same prompt.
+- **Scenes for longer videos, from the CLI too.** `mold run MODEL --scenes
+  scenes.toml` takes one `[[scene]]` per part (`seconds` plus its own
+  `prompt`); the video length is their sum and the dry run prints the scene
+  timeline. Every scene's prompt is validated before anything renders, and the
+  plan now warns when a scene or single prompt is longer than one generation
+  (its action would repeat) or shorter than the shortest generation.
+- **H3 continuation clips are prompted as continuations.** Each clip that
+  starts from the previous clip's last frame opens with MiniMax's upstream
+  frame-alignment instruction, so the model treats the carried frame as the
+  opening picture. Videos already in progress resume unchanged.
+- **Video jobs report what they are actually doing.** `/api/video-jobs` adds
+  `progress_phase` (`waiting`, `rendering`, `joining`) and `/api/activity`
+  reports a waiting video as queued, so Queue no longer shows every accepted
+  video as running while only some render.
+- **Chained videos no longer get darker with every clip.** Every H.264
+  encode and decode now uses one rounded BT.601 conversion instead of the
+  codec library's truncating helpers, which shaved about one code off every
+  channel per pass. The frame carried into each next clip went through
+  several passes, so a dark H3 scene lost roughly 13% of its brightness at
+  every clip boundary.
+- **Native video Queue cleanup.** Dismiss completed videos promptly and keep
+  them dismissed across refresh and relaunch. Show deletion progress, reconcile
+  already-removed jobs, keep row buttons independent, and stop linking to missing Library movies.
+- **Reliable video dismissal.** Browser, desktop and mobile video controls now reconcile removed recovery data after a lost Delete reply, discard stale completed details, and check the saved Library copy before opening it. Offline attempts remain recoverable.
+- **Native video progress recovery.** Queue replaces a stale progress reader
+  when connection details change and labels cached status as last known until
+  the original connection is current.
+- **Saved video jobs reconnect automatically.** Web and Tauri Queue refresh recoverable video jobs when a machine reconnects or its connection changes, discard stale discovery replies, and disable Details for outdated owners.
+- Fixed iOS Queue recovery after late machine connection and capability updates, restoring controls for paused videos without reopening the screen. Late replies from an earlier connection no longer overwrite the current queue.
+- Fixed Extend source restoration across connection updates and made failed video-list pages retryable without leaving stale errors or hiding recovery controls.
+- **One prompt, longer videos.** Web, desktop, mobile, native macOS and iOS,
+  CLI and Discord support requested Duration with the model's single-render
+  limit and joined-clip count. Define scenes is optional; rendering and movie
+  assembly stay bounded without a fixed overall clip-count limit.
+- **Extend saved videos.** Add a prompt and more time to a Library video and
+  save the complete original plus new footage as a new movie. The original
+  remains saved; retained source audio and inputs survive interruption.
+- **Durable video recovery.** Stop pauses accepted videos after their current
+  work settles. Resume retains completed clips and the frozen recipe; Start
+  again and Send preserve original inputs while validating the destination's
+  current recipe. Historical stopped jobs remain visible for recovery, and
+  internal H3 clips cannot run independently of their parent.
+- **Faithful Use settings.** Restore requested duration, literal prompts and
+  scenes, exact full-range seeds, original references and frame positions,
+  including after queue recovery data is deleted. Legacy clips retain their
+  individual joins, adapters and typed inputs. Missing historical provenance
+  explains recovery options before changing the current draft. Extension reuse
+  describes the added footage and leaves the original prefix detached.
+- **Reliable app controls and agent workflows.** Library video handoff survives
+  native composer startup, Duration appears before Generate, saved seeds avoid
+  browser rounding, and authenticated recovery receipts reconcile uncertain
+  submissions without duplicate work. Agent skills distinguish named H3 Fast
+  variants, first submission, recovery and legacy sequence limits.
+- **Complete Library mirrors.** Preserve captured recipes, exact seeds and
+  original inputs alongside resumable audio and clip-history archive transfers.
+  Repair partial copies without duplicate movies; bind copied data to the exact
+  machines and saved outputs. Durable verification records keep unchanged-video
+  scans fast, while changed bytes and conflicting settings remain errors.
+- **Oh My Pi skills.** Add `mold skill install omp` with native user and project discovery paths, the complete canonical skill bundle, managed updates and uninstall, and inclusion in `--all` and `--detected`.
+- **Video duration and paired-host planning.** Accept `mold run --duration` for video models through durable requested-length parents, validate the server plan with `--dry-run`, and inspect authored-chain bounds with `mold chain limits`. Agent skills direct paired-host queries through the authenticated CLI.
+- **Restart stopped videos across machines.** Web and Tauri Queue offer a reviewed new attempt for recoverable multi-clip videos, preserve saved inputs and full-range seeds, and recover interrupted admission without changing the original.
+- **Delete failed video recovery data safely.** Queue asks for a separate confirmation, fences deletion to the original installation and job revision, and preserves saved Library videos. Restart cancellation rejects a replacement installation and recovers a lost Stop reply without another generation.
+- **Recover failed videos.** Failed video generations retain their exact inputs
+  in the durable queue for movement to another machine. Failed and interrupted
+  sequence parents remain visible after reconnect for explicit recovery.
+- **Restart video sequences.** Failed or paused unlinked sequences can start a
+  separate attempt using the selected machine's current model recipe through
+  revision-fenced restart exports and `mold jobs restart`. Resume preserves the
+  original frozen recipe.
+- **Responsive native macOS startup.** Mold opens a startup window while preparing an external Mold home, instead of blocking before the first window. Private storage and engine preparation still finish before networking starts, and failures preserve the original home and credentials.
+- **iOS keyboard dismissal.** Done closes the active clip prompt keyboard after scrolling while retaining edits and ordinary prompt behavior.
+- **Multi-clip video in the apps.** Add ordered clips from Create and continue completed authored videos from Library on their original machine, with validated duration, durable progress and recovery across web, desktop, mobile and native Apple apps.
+- **Discord video parts.** `/video make` joins two prompted clips; guild operators can continue, inspect, resume and cancel durable parts, with the same server validation and generation quotas.
+- Keep H3 stage intermediates in recoverable Trash after durably retaining their private recovery copies, leaving joined parts in the active Library.
+- **Reliable random-seed video chains.** Resolve random seeds before sealing retained inputs and recover existing affected jobs without changing authored-media authority. Preserve source-fitting provenance, advertise model-specific clip authoring limits, and count H3 chain stages under their durable parent across restarts.
+- **Video sequences through CLI and API.** Restore durable chaining across supported video models, including MiniMax H3 server stages with retained conditioning and audio. Align soundtracks to the stitched video timeline, preserve full-range seeds in script exports, and repair downloads of retained legacy chain inputs. Add complete validated skill examples, model-specific seam guidance and job recovery instructions; GUI scene authoring remains unchanged. Allow sequences to continue through unlimited bounded successor parts with owned motion tails, explicit CLI discovery, resumable creation and rollback-safe manifests.
+- **Mold Studio (Mac) stays responsive during Library Sync.** Reconciling organization no longer re-filters the whole library for every print: the hide-only privacy revision now moves only when a copy's identity actually changes (stamping This Mac onto older sync records no longer counts as a change), privacy links are rebuilt once per such change instead of on every journal write, and the sidebar and Library subtitle counts refresh at most once a second while a sync runs and exactly when it finishes. A copy verified mid-run also stays privacy evidence until the run publishes it.
+- **Sync progress names the destination.** The transfer banner reads "3,713 already on hal9000" instead of "Already here 3,713", which read as this Mac while syncing to another machine.
+- **Reliable native Source Media tiles.** Use the Library’s tight aspect-preserving rows and keep badges inside images. Preserve warm previews during resizing and sync, remove timed reloads, and recover cancelled or transiently failed thumbnails without scrolling. Keep filtered Source Media windows independent while sharing cached inventories.
+- **Readable macOS Queue controls.** Pause/resume and empty-queue toolbar buttons and menus always show their action icons, with labels and tooltips.
+- **Responsive unread badges during sync.** Coalesce full privacy projections and ledger saves during transfers, process safe row patches incrementally, and immediately flush viewing, visit and final-sync read state.
+- Native macOS nightly builds include bounded responsiveness diagnostics and sync timing signposts, with a read-only capture script for investigating slowdowns on an existing running app.
+
+- Native Library video playback preserves playback intent through streaming stalls and resolves the final video frame only when needed; iOS plays complete locally cached originals and can reopen, share and save them offline.
+- macOS viewer Delete moves the displayed print to Trash, and selected Library thumbnails have a stronger outline and checkmark.
+- Native Source Media uses a resizable Library-style thumbnail grid and filters, includes hidden collections, and avoids repeated empty-source checks and unrelated preview refreshes.
+- macOS Library counts are cached across sync progress redraws. Native macOS and iOS cache preferences now include Unlimited.
+- Keep video duration selections valid when recipe bounds or frame rate change, start encrypted clips with longer audio tracks reliably, and preserve the decoded final video frame through playback end, scrub, replay and Repeat on native apps.
+- Prepare fresh H3 reference video imports on capable hosts with bounded conversion, exact original/canonical receipts and finalized request authority across native, Studio, CLI and Discord clients.
+- Report real LTX decoder work and cooperative cancellation, retain device ownership during stalls, and settle interrupted cancellation during queue recovery. Reuse bounded decoder RoPE tables without changing existing arithmetic.
+- Refuse unreviewed H3 configuration aliases and caller-selected adapter identities before admission while preserving reviewed manifest artifact loading.
+- **`mold skill install claude-desktop`.** Builds the mold skill as a ZIP for
+  Claude Desktop and claude.ai (`~/Downloads/mold-skill.zip`). It adds a local
+  `mold mcp` connector to `claude_desktop_config.json`, backing up the old
+  file, using the default host or the one given with `--host`. It then opens
+  **Customize > Skills** so you can upload the ZIP. The Desktop skill tells
+  Claude to work through the connector tools, because Desktop chat runs in a
+  cloud sandbox with no `mold` binary. `mold skill list` shows the connector
+  and whether the ZIP is current, and
+  `mold skill uninstall claude-desktop` removes only what mold wrote.
+- **Library copy and sync parity.** Choose copy/sync destinations, preserve hidden-copy privacy through Trash, and reconcile copied organization while respecting destination edits.
+- **Reusable source media.** Source identifiers, original-media actions and host-scoped CLI input addresses make retained media usable across supported clients.
+- **Library interactions.** Add attachment endpoints and filename copying, separate collection management from print menus, and improve native Delete shortcuts and dismissible activity layout.
+- `mold server status --host NAME` now reads the saved host's own origin instead of treating the name as a hostname (`http://NAME:7680`).
+- `mold upscale --local` (and the local fallback when the server is down) downloads a missing upscaler on this machine instead of asking the selected host to pull it, and stops after one failed pull instead of retrying.
+- A remote request refused because the host is not paired (`426 SECURE_CONNECTION_REQUIRED`, or "No secure pairing for this host") now ends with one hint: run `mold host invite` on that machine and `mold host add` here, or `mold host add URL --regular --api-key-file KEY` for a host started with `--allow-direct-api`.
+- CLI help describes the selected host (`--host`, `MOLD_HOST`, or the default host) and its saved credential instead of `MOLD_HOST` plus `MOLD_API_KEY`; `mold queue send --to` documents saved host names; the global `--host` notes that local-only commands refuse it; `mold server discover` suggests `mold host add <url>`.
+- Docs and the agent skill pair a host with `mold host invite` / `mold host add` and then select it with `--host workstation`, replacing examples that pointed `MOLD_HOST` at an unpaired `http://` host (which the server now refuses). The skill adds a host-selection procedure for agents, `mold pull --local`, and safety rules for `mold host use`/`rm`/`invite`/`add` and pairing links.
+- `mold host add` accepts a legacy Secure invitation file that names its host with `origin` instead of `base_url`, as old `mold pair --invite-file` files do.
+- **`mold library download`.** Save prints' original files from any host:
+  `mold library download NAME` (a unique prefix of the name works),
+  `-o DIR/` or `-o FILE` or `-o -` for stdout, `--latest N` for the newest
+  prints, and `--trash` for trashed ones. Files stream to a new hidden partial file and are moved
+  into place when complete, existing files (even ones that appear during the
+  download) are never overwritten without `--force`, and a progress bar shows on a terminal. `mold library list` ends
+  with a hint on a terminal. Agents no longer need to decode MCP base64 to hand
+  over a file.
+- **`mold host invite` and `mold host add`: pair the CLI in one step.** On the
+  host, `mold host invite` prints the same one-use pairing link the apps show
+  (`--qr` draws it for a phone, `--output` keeps the owner-only file); on the
+  client, `mold host add` (then paste the link) pairs and saves the host under
+  its name.
+  `mold host add URL` with the host's operator key exchanges it for the
+  client's own revocable grant without storing it, saves an app key as a
+  Regular connection, and saves a host with authentication off keyless.
+  `mold pair` and `mold pairing create` keep working as hidden aliases, and
+  `mold pair --invite-file` also reads a file holding a link.
+- **`mold pairing create` and `mold pair` print like their new commands.**
+  `mold pairing create --output` now writes its messages to stderr, leaving
+  stdout empty, and `mold pair` prints the `Added <name>` line and checks the
+  host once after pairing. Pairing hints in errors now name `mold host invite`
+  and `mold host add`.
+- **A saved host's own credential always wins over `MOLD_API_KEY`.** A
+  client now sends `MOLD_API_KEY` only to a host with no saved credential; a
+  saved Regular key (or a host saved keyless) and a Secure pairing always take
+  precedence, so a key exported for one machine is never sent to another.
+- **Named hosts and one global `--host`.** Every remote command now takes a
+  global `--host` (before or after the verb), and it, `MOLD_HOST`, and a new
+  default host all accept a saved host name, a URL, or a Tailscale IP the
+  paired host advertised, so it finds a host paired under its relay origin
+  (and says so on stderr); LAN addresses are used as typed. Pairing saves the host under its own name; `mold host list`,
+  `mold host use NAME` (or `--clear`) and `mold host rm NAME` manage them.
+  Precedence is `--host`, then `MOLD_HOST`, then the default host, then
+  `http://localhost:7680`. Commands that only run on this machine now refuse a
+  typed `--host` instead of ignoring it.
+- **`mold pull` no longer downloads here when a remote host is down.** A pull
+  aimed at another machine that does not answer is now an error instead of a
+  silent download onto this one; only a target on this machine falls back.
+  The new `mold pull --local` downloads here on purpose. `mold run --local`,
+  `mold pull --local` and catalog-recipe pulls refuse a typed `--host`, and
+  `mold runpod run --host NAME` reuses that paired pod.
+- **Re-pairing a host keeps its name.** Pairing the same server again under a
+  new address replaces the old entry in place, keeping its name and default.
+- **`mold upscale` and `mold video-upscale` honor `MOLD_API_KEY` and paired
+  hosts.** They used to build an unauthenticated client of their own.
+- **`mold --help` describes `upscale` and `completions` correctly.** Their help
+  text had been swapped.
+- **Libraries follow only what changed.** The web Library, the desktop app
+  (every connected machine and this device) and the phone now keep a per-host
+  gallery replica that reads the server's change feed, so a refresh or a live
+  update downloads only the prints that changed instead of the whole gallery.
+  Gallery events from every machine trigger those pulls, the web and desktop
+  polls stand down while a machine's live stream is up, an unchanged Library
+  does no work at all (and the phone no longer rewrites its saved Library),
+  and older servers keep the full listing they use today. Bulk actions on the
+  web Library no longer slow down with library size.
+- **iPhone and iPad Library follows each machine's gallery change feed.** Mold
+  Studio Companion now keeps one replica per machine, as the Mac app does:
+  where a machine advertises `capabilities.gallery.changes_feed` it reads only
+  the prints that changed since its saved cursor, and older machines keep the
+  conditional listings, diffed into the same changes. Gallery events no longer
+  re-read the whole machine; a burst of them is one coalesced catch-up, a
+  return to the foreground pulls once, and a refresh that finds nothing new no
+  longer redraws the grid. New and edited prints are applied without
+  re-merging the whole library, collections are re-read only when something
+  says they changed, and the offline Library moves into the replicas' saved
+  state on first launch after the update.
+- **Mac Library Sync costs what changed, not the whole library.** Sync All
+  and Keep This Mac in Sync now read every machine at once through its gallery
+  replica. Keep This Mac in Sync plans only the prints that changed since its
+  last run (plus anything still owed a retry, and a full check once a day); a
+  Sync All press verifies every print against one checkpoint read per
+  machine. Either way a run where nothing changed asks no machine anything per
+  print. Copy receipts come from the import's own answer, synchronized to disk
+  before retained inputs move, instead of a per-print listing read; final
+  verification asks the bounded `POST /api/gallery/sync-checkpoint` for just
+  the touched prints (older machines fall back to the full checkpoint); and
+  copy records moved out of the preferences suite into their own file, written
+  off the main thread, with a one-time migration and pruning of copies gone
+  from both sides. An unreadable records file is set aside and pauses Sync All
+  instead of recreating copies you removed. Collection visibility is synced in
+  one pass and progress updates at most ten times a second.
+- **Mac Library follows each machine's gallery change feed.** Mold Studio keeps
+  one replica per machine: where a machine advertises
+  `capabilities.gallery.changes_feed` it reads only the prints that changed
+  since its saved cursor (resumed across relaunches), live gallery events and
+  reconnects become one coalesced catch-up instead of a rebuild per event, and
+  a refresh that finds nothing new no longer redraws or re-sorts the grid.
+  Older machines keep the conditional full listing, diffed into the same
+  changes. Tile lookups, small edits and new prints no longer re-merge the
+  whole library, grid geometry is cached per derived section revision, and
+  reloading collections no longer forces every machine to re-send its index.
+- **Gallery change feed for faster library refresh.** New
+  `GET /api/gallery/changes?since=<cursor>` returns only the prints that
+  changed since a client's last read (trash included, with removals and a
+  `reset` signal), advertised as `capabilities.gallery.changes_feed`, so
+  library clients can stay current without re-downloading the whole gallery.
+  `POST /api/gallery/sync-checkpoint` answers the mirror checkpoint for just
+  the named prints, and an unchanged `GET /api/gallery` now answers `304`
+  without rebuilding the listing, which makes every existing client's idle
+  poll cheap.
+- **Faster single-print reads.** `GET /api/gallery?filename=` now reads only
+  that print's row, organization, and assets instead of building the whole
+  library and filtering it, and gallery archive lookups (including Library
+  mirror transfer offers) share the cached archive index instead of copying
+  it on every read. Responses are unchanged.
+- **Library Sync no longer repeats on a timer.** On the native Mac app, Sync All to This
+  Mac now copies once per press. The new opt-in **Keep This Mac in Sync** toggle (toolbar
+  menu or Settings ▸ Library, off by default) copies new and changed prints as soon as each
+  machine announces them, with bursts coalesced into one run and no overlapping runs.
+  Quitting Mold now stops a running sync instead of holding the engine drain open.
+- **Visible native Mac Library filters.** Machine and media filters now display their current selections, with consistent native menus, selection checkmarks and accessible labels.
+- **Reliable native Mac source restore.** Fully materialized source files remain independent local attachments across prompt edits and relaunch, without a stale archive warning. Unresolved remote references and missing snapshots remain protected.
+- **Balanced native queue previews.** macOS and iOS show a quiet image placeholder for jobs without a source image, with distinct loading and unavailable descriptions and stable thumbnail space.
+
 ## [0.36.0] - 2026-10-12
 
 - Fixed the native iOS queue's Cancel Batch button hit target and accessibility frame to cover its full 44-point height.
@@ -6540,7 +6796,8 @@ Initial public release on [crates.io](https://crates.io/crates/mold-ai).
 | [`mold-ai-inference`](https://crates.io/crates/mold-ai-inference) | Candle-based inference engine           |
 | [`mold-ai-server`](https://crates.io/crates/mold-ai-server)       | Axum HTTP inference server              |
 
-[Unreleased]: https://github.com/utensils/mold/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/utensils/mold/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/utensils/mold/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/utensils/mold/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/utensils/mold/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/utensils/mold/compare/v0.33.0...v0.34.0

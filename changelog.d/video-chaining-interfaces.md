@@ -1,3 +1,0 @@
-- **Multi-clip video in the apps.** Add ordered clips from Create and continue completed authored videos from Library on their original machine, with validated duration, durable progress and recovery across web, desktop, mobile and native Apple apps.
-- **Discord video parts.** `/video make` joins two prompted clips; guild operators can continue, inspect, resume and cancel durable parts, with the same server validation and generation quotas.
-- Keep H3 stage intermediates in recoverable Trash after durably retaining their private recovery copies, leaving joined parts in the active Library.

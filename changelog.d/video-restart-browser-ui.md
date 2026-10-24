@@ -1,2 +1,0 @@
-- **Restart stopped videos across machines.** Web and Tauri Queue offer a reviewed new attempt for recoverable multi-clip videos, preserve saved inputs and full-range seeds, and recover interrupted admission without changing the original.
-- **Delete failed video recovery data safely.** Queue asks for a separate confirmation, fences deletion to the original installation and job revision, and preserves saved Library videos. Restart cancellation rejects a replacement installation and recovers a lost Stop reply without another generation.
