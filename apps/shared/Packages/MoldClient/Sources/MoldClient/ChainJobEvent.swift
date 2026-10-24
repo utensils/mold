@@ -103,6 +103,16 @@ public struct ChainJobDetail: Decodable, Hashable, Sendable {
         return latest
     }
     public var galleryFilename: String? { latestFinalize?.galleryFilename }
+    /// The same Queue rule as `ObservedVideoJob.belongsInQueue`: finished and
+    /// stopped sequences leave on their own, except a finish that published
+    /// no Library file, whose row carries that warning.
+    public var belongsInQueue: Bool {
+        switch state {
+        case .cancelled: false
+        case .completed: galleryFilename == nil
+        default: true
+        }
+    }
 }
 
 public struct ChainJobFinalize: Decodable, Hashable, Sendable {

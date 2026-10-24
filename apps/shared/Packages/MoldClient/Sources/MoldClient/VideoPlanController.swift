@@ -17,6 +17,11 @@ public final class VideoPlanController {
     @ObservationIgnored private let debounceNanoseconds: UInt64
     @ObservationIgnored private var pending: Task<Void, Never>?
     @ObservationIgnored private var token = UUID()
+    /// What `shownPlan` answered for. Only the length may change under it.
+    @ObservationIgnored private var shownScope: Scope?
+    private struct Scope: Equatable {
+        let host: UUID?, destination: String?, model: String, fps: Int?, source: VideoJobSource?
+    }
 
     public init(debounceNanoseconds: UInt64 = 250_000_000) { self.debounceNanoseconds = debounceNanoseconds }
 
@@ -27,6 +32,9 @@ public final class VideoPlanController {
             http.pinningVideoDestination(destinationInstanceId)
         } else { backend }
         reset()
+        let scope = Scope(host: (backend as? any MoldBackend)?.host.id, destination: destinationInstanceId,
+                          model: request.generation.model, fps: request.generation.fps, source: request.source)
+        if scope != shownScope { shownPlan = nil; shownScope = scope }
         isCalculating = true
         let mine = token, delay = debounceNanoseconds, scalars = request.planningProjection
         let work = Task { [weak self] in
@@ -43,7 +51,7 @@ public final class VideoPlanController {
             } catch {
                 guard let self, mine == self.token else { return }
                 self.isCalculating = false
-                if !Task.isCancelled, current() { self.error = UserFacingError.describe(error) }
+                if !Task.isCancelled, current() { self.error = UserFacingError.describe(error); self.shownPlan = nil }
             }
         }
         pending = work
@@ -51,7 +59,7 @@ public final class VideoPlanController {
     }
 
     public func clear() {
-        reset(); shownPlan = nil
+        reset(); shownPlan = nil; shownScope = nil
     }
 
     private func reset() {

@@ -28,7 +28,8 @@ extension QueuePane {
     private var queuedIDs: [MoldHost.ID: Set<String>] {
         var ids: [MoldHost.ID: Set<String>] = [:]
         for host in hosts.hosts {
-            ids[host.id] = Set(queue.entries(on: host.id).map(\.id) + generate.sequence.jobs.filter { $0.host.id == host.id }.map(\.jobId) + generate.videoJobs.jobs.filter { $0.owner.host.id == host.id }.map(\.operationId))
+            ids[host.id] = Set(queue.entries(on: host.id).map(\.id))
+                .union(NativeVideoQueue.operationIDs(videos: generate.videoJobs, sequence: generate.sequence, on: host.id))
         }
         return ids
     }

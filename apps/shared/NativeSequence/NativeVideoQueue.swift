@@ -138,8 +138,8 @@ struct NativeVideoQueue {
     /// The operation ids drawn as video rows, so Also Running never repeats one.
     static func operationIDs(videos: VideoJobCoordinator, sequence: NativeSequenceSession,
                              on host: MoldHost.ID) -> Set<String> {
-        Set(videos.jobs.filter { $0.owner.host.id == host }.map(\.operationId)
-            + sequence.jobs.filter { $0.host.id == host }.map(\.jobId))
+        Set(videos.jobs.filter { $0.owner.host.id == host && $0.belongsInQueue }.map(\.operationId)
+            + sequence.queueJobs.filter { $0.host.id == host }.map(\.jobId))
     }
 
     private func videoBackend(_ owner: VideoJobOwner) -> (any MoldBackend)? {

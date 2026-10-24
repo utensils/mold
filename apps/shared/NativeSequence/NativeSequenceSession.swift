@@ -350,7 +350,7 @@ final class NativeSequenceSession {
     /// The authored sequences the Queue draws: a finished or stopped one
     /// leaves on its own, like every other row.
     var queueJobs: [Job] {
-        jobs.filter { $0.detail?.state != .completed && $0.detail?.state != .cancelled }
+        jobs.filter { $0.detail?.belongsInQueue ?? true }
     }
     func dismiss(_ job: Job) {
         guard job.detail?.state == .completed || job.detail?.state == .cancelled else { return }
