@@ -89,12 +89,12 @@ struct ControlsRow: View {
         if durationLength, let authoring = controller.videoDuration {
             NativeLengthControl(
                 grid: VideoLengthGrid.duration(temporal: temporal, fps: draft.fps, limits: chainLimits,
-                                               plan: controller.videoPlanner.plan),
+                                               plan: controller.videoPlanner.shownPlan),
                 temporal: temporal, draft: $draft,
                 duration: Binding(get: { controller.videoDuration?.draft ?? authoring.draft },
                                   set: { controller.videoDuration?.draft = $0 }),
                 prompt: draft.prompt,
-                authoritative: chainLimits != nil || controller.videoPlanner.plan != nil)
+                authoritative: chainLimits != nil || controller.videoPlanner.shownPlan != nil)
         } else {
             NativeLengthControl(
                 grid: VideoLengthGrid.resolve(temporal: temporal, fps: draft.fps, limits: nil,

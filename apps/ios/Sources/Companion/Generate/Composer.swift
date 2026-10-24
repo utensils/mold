@@ -157,7 +157,7 @@ struct Composer: View {
                     generate.videoDuration?.draft = $0
                 }), planner: generate.videoPlanner, prompt: generate.draft.prompt,
                     grid: generate.recipe?.temporal.map { VideoLengthGrid.duration(temporal: $0, fps: generate.draft.fps,
-                        limits: generate.sequenceLimits, plan: generate.videoPlanner.plan) },
+                        limits: generate.sequenceLimits, plan: generate.videoPlanner.shownPlan) },
                     reuseNotice: generate.videoDuration?.reuseNotice, sourceTitle: generate.videoDuration?.sourceOwner?.title,
                     sourceMachine: generate.videoDuration?.sourceOwner.flatMap { hosts.host($0.hostId)?.name },
                     busy: generate.durationTask != nil,

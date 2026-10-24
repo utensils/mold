@@ -101,7 +101,7 @@ public final class VideoJobCoordinator {
     /// Both native shells must retain an otherwise-empty Queue for a visible
     /// per-machine retry or another page, as well as admission/recovery errors.
     public var hasQueueContent: Bool {
-        !jobs.isEmpty || !pending.isEmpty || error != nil
+        jobs.contains(where: \.belongsInQueue) || !pending.isEmpty || error != nil
             || pagination.values.contains { $0.error != nil || $0.hasMore || $0.isLoading }
     }
 

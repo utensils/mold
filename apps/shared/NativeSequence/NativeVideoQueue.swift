@@ -99,9 +99,11 @@ struct NativeVideoQueue {
 
     // MARK: Rows
 
+    /// Finished and stopped parents are not drawn: like every other row they
+    /// leave the Queue on their own (`ObservedVideoJob.belongsInQueue`).
     func items(on host: MoldHost.ID) -> [NativeVideoQueueItem] {
-        videos.jobs.filter { $0.owner.host.id == host }.map(item)
-            + sequence.jobs.filter { $0.host.id == host }.map(item)
+        videos.jobs.filter { $0.owner.host.id == host && $0.belongsInQueue }.map(item)
+            + sequence.queueJobs.filter { $0.host.id == host }.map(item)
     }
 
     func item(id: String) -> NativeVideoQueueItem? {

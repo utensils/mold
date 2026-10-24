@@ -7,6 +7,11 @@ import Observation
 @MainActor @Observable
 public final class VideoPlanController {
     public private(set) var plan: VideoJobPlan?
+    /// What the editor draws: the last answer for this owner and model, kept
+    /// while the next length is calculated so a slider drag never blanks the
+    /// clip line or the Length bounds between answers. Submission checks read
+    /// `plan`, which is only ever the answer for the current draft.
+    public private(set) var shownPlan: VideoJobPlan?
     public private(set) var error: String?
     public private(set) var isCalculating = false
     @ObservationIgnored private let debounceNanoseconds: UInt64
@@ -21,7 +26,7 @@ public final class VideoPlanController {
         let backend: any MoldVideoBackend = if let http = backend as? HTTPBackend, let destinationInstanceId {
             http.pinningVideoDestination(destinationInstanceId)
         } else { backend }
-        clear()
+        reset()
         isCalculating = true
         let mine = token, delay = debounceNanoseconds, scalars = request.planningProjection
         let work = Task { [weak self] in
@@ -34,7 +39,7 @@ public final class VideoPlanController {
                 let plan = try await backend.planVideoJob(scalars)
                 guard mine == self.token, !Task.isCancelled, current() else { return }
                 guard plan.validationRevision.isEmpty else { throw MoldClientError.malformedResponse }
-                self.plan = plan
+                self.plan = plan; self.shownPlan = plan
             } catch {
                 guard let self, mine == self.token else { return }
                 self.isCalculating = false
@@ -46,6 +51,10 @@ public final class VideoPlanController {
     }
 
     public func clear() {
+        reset(); shownPlan = nil
+    }
+
+    private func reset() {
         token = UUID(); pending?.cancel(); pending = nil
         plan = nil; error = nil; isCalculating = false
     }

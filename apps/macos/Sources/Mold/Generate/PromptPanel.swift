@@ -82,7 +82,7 @@ struct PromptPanel: View {
                                     set: { controller.videoDuration?.draft = $0 }),
                                     planner: controller.videoPlanner, prompt: draft.prompt,
                                     grid: recipe.temporal.map { VideoLengthGrid.duration(temporal: $0, fps: draft.fps, limits: chainLimits,
-                                                                                         plan: controller.videoPlanner.plan) },
+                                                                                         plan: controller.videoPlanner.shownPlan) },
                                     reuseNotice: controller.videoDuration?.reuseNotice,
                                     sourceTitle: controller.videoDuration?.sourceOwner?.title,
                                     sourceMachine: host?.name, busy: controller.durationSubmitting,

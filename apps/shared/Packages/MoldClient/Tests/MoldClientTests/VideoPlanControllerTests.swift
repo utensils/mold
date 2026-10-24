@@ -45,6 +45,20 @@ import MoldClientTesting
         #expect(controller.error == nil)
         #expect(!controller.isCalculating)
     }
+    @Test func recalculatingKeepsTheLastPlanOnScreenUntilTheNextAnswer() async throws {
+        let backend = FakeBackend(), plan = try plan()
+        backend.stub("planVideoJob(_:)", returning: plan)
+        let controller = VideoPlanController(debounceNanoseconds: 1_000_000)
+        await controller.update(draft(), backend: backend, current: { true }).value
+        #expect(controller.shownPlan?.clipCount == 4)
+        let next = controller.update(draft(31_000), backend: backend, current: { true })
+        #expect(controller.plan == nil, "submission checks never read a plan for another length")
+        #expect(controller.shownPlan?.clipCount == 4, "a slider drag must not blank the plan between answers")
+        await next.value
+        #expect(controller.shownPlan?.clipCount == 4)
+        controller.clear()
+        #expect(controller.shownPlan == nil, "a changed owner or model drops the shown plan too")
+    }
     @Test func changedOwnerDuringDebounceDoesNotLeaveTheEditorCalculating() async throws {
         let backend = FakeBackend()
         let controller = VideoPlanController(debounceNanoseconds: 1_000_000)
