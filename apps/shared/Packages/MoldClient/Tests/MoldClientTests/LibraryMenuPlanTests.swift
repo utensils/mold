@@ -104,6 +104,23 @@ import Testing
             == ["Rename “Smurfs”…", "Hide from All Prints", "Delete Collection…"])
     }
 
+    /// The sidebar row's right-click menu. No prints are selected there
+    /// (`count: 0`), so the PRINT menu (`items`) is rightly empty -- reading
+    /// it left every collection row with no menu at all after #1903 moved the
+    /// shelf's three out of it. The row asks for its own list.
+    @Test func aSidebarCollectionRowHasItsOwnMenuWithNoPrintsSelected() {
+        let smurfs = shelf("Smurfs")
+        let row = LibraryMenuPlan.collectionRow(smurfs)
+        #expect(row.items.isEmpty, "no print is selected in the sidebar")
+        #expect(RowAction.offersMenu(row.collectionRowItems))
+        #expect(row.collectionRowItems.map(\.title)
+            == ["Rename “Smurfs”…", "Hide from All Prints", "Delete Collection…"],
+            "no leading divider, destructive last")
+        #expect(row.collectionRowItems.last?.isDestructive == true)
+        #expect(LibraryMenuPlan.collectionRow(shelf("Smurfs", hidden: true)).collectionRowItems
+            .contains { $0.kind == .setCollectionHidden(false) })
+    }
+
     @Test func aHiddenCollectionIsOfferedTheOtherHalfOfTheToggle() {
         let hidden = shelf("Smurfs", hidden: true)
         let items = plan(scope: .collection, enclosing: hidden).collectionItems

@@ -39,7 +39,7 @@ struct CollectionRow: View {
         // The same three the Library menu offers, from the same declaration --
         // they used to live only here, unreachable from the keyboard and
         // invisible to Help ▸ Search, and worded differently besides.
-        .rowActionMenu(menu.items) { action in
+        .rowActionMenu(LibraryMenuPlan.collectionRow(shelf).collectionRowItems) { action in
             switch action {
             case .renameCollection: renaming = shelf
             case let .setCollectionHidden(hidden):
@@ -58,11 +58,6 @@ struct CollectionRow: View {
                 ? RoundedRectangle(cornerRadius: 6).fill(.selection.opacity(0.35))
                 : nil
         )
-    }
-
-    /// Only the shelf's own three: no prints are selected in the sidebar.
-    private var menu: LibraryMenuPlan {
-        LibraryMenuPlan(scope: .collection, count: 0, enclosingShelf: shelf)
     }
 
     private func file(_ ids: [PrintID]) {

@@ -134,6 +134,16 @@ public extension LibraryMenuPlan {
         ]
     }
 
+    /// The sidebar row's own right-click menu for `collectionRow(_:)`: the
+    /// shelf's three, rendered (no leading divider). Never `items`, which is
+    /// the print menu and is empty with nothing selected.
+    var collectionRowItems: [Item] { RowAction.rendered(collectionItems) }
+
+    /// A sidebar collection row: no prints are selected there.
+    static func collectionRow(_ shelf: CollectionShelf) -> LibraryMenuPlan {
+        LibraryMenuPlan(scope: .collection, count: 0, enclosingShelf: shelf)
+    }
+
     /// One item, or a submenu naming each installed upscaler.
     ///
     /// Desktop opens a dialog with a model picker; this app has no dialog, so
