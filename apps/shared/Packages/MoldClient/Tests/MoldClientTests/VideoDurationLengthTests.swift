@@ -88,3 +88,42 @@ extension VideoDurationLengthTests {
         #expect(draft.seconds == "14.3")
     }
 }
+
+extension VideoDurationLengthTests {
+    /// Restoring never builds more scenes than a request may carry, and never
+    /// traps on the arithmetic: past that it stays one honest long prompt.
+    @Test func anEnormousSavedLengthStaysOnePromptInsteadOfThousandsOfScenes() throws {
+        let grid = try grid()
+        var day = VideoDurationDraft(seconds: "86400", scenesEnabled: false)
+        let original = day
+        let expandedDay = day.fit(to: grid, prompt: "a day")
+        #expect(!expandedDay && day == original)
+        #expect(day.exceedsOneGeneration(on: grid))
+        #expect(VideoDurationDraft.sceneCount(milliseconds: 86_400_000, limit: 14_300) == 6_042)
+
+        var forever = VideoDurationDraft(seconds: VideoDurationDraft.seconds(milliseconds: UInt64.max), scenesEnabled: false)
+        let before = forever
+        let expandedForever = forever.fit(to: grid, prompt: "forever")
+        #expect(!expandedForever && forever == before)
+        #expect(VideoDurationDraft.sceneCount(milliseconds: UInt64.max, limit: 14_300) == UInt64.max / 14_300 + 1)
+
+        var scenes = VideoDurationDraft(seconds: "86405", scenes: [.init(prompt: "a", seconds: "5"), .init(prompt: "b", seconds: "86400")])
+        let scenesBefore = scenes
+        let expandedScenes = scenes.fit(to: grid, prompt: "x")
+        #expect(!expandedScenes && scenes == scenesBefore)
+
+        var hour = VideoDurationDraft(seconds: "3600", scenesEnabled: false)
+        let expandedHour = hour.fit(to: grid, prompt: "an hour")
+        #expect(expandedHour && hour.scenes.count == 252 && hour.seconds == "3600")
+        #expect(!hour.exceedsOneGeneration(on: grid))
+    }
+
+    @Test func longLengthsReadInMinutesAndHours() {
+        #expect(VideoLengthGrid.longLabel(milliseconds: 14_300) == "14.3 s")
+        #expect(VideoLengthGrid.longLabel(milliseconds: 3_600_000) == "60 min")
+        #expect(VideoLengthGrid.longLabel(milliseconds: 90_500) == "1 min 31 s")
+        #expect(VideoLengthGrid.longLabel(milliseconds: 86_400_000) == "24 h")
+        #expect(VideoLengthGrid.longLabel(milliseconds: 5_430_000) == "90 min 30 s")
+        #expect(VideoLengthGrid.longLabel(milliseconds: 9_000_000) == "2 h 30 min")
+    }
+}

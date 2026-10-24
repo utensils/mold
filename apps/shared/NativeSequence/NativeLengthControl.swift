@@ -65,7 +65,22 @@ struct NativeLengthControl: View {
     private var frames: Int { grid.snap(draft.frames ?? temporal.frames.default) }
 
     @ViewBuilder private var slider: some View {
-        if let duration { secondsSlider(duration) } else { framesSlider }
+        if let duration {
+            if duration.wrappedValue.exceedsOneGeneration(on: grid), let milliseconds = duration.wrappedValue.lengthMilliseconds {
+                // Too long to become scenes (`VideoDurationDraft.fit`): shown
+                // as it is and still submitted; the server warns it repeats.
+                HStack {
+                    Text(title)
+                    Spacer(minLength: 8)
+                    Text("\(VideoLengthGrid.longLabel(milliseconds: milliseconds)) (one prompt, repeats across clips)")
+                        .monospacedDigit().foregroundStyle(.secondaryText).multilineTextAlignment(.trailing)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("video-length-long")
+            } else {
+                secondsSlider(duration)
+            }
+        } else { framesSlider }
     }
 
     /// A Duration is trimmed to its exact length, so its slider is seconds in

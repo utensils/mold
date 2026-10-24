@@ -41,7 +41,7 @@ public struct VideoDurationDraft: Codable, Hashable, Sendable {
     public func request(generation: GenerateRequest) throws -> VideoJobRequest {
         let duration = try Self.milliseconds(seconds)
         let scenes = scenesEnabled ? scenes : []
-        guard scenes.count <= 4_096 else { throw SequenceDraftError.invalid("Use at most 4,096 scenes in one video.") }
+        guard scenes.count <= Self.maxScenes else { throw SequenceDraftError.invalid("Use at most 4,096 scenes in one video.") }
         var inputs: [VideoJobScene] = [], sum: UInt64 = 0
         for (index, scene) in scenes.enumerated() {
             guard !scene.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

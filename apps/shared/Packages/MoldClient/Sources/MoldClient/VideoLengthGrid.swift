@@ -89,6 +89,17 @@ public struct VideoLengthGrid: Hashable, Sendable {
         return "\(tenths / 10).\(tenths % 10) s"
     }
 
+    /// A length past the slider, in words: "60 min", "2 h 30 min", "1 min 31 s".
+    /// Minutes up to two hours, then hours.
+    public static func longLabel(milliseconds: UInt64) -> String {
+        guard milliseconds >= 60_000 else { return label(milliseconds: milliseconds) }
+        let seconds = milliseconds / 1_000 + (milliseconds % 1_000 >= 500 ? 1 : 0)
+        let (hours, minutes, rest) = (seconds / 3_600, seconds % 3_600 / 60, seconds % 60)
+        if hours >= 2 { return minutes == 0 ? "\(hours) h" : "\(hours) h \(minutes) min" }
+        let total = seconds / 60
+        return rest == 0 ? "\(total) min" : "\(total) min \(rest) s"
+    }
+
     /// The single-prompt Duration slider: 1.0 s up to one generation.
     public var singleMinTenths: Int { min(10, singleMaxTenths) }
     public var singleMaxTenths: Int { max(maxFrames * 10 / fps, 1) }
