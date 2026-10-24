@@ -55,3 +55,28 @@ public enum LibraryFamilies {
         return next
     }
 }
+
+/// The family list is a whole-library scan; derive it once per row revision
+/// rather than on every toolbar redraw.
+@MainActor public final class LibraryFamilyFacetCache {
+    private struct Key: Equatable {
+        let revision: Int
+        let partition: LibraryScope
+    }
+    private var key: Key?
+    private var facets: [LibraryFamilyFacet] = []
+    public private(set) var derivations = 0
+    public init() {}
+
+    /// `partition` is the pool the rows came from (the Library or Trash):
+    /// both share one row revision.
+    public func facets(in entries: [LibraryEntry], revision: Int,
+                       partition: LibraryScope = .all) -> [LibraryFamilyFacet] {
+        let next = Key(revision: revision, partition: partition)
+        if key == next { return facets }
+        key = next
+        facets = LibraryFamilies.facets(in: entries)
+        derivations += 1
+        return facets
+    }
+}

@@ -15,6 +15,8 @@ import MoldClient
 final class LibraryStore {
     let sourceMediaCatalog = SourceMediaCatalog()
     @ObservationIgnored let countCache = LibraryQueryCountCache()
+    /// The Filter menu's Model Family list, derived once per row revision.
+    @ObservationIgnored let familyCache = LibraryFamilyFacetCache()
     @ObservationIgnored var countEpochBatch = SyncBatchedValue<SourcePrivacyRevision>()
     @ObservationIgnored var countEpochTask: Task<Void, Never>?
     /// Wakes count readers when a held `countEpoch` comes due.

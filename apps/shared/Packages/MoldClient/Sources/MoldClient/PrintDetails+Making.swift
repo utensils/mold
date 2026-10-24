@@ -23,7 +23,10 @@ extension PrintDetails {
         let meta = entry.print.metadata
         return group("Model", [
             row("Model", meta.model),
-            row("Family", meta.family),
+            meta.family.flatMap { family in
+                family.isEmpty ? nil : PrintDetailRow("Family", Model.familyLabel(forFamily: family),
+                                                      swatch: Model.familyColor(forFamily: family)?.rgb)
+            },
             row("Machine", entry.hostName),
         ])
     }

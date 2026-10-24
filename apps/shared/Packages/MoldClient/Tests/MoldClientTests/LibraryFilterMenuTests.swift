@@ -119,3 +119,42 @@ struct LibraryFilterMenuTests {
         #expect(Model.familyColor(forFamily: "companion") == nil)
     }
 }
+
+struct LibraryFilterSummaryTests {
+    @Test func theFilterButtonReadsWhatIsApplied() {
+        var query = LibraryQuery()
+        #expect(LibraryFilter.summary(for: query) == "All Items")
+        query = LibraryFilter.notInCollection.applying(to: query)
+        #expect(LibraryFilter.summary(for: query) == "Not in a Collection")
+        query = LibraryFamilies.toggling("flux", label: "FLUX.1", in: query)
+        #expect(LibraryFilter.summary(for: query) == "Not in a Collection · FLUX.1")
+        query = LibraryFamilies.toggling("sdxl", label: "SDXL", in: query)
+        #expect(LibraryFilter.summary(for: query) == "Not in a Collection · 2 Families")
+        query = LibraryFilter.all.applying(to: query)
+        #expect(LibraryFilter.summary(for: query) == "2 Families")
+        query.tokens += [.favorite, .kind(.clip)]
+        #expect(LibraryFilter.summary(for: query) == "Multiple Filters · 2 Families")
+        #expect(!LibraryFilter.isActive(LibraryQuery()))
+        #expect(LibraryFilter.isActive(query))
+        #expect(LibraryFilter.clearing(query).tokens.isEmpty)
+    }
+
+    @Test @MainActor func theFamilyListIsDerivedOncePerLibraryRevision() {
+        let cache = LibraryFamilyFacetCache()
+        let pool = [entry("a.png", metadata: ["family": "flux"])]
+        #expect(cache.facets(in: pool, revision: 1).map(\.slug) == ["flux"])
+        #expect(cache.facets(in: [], revision: 1).map(\.slug) == ["flux"], "same revision reuses the answer")
+        #expect(cache.facets(in: [], revision: 1, partition: .trash).isEmpty, "Trash is its own pool")
+        #expect(cache.facets(in: [], revision: 2).isEmpty)
+        #expect(cache.derivations == 3)
+    }
+
+    @Test func infoNamesTheFamilyAndCarriesItsColour() throws {
+        let print = entry("old.mp4", format: "mp4", metadata: ["family": "ltx_video", "model": "ltx-video"])
+        let model = try #require(PrintDetails.groups(for: print).first { $0.title == "Model" })
+        let family = try #require(model.rows.first { $0.label == "Family" })
+        #expect(family.value == "LTX Video")
+        #expect(family.swatch == 0xEE5A5A)
+        #expect(model.rows.first { $0.label == "Model" }?.swatch == nil)
+    }
+}
