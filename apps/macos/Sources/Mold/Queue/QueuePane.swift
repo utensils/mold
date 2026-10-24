@@ -29,7 +29,7 @@ struct QueuePane: View {
 
     var body: some View {
         Group {
-            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.jobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
+            if queue.all.isEmpty, alsoRunning.isEmpty, pausedMachines.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
                 ContentUnavailableView(
                     queue.isLoading ? "Checking each machine…" : "Nothing queued",
                     systemImage: "list.bullet.indent",

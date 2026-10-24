@@ -24,7 +24,7 @@ struct NativeDurationEditor: View {
     let startFresh: () -> Void
 
     var singleGenerationSeconds: Double? {
-        guard let plan = planner.plan else { return nil }
+        guard let plan = planner.shownPlan else { return nil }
         return Double(plan.singleClipMaxFrames) / Double(max(1, plan.fps))
     }
 
@@ -87,19 +87,25 @@ struct NativeDurationEditor: View {
                     .font(.caption).foregroundStyle(.secondaryText)
                     .accessibilityIdentifier("duration-single-limit")
             }
-            if planner.isCalculating {
-                Text("Calculating length…").font(.caption).foregroundStyle(.secondaryText)
-            } else if let plan = planner.plan {
-                Text(plan.clipCount == 1 ? "1 clip · one video" : "\(Plural.count(Int(clamping: plan.clipCount), of: "clip")) joined into one video")
-                    .font(.callout).accessibilityIdentifier("duration-plan-clips")
-                if plan.joinMode == .blendedShots, plan.clipCount > 1 {
-                    Text("Shots blend together; motion does not carry between them.")
-                        .font(.caption).foregroundStyle(.secondaryText)
+            // The last answer stays up while the next length is calculated, and
+            // a one-clip video says nothing the Length slider does not already
+            // say, so dragging within one generation never grows or shrinks
+            // the panel. Only a plan that really joins clips adds lines.
+            if let plan = planner.shownPlan {
+                if plan.clipCount > 1 {
+                    Text("\(Plural.count(Int(clamping: plan.clipCount), of: "clip")) joined into one video")
+                        .font(.callout).accessibilityIdentifier("duration-plan-clips")
+                    if plan.joinMode == .blendedShots {
+                        Text("Shots blend together; motion does not carry between them.")
+                            .font(.caption).foregroundStyle(.secondaryText)
+                    }
                 }
                 // The plan's total is on the frame clock (14.3 s at 24 fps is 344
                 // frames, 14.334 s); it reads to the same tenth as the slider.
-                Text("\(draft.source == nil ? "Video" : "New total"): \(VideoLengthGrid.label(milliseconds: plan.totalDurationMs))")
-                    .font(.caption).foregroundStyle(.secondaryText)
+                if plan.clipCount > 1 || draft.source != nil {
+                    Text("\(draft.source == nil ? "Video" : "New total"): \(VideoLengthGrid.label(milliseconds: plan.totalDurationMs))")
+                        .font(.caption).foregroundStyle(.secondaryText)
+                }
                 ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
                     Label(warning, systemImage: "exclamationmark.triangle")
                         .font(.callout).fixedSize(horizontal: false, vertical: true)

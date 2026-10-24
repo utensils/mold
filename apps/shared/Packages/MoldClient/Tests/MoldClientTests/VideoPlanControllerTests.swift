@@ -45,6 +45,42 @@ import MoldClientTesting
         #expect(controller.error == nil)
         #expect(!controller.isCalculating)
     }
+    @Test func recalculatingKeepsTheLastPlanOnScreenUntilTheNextAnswer() async throws {
+        let backend = FakeBackend(), plan = try plan()
+        backend.stub("planVideoJob(_:)", returning: plan)
+        let controller = VideoPlanController(debounceNanoseconds: 1_000_000)
+        await controller.update(draft(), backend: backend, current: { true }).value
+        #expect(controller.shownPlan?.clipCount == 4)
+        let next = controller.update(draft(31_000), backend: backend, current: { true })
+        #expect(controller.plan == nil, "submission checks never read a plan for another length")
+        #expect(controller.shownPlan?.clipCount == 4, "a slider drag must not blank the plan between answers")
+        await next.value
+        #expect(controller.shownPlan?.clipCount == 4)
+        controller.clear()
+        #expect(controller.shownPlan == nil, "a changed owner or model drops the shown plan too")
+    }
+    @Test func anotherModelOrMachineNeverBorrowsTheShownPlan() async throws {
+        let backend = FakeBackend(), plan = try plan()
+        backend.stub("planVideoJob(_:)", returning: plan)
+        let controller = VideoPlanController(debounceNanoseconds: 1_000_000)
+        await controller.update(draft(), backend: backend, destinationInstanceId: "a", current: { true }).value
+        var other = draft(); other.generation.model = "other-model"
+        let next = controller.update(other, backend: backend, destinationInstanceId: "a", current: { true })
+        #expect(controller.shownPlan == nil, "another model's window must not bound this model's slider")
+        await next.value
+        controller.update(other, backend: backend, destinationInstanceId: "b", current: { true })
+        #expect(controller.shownPlan == nil, "another installation's plan is not this one's")
+    }
+    @Test func aFailedRecalculationDropsTheShownPlan() async throws {
+        let backend = FakeBackend(), plan = try plan()
+        backend.stub("planVideoJob(_:)", returning: plan)
+        let controller = VideoPlanController(debounceNanoseconds: 1_000_000)
+        await controller.update(draft(), backend: backend, current: { true }).value
+        backend.stub("planVideoJob(_:)", throwing: MoldClientError.unreachable("offline"))
+        await controller.update(draft(45_000), backend: backend, current: { true }).value
+        #expect(controller.error != nil)
+        #expect(controller.shownPlan == nil, "an old total must not sit beside the error")
+    }
     @Test func changedOwnerDuringDebounceDoesNotLeaveTheEditorCalculating() async throws {
         let backend = FakeBackend()
         let controller = VideoPlanController(debounceNanoseconds: 1_000_000)

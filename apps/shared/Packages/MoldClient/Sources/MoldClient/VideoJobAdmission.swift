@@ -36,6 +36,19 @@ public struct ObservedVideoJob: Identifiable, Hashable, Sendable {
     public var cancelledBeforeAdmission = false
     public var outputAvailable: Bool?
     public var outputMessage: String?
+
+    /// Whether the Queue draws it. A finished or stopped parent leaves the
+    /// Queue on its own, as every other row does; its video is in Library.
+    /// Failed and interrupted parents stay as recovery work, and so does a
+    /// completion that reported no saved video: its row is the only warning.
+    public var belongsInQueue: Bool {
+        guard !cancelledBeforeAdmission, let detail else { return !cancelledBeforeAdmission }
+        switch detail.state {
+        case .cancelled: return false
+        case .completed: return detail.outputFilename == nil
+        default: return true
+        }
+    }
 }
 
 public struct VideoJobPage: Hashable, Sendable {

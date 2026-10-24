@@ -136,12 +136,12 @@ struct ComposerLength: View {
         if generate.offersVideoDuration, let authoring = generate.videoDuration {
             NativeLengthControl(
                 grid: VideoLengthGrid.duration(temporal: temporal, fps: generate.draft.fps, limits: generate.sequenceLimits,
-                                               plan: generate.videoPlanner.plan),
+                                               plan: generate.videoPlanner.shownPlan),
                 temporal: temporal, draft: $generate.draft,
                 duration: Binding(get: { generate.videoDuration?.draft ?? authoring.draft },
                                   set: { generate.videoDuration?.draft = $0 }),
                 prompt: generate.draft.prompt,
-                authoritative: generate.sequenceLimits != nil || generate.videoPlanner.plan != nil)
+                authoritative: generate.sequenceLimits != nil || generate.videoPlanner.shownPlan != nil)
             .disabled(generate.durationTask != nil)
         } else {
             let rate = temporal.fps.resolvedRate(generate.draft.fps)
