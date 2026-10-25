@@ -23,6 +23,8 @@ struct LibraryView: View {
     @State private var gridCache = LibraryGridProjectionCache()
     @State private var viewport = LibraryViewport()
     @State private var returnGeneration = 0
+    /// The pushed PrintViewer is showing; the grid's chrome follows it.
+    @State private var viewerOnScreen = false
     @Namespace private var zoom
 
     /// Search opens with a query already in it; the Library tab opens empty.
@@ -85,7 +87,18 @@ struct LibraryView: View {
         }
         // A modal owns navigation while open; keep the presenting floating
         // tab chrome out of its layout and restore it on dismissal.
-        .toolbarVisibility(managingCollections || showsOfflineDetails ? .hidden : .automatic, for: .tabBar)
+        //
+        //
+        // Otherwise the grid OWNS this chrome, decided by whether the viewer
+        // is on screen: the pushed viewer hides the tab bar and fills a bottom
+        // bar with Share / Favourite / Info / Delete, and a stale pop left
+        // both on the grid -- no tab bar, and a viewer's buttons over prints
+        // they no longer act on. `.automatic` inherited that; an explicit
+        // value here outranks the pushed view's, which is why it follows
+        // `viewerOnScreen` rather than always saying visible. The grid has no
+        // bottom bar of its own (Select's bar is a safe-area inset).
+        .toolbarVisibility(managingCollections || showsOfflineDetails || viewerOnScreen ? .hidden : .visible, for: .tabBar)
+        .toolbarVisibility(viewerOnScreen ? .automatic : .hidden, for: .bottomBar)
         .sheet(isPresented: $managingCollections) {
             CollectionsSheet(machineIDs: showingQuery.machineIDs) { scope in
                 if fixedScope != nil { router.selection = .shelf(scope) } else { setScope(scope) }
@@ -103,8 +116,8 @@ struct LibraryView: View {
         .navigationDestination(for: PrintID.self) { id in
             PrintViewer(start: id, entries: showing.visible, trashed: scope.isTrash, projection: projection)
                 .navigationTransition(.zoom(sourceID: id, in: zoom))
-                .onAppear { viewport.cover() }
-                .onDisappear { returnGeneration += 1 }
+                .onAppear { viewport.cover(); viewerOnScreen = true }
+                .onDisappear { returnGeneration += 1; viewerOnScreen = false }
         }
         .safeAreaInset(edge: .bottom) {
             if selecting { SelectionBar(scope: scope, selected: showing.selected) { selection = [] } }
