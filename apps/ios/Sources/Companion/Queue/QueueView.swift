@@ -22,9 +22,7 @@ struct QueueView: View {
                 }
             } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
-                           message: String(localized: "Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh.")) {
-                    Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
-                }
+                           message: String(localized: "A machine answered but couldn't list its queue. Pull to refresh."))
             } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
@@ -95,7 +93,7 @@ struct QueueView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             if !queue.unavailableMachines.isEmpty {
-                Text("Some machine queues are unavailable. Check Machines to reconnect.")
+                Text("Some machine queues are unavailable. Pull to refresh.")
                     .foregroundStyle(.secondaryText)
             }
             if let summary = queue.summary {
@@ -122,6 +120,10 @@ struct QueueView: View {
                     }
                 }
             }
+            // Offline is greyed out and nothing more: no rows, no error.
+            ForEach(queue.offlineMachines) { host in
+                Section { EmptyView() } header: { QueueSectionHeader(host: host) }
+            }
         }
         .listStyle(.insetGrouped)
         .accessibilityIdentifier("queue-list")
@@ -142,19 +144,26 @@ struct QueueView: View {
     }
 }
 
-/// A machine's name over its rows, and whether it is dispatching.
+/// A machine's name over its rows, and whether it is dispatching -- or, greyed
+/// out on its own, that it is offline.
 private struct QueueSectionHeader: View {
     @Environment(QueueStore.self) private var queue
     let host: MoldHost
 
+    @Environment(HostStore.self) private var hosts
+
     var body: some View {
+        let offline = hosts.reachability(of: host).isOffline
         HStack(spacing: 6) {
             Text(host.name)
-            if queue.isQueuePaused(host.id) {
+            if offline {
+                Text("· Offline")
+            } else if queue.isQueuePaused(host.id) {
                 Text("· Paused").accessibilityLabel("queue paused")
             }
         }
         .foregroundStyle(.secondaryText)
+        .opacity(offline ? 0.6 : 1)
         .accessibilityAddTraits(.isHeader)
     }
 }

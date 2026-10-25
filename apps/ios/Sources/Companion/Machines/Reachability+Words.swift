@@ -6,13 +6,13 @@ import SwiftUI
 /// words, so the same machine says the same thing on both.
 extension HostStore.Reachability {
     /// Status semantics, not brand colour, and never the only signal: every
-    /// dot sits beside `summary`.
+    /// dot sits beside `summary`. Offline is grey, not red: a machine that is
+    /// switched off is not something to fix.
     var tint: Color {
         switch self {
-        case .unknown, .checking: .gray
+        case .unknown, .checking, .down: .gray
         case .up: .green
         case .needsKey: .orange
-        case .down: .red
         }
     }
 
@@ -26,7 +26,7 @@ extension HostStore.Reachability {
                 ? String(localized: "Busy · \(status.versionLabel)")
                 : String(localized: "Ready · \(status.versionLabel)")
         case .needsKey: String(localized: "Needs an API key")
-        case let .down(reason): reason
+        case .down: String(localized: "Offline")
         }
     }
 
@@ -48,6 +48,11 @@ extension HostStore.Reachability {
         if case .up = self { return true }
         return false
     }
+
+    var isOffline: Bool {
+        if case .down = self { return true }
+        return false
+    }
 }
 
 extension HostStore {
@@ -66,12 +71,12 @@ extension HostStore {
         return hosts.contains { $0.name == found.name }
     }
 
-    /// What a card says about a machine that is not answering: since when,
-    /// when it has answered before, and why, when the check said.
+    /// What a card says about a machine that is not answering: Offline, and
+    /// since when if it has answered before. The reason is the detail view's.
     func silence(of host: MoldHost) -> String? {
-        guard case let .down(reason) = reachability(of: host) else { return nil }
-        guard let last = lastAnswered[host.id] else { return reason }
-        return String(localized: "Not answering since \(last.formatted(date: .omitted, time: .shortened)). \(reason)")
+        guard case .down = reachability(of: host) else { return nil }
+        guard let last = lastAnswered[host.id] else { return String(localized: "Offline") }
+        return String(localized: "Offline since \(last.formatted(date: .omitted, time: .shortened))")
     }
 }
 

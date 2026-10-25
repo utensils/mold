@@ -67,7 +67,9 @@ extension HostStore {
             recordConnectionFailure(error, on: host.id)
             return
         }
-        if !isUp(host) { reachability[host.id] = .checking }
+        // Rechecking is silent: an offline machine stays greyed out rather
+        // than flipping to Checking on every recheck. Only a first check says so.
+        if case .unknown = reachability(of: host) { reachability[host.id] = .checking }
         let state = await check(host)
         guard self.host(host.id) == host, !Task.isCancelled else { return }
         reachability[host.id] = state

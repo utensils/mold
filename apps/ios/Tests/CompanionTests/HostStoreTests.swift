@@ -162,6 +162,44 @@ struct HostStoreTests {
         if fails { #expect(hosts.reachability(of: host) == .needsKey) }
     }
 
+    @Test func recheckingAnOfflineMachineStaysGreyedOutUntilItAnswers() async throws {
+        let fake = FakeBackend()
+        fake.stub("status()", throwing: MoldClientError.unreachable("timed out"))
+        let (hosts, _, _) = store(fake)
+        let host = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
+        await hosts.refresh(host)
+        #expect(hosts.reachability(of: host) == .down("timed out"))
+        fake.stub("status()") { _ in
+            await MainActor.run {
+                #expect(hosts.reachability(of: host).isOffline,
+                        "a recheck must not flip an offline machine to Checking -- the Queue flickered every 15 s")
+            }
+            throw MoldClientError.unreachable("timed out")
+        }
+        await hosts.refreshUnavailable()
+        #expect(hosts.reachability(of: host).isOffline)
+        #expect(hosts.failures.isEmpty)
+    }
+
+    @Test func offlineReadsAsGreyOfflineNotAsAnError() {
+        let state = HostStore.Reachability.down("The request timed out.")
+        #expect(state.summary == "Offline")
+        #expect(state.tint == .gray)
+        #expect(state.sentence == "The request timed out.", "the detail view still says why")
+        #expect(HostStore.Reachability.checking.isOffline == false)
+    }
+
+    @Test func anUnreachableMachineIsGreyedOutInsteadOfReported() throws {
+        let (hosts, _, _) = store()
+        let host = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
+        hosts.report(host, doing: "list its tags", MoldClientError.http(status: 500, code: nil, message: "boom"))
+        #expect(hosts.failures.count == 1)
+        hosts.report(host, doing: "list its queue", MoldClientError.unreachable("timed out"))
+        #expect(hosts.failures.isEmpty, "offline is not a failure to explain")
+        #expect(hosts.reachability(of: host).isOffline)
+        #expect(hosts.silence(of: host) == "Offline")
+    }
+
     @Test func aRefusalReadsAsNeedsAKeyNotAsDown() async throws {
         let fake = FakeBackend()
         fake.stub("status()", throwing: MoldClientError.unauthorized)

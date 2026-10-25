@@ -192,8 +192,8 @@ struct LibraryStoreTests {
     @Test func aRecoveredListingClearsOnlyItsOwnFailure() async throws {
         let (library, hosts, _, _) = try await fleet(first: [try print("a.png")], second: [])
         let host = hosts.hosts[0]
-        hosts.report(host, doing: "list its prints", MoldClientError.unreachable("offline"))
-        hosts.report(host, doing: "save changes", MoldClientError.unreachable("offline"))
+        hosts.report(host, doing: "list its prints", MoldClientError.http(status: 500, code: nil, message: "busy"))
+        hosts.report(host, doing: "save changes", MoldClientError.http(status: 500, code: nil, message: "busy"))
         await library.reload(host.id)
         #expect(hosts.failures.count == 1)
         #expect(hosts.failures.first?.doing == "save changes")

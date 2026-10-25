@@ -16,8 +16,15 @@ struct HostFailure: Identifiable, Equatable {
 
 extension HostStore {
     /// Records a failure. The same machine failing the same way replaces its
-    /// earlier line rather than stacking a second.
+    /// earlier line rather than stacking a second. A machine that cannot be
+    /// reached is not a failure to explain: it is greyed out as offline, its
+    /// lines go, and the foreground recheck brings it back when it answers.
     func report(_ host: MoldHost.ID?, name: String?, doing: String, _ error: Error) {
+        if let host, case MoldClientError.unreachable = error, self.host(host) != nil {
+            clearFailures(for: host)
+            recordConnectionFailure(error, on: host)
+            return
+        }
         let who = name ?? "A machine"
         let text = "\(who) couldn't \(doing): \(error.reason) \(error.advice ?? "")"
             .trimmingCharacters(in: .whitespaces)

@@ -53,10 +53,11 @@ extension HostStore {
             recordConnectionFailure(error, on: host.id)
             return
         }
-        // Rechecking an answered machine is not an outage. Hiding its
-        // models here destroys source wells and any picker they present.
-        // Initial checks still say Checking; the answer records real failure.
-        if !isUp(host) { setReachability(.checking, for: host.id) }
+        // Rechecking is silent. An answered machine keeps its controls
+        // (hiding its models destroys source wells and any picker they
+        // present), and an offline one stays greyed out rather than flipping
+        // to Checking every 15 s. Only a first check says Checking.
+        if case .unknown = reachability(of: host) { setReachability(.checking, for: host.id) }
         let state = await check(host)
         guard self.host(host.id) == host, !Task.isCancelled else { return }
         // Removed while we asked: nothing to record.
