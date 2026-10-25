@@ -43,7 +43,7 @@ extension LibraryStore {
                 if let previous, let updated,
                    SourceMediaAuthority.isDisplayOnlyUpdate(previous: previous, updated: updated) { return }
                 filename = name; preservingDisplay = true
-            case .added(let name, _, _), .restored(let name, _):
+            case .added(let name, _, _, _), .restored(let name, _):
                 filename = name; preservingDisplay = true
             case .removed(let name), .trashed(let name):
                 filename = name; preservingDisplay = false

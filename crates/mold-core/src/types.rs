@@ -13714,6 +13714,12 @@ pub enum ServerEvent {
         /// Imports enter the Library but are not completed renders.
         #[serde(default, skip_serializing_if = "is_false")]
         imported: bool,
+        /// A sequence stage (one clip of a Duration video or authored chain):
+        /// published so its parent can retain the bytes, then moved to
+        /// Trash. Work in progress, never a finished print, so clients that
+        /// announce or count arrivals skip it. Absent from older servers.
+        #[serde(default, skip_serializing_if = "is_false")]
+        internal: bool,
     },
     /// An output was deleted via `DELETE /api/gallery/image/:filename`
     /// (permanently — also emitted when a trashed print is purged).
@@ -13951,6 +13957,7 @@ mod server_event_tests {
             filename: "cat.png".into(),
             image: None,
             imported: false,
+            internal: false,
         };
         assert_eq!(
             serde_json::to_string(&no_row).unwrap(),
@@ -13964,11 +13971,36 @@ mod server_event_tests {
             filename: "copy.png".into(),
             image: None,
             imported: true,
+            internal: false,
         };
         assert_eq!(
             serde_json::to_string(&imported).unwrap(),
             r#"{"type":"gallery_added","filename":"copy.png","imported":true}"#
         );
+    }
+
+    #[test]
+    fn a_sequence_stage_is_marked_as_internal_work_not_a_finished_print() {
+        let stage = ServerEvent::GalleryAdded {
+            filename: "stage.mp4".into(),
+            image: None,
+            imported: false,
+            internal: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&stage).unwrap(),
+            r#"{"type":"gallery_added","filename":"stage.mp4","internal":true}"#
+        );
+        // Older servers never send it: absent reads as an ordinary print.
+        let older: ServerEvent =
+            serde_json::from_str(r#"{"type":"gallery_added","filename":"cat.png"}"#).unwrap();
+        assert!(matches!(
+            older,
+            ServerEvent::GalleryAdded {
+                internal: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -14008,6 +14040,7 @@ mod server_event_tests {
                 purge_at: None,
             })),
             imported: false,
+            internal: false,
         };
         let wire = serde_json::to_string(&ev).unwrap();
         let back: ServerEvent = serde_json::from_str(&wire).unwrap();
@@ -14016,6 +14049,7 @@ mod server_event_tests {
                 filename,
                 image: Some(img),
                 imported: false,
+                internal: false,
             } => {
                 assert_eq!(filename, "cat.png");
                 assert_eq!(img.timestamp, 1_700_000_000);

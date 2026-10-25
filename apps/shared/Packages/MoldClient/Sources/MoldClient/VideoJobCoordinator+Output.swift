@@ -59,7 +59,7 @@ public extension VideoJobCoordinator {
         let available: Bool?
         switch event {
         case let .removed(name), let .trashed(name): filename = name; available = false
-        case let .added(name, row, _), let .updated(name, row), let .restored(name, row):
+        case let .added(name, row, _, _), let .updated(name, row), let .restored(name, row):
             filename = name
             available = row.flatMap { $0.filename == name ? $0.trashedAt == nil : nil }
         case .collectionsChanged: return

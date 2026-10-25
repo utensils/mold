@@ -170,6 +170,19 @@ pub(crate) fn titled_output_filename(
     }
 }
 
+/// Whether a print being published is a sequence stage its parent will
+/// retain and move to Trash (`chain_stage_generations`, written at the
+/// stage's admission) rather than a finished print. Announced as `internal`.
+fn is_sequence_stage_print(db: Option<&MetadataDb>, metadata: &OutputMetadata) -> bool {
+    let (Some(db), Some(job_id)) = (db, metadata.job_id.as_deref()) else {
+        return false;
+    };
+    mold_db::chain_stage_generations::owner_for_generation(db, job_id)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_image_to_dir_with_suffix(
     dir: &std::path::Path,
@@ -270,6 +283,7 @@ pub(crate) fn save_image_to_dir_with_suffix(
             filename: filename.clone(),
             image: image_row,
             imported: false,
+            internal: metadata.is_some_and(|metadata| is_sequence_stage_print(db, metadata)),
         });
         if seeded_filing {
             announce_seeded_filing(events, &filename, announced);
@@ -629,6 +643,7 @@ fn save_video_to_dir_with_sidecar(
             filename: filename.clone(),
             image: image_row,
             imported: false,
+            internal: is_sequence_stage_print(db, metadata),
         });
         if seeded_filing {
             announce_seeded_filing(events, &filename, announced);
@@ -892,6 +907,7 @@ pub(crate) fn save_video_to_dir_named(
             filename: filename.to_string(),
             image: image_row,
             imported: false,
+            internal: is_sequence_stage_print(db, metadata),
         });
         if seeded_filing {
             announce_seeded_filing(events, filename, announced);
@@ -1091,6 +1107,7 @@ pub(crate) fn publish_video_path_to_dir_named_with_identity(
             filename: filename.to_string(),
             image: image_row,
             imported: false,
+            internal: is_sequence_stage_print(db, metadata),
         });
         if seeded_filing {
             announce_seeded_filing(events, filename, announced);
@@ -6745,6 +6762,50 @@ mod tests {
             }
             other => panic!("expected gallery_added, got {other:?}"),
         }
+    }
+
+    /// A Duration video's clip is published as an ordinary print and moved
+    /// to Trash once its parent has retained the bytes. That publication is
+    /// work in progress, not a finished print: clients that announce or count
+    /// arrivals (the Mac's notifications) read `internal` and stay quiet.
+    #[test]
+    fn a_sequence_stage_publication_is_announced_as_internal() {
+        let tmp = TempDir::new().unwrap();
+        let db = MetadataDb::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch("INSERT INTO generation_batches(id,client_batch_id,owner_uuid,request_sha256,created_at_ms) VALUES('stage-batch','stage-client','owner','sha',1); INSERT INTO generation_batch_children(batch_id,job_id,batch_index,state,updated_at_ms) VALUES('stage-batch','stage-job',0,'running',1); INSERT INTO chain_stage_generations(generation_id,chain_id,stage_index) VALUES('stage-job','chain',0);")?;
+            Ok(())
+        })
+        .unwrap();
+        let req = fake_request("minimax-h3-fl2va:fasth3-v2-int8");
+        let mut stage = OutputMetadata::from_generate_request(&req, 1, None, "v");
+        stage.job_id = Some("stage-job".into());
+        let mut ordinary = stage.clone();
+        ordinary.job_id = Some("print-job".into());
+        let events = crate::events::EventBroadcaster::new();
+        let mut rx = events.subscribe();
+        let gallery_gate = crate::batch_transaction::GalleryPublicationGate::default();
+        for meta in [&stage, &ordinary] {
+            save_video_to_dir(
+                tmp.path(),
+                b"fake mp4 bytes",
+                b"",
+                OutputFormat::Mp4,
+                "minimax-h3-fl2va:fasth3-v2-int8",
+                meta,
+                Some(5000),
+                Some(&db),
+                Some(&events),
+                &gallery_gate,
+            );
+        }
+        let mut announced = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let mold_core::ServerEvent::GalleryAdded { internal, .. } = event {
+                announced.push(internal);
+            }
+        }
+        assert_eq!(announced, vec![true, false]);
     }
 
     #[test]
