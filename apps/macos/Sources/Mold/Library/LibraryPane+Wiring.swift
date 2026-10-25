@@ -24,17 +24,31 @@ extension LibraryPane {
         visible.first { $0.id == id } ?? visible.first { $0.copies.contains { $0.id == id } }
     }
 
-    /// `navigation.reveal`'s one consumer: opens the named print and clears
-    /// the channel right back, so a later visit to the pane does not reopen
-    /// it (design M6 S5).
-    func revealIfNeeded() {
-        guard let named = navigation.reveal else { return }
+    /// `navigation.reveal`'s one consumer: opens the named print on the
+    /// shelf that can show it (`LibraryScope.revealing`: All Prints, or its
+    /// hidden collection) and clears the channel, so a later visit to the
+    /// pane does not reopen it (design M6 S5). A shelf change clears the
+    /// selection, so `LibraryRevealSequence` waits for that shelf's own
+    /// settled change (`scopeSettled`) before selecting.
+    func revealIfNeeded(scopeSettled: Bool = false) {
+        guard let named = navigation.reveal else { navigation.revealSequence = nil; return }
         // A print that landed on another machine and was saved here too is
         // shown under its This Mac copy; reveal the tile, not a hidden id.
-        let reveal = library.tile(containing: named)?.id ?? named
-        selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
-        viewing = reveal
-        navigation.reveal = nil
+        let tile = library.tile(containing: named)
+        let target = tile.map { LibraryScope.revealing($0, shelves: library.shelves) } ?? .all
+        var sequence = navigation.revealSequence.flatMap { $0.print == named ? $0 : nil } ?? LibraryRevealSequence(named)
+        let action = sequence.step(current: navigation.scope, target: target, scopeSettled: scopeSettled)
+        navigation.revealSequence = sequence
+        switch action {
+        case .wait: return
+        case let .changeScope(scope): navigation.scope = scope
+        case .select:
+            let reveal = tile?.id ?? named
+            selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
+            viewing = reveal
+            navigation.reveal = nil
+            navigation.revealSequence = nil
+        }
     }
 
     /// Keeps the selection and the open print on their tiles when a rebuild

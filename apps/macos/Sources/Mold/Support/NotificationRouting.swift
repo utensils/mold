@@ -31,16 +31,19 @@ nonisolated enum NotificationRoute: Equatable {
 }
 
 /// Applies a route to the shell -- the AppKit-touching half `NotificationRoute
-/// .route` deliberately stays free of. Scope goes to All Prints on purpose: a
-/// notification's print may not be in the collection you were last looking
-/// at, and opening on an empty shelf is worse than losing your place.
+/// .route` deliberately stays free of. A print opens on the shelf that can
+/// show it, never the collection you were last looking at: All Prints, or for
+/// a member of a HIDDEN collection (which All Prints leaves out) that
+/// collection. `LibraryPane.revealIfNeeded` decides and sequences it.
 @MainActor
 func applyNotificationRoute(
     _ route: NotificationRoute, destination: Binding<Destination>, navigation: LibraryNavigation
 ) {
     switch route {
     case let .openPrint(id):
-        navigation.scope = .all
+        // No scope here: the Library's reveal picks the shelf that shows the
+        // print (All Prints, or its hidden collection) and changes it itself,
+        // so one observer sequences the change and the selection.
         navigation.reveal = id
         destination.wrappedValue = .library
     case .openQueue:

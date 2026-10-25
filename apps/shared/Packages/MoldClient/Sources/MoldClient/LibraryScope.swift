@@ -88,3 +88,53 @@ public extension LibraryScope {
         return resolve(query, shelves: shelves, hiddenCollectionIDs: hiddenIDs, privacyEvidence: privacyEvidence, privacyLinks: privacyLinks).apply(to: entries).count
     }
 }
+
+public extension LibraryScope {
+    /// The shelf that can show `entry` when something outside the Library
+    /// (a notification) asks to open it: All Prints, unless a copy is filed
+    /// in a HIDDEN collection, which All Prints leaves out by design -- then
+    /// that collection, the first by name when there are several.
+    static func revealing(_ entry: LibraryEntry, shelves: [CollectionShelf]) -> LibraryScope {
+        let hidden = shelves.filter(\.hidden).sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        let home = hidden.first { shelf in
+            entry.everyCopy.contains { copy in
+                shelf.hosts[copy.hostID].map { copy.print.collectionList.contains($0) } ?? false
+            }
+        }
+        return home.map { .collection(slug: $0.slug) } ?? .all
+    }
+}
+
+/// One pending "open this print" from outside the Library (a notification,
+/// Source Media's owner link). It may need a different shelf, and a shelf
+/// change clears the selection; so after asking for the change it WAITS, and
+/// only the target shelf's settled change (`scopeSettled`, after that clear)
+/// selects the print. Every other pass -- the reveal's own observer firing
+/// again, an earlier shelf settling -- waits.
+public struct LibraryRevealSequence: Equatable, Sendable {
+    public enum Action: Equatable, Sendable {
+        case wait
+        case changeScope(LibraryScope)
+        case select(PrintID)
+    }
+
+    public let print: PrintID
+    public private(set) var awaiting: LibraryScope?
+
+    public init(_ print: PrintID) { self.print = print }
+
+    public mutating func step(current: LibraryScope, target: LibraryScope, scopeSettled: Bool) -> Action {
+        if let awaiting {
+            guard scopeSettled, current == awaiting else { return .wait }
+            self.awaiting = nil
+            return .select(print)
+        }
+        guard current == target else {
+            awaiting = target
+            return .changeScope(target)
+        }
+        return .select(print)
+    }
+}
