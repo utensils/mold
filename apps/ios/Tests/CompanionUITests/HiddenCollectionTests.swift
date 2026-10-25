@@ -19,6 +19,7 @@ final class HiddenCollectionTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let address = app.textFields["machine-address"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap()
@@ -91,6 +92,7 @@ final class HiddenCollectionTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let address = app.textFields["machine-address"]
         XCTAssertTrue(address.waitForExistence(timeout: 5))
         address.tap()

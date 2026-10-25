@@ -106,6 +106,18 @@ extension XCTestCase {
 }
 
 extension XCUIApplication {
+    /// Enter an Address defaults to Secure (pairing code only) since #1872;
+    /// the loopback fixture is direct HTTP, so its name and address fields
+    /// exist only once Regular is chosen.
+    @MainActor func chooseRegularConnection() {
+        let connection = buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection'")).firstMatch
+        XCTAssertTrue(connection.waitForExistence(timeout: 5))
+        connection.tap()
+        let regular = buttons["Regular"].firstMatch
+        XCTAssertTrue(regular.waitForExistence(timeout: 5))
+        regular.tap()
+    }
+
     /// The system title menu has no custom label to identify; derive its title.
     @MainActor func chooseLibraryShelf(_ title: String) {
         let picker = descendants(matching: .any)["library-collections"].firstMatch

@@ -213,6 +213,7 @@ final class SourceMediaLibraryTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection,'")).firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Regular'")).firstMatch.tap()
         let name = app.textFields["machine-name"]
