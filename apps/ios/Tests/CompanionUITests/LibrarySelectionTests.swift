@@ -85,9 +85,7 @@ final class LibrarySelectionTests: XCTestCase {
             XCTAssertEqual(modalPrint.frame.minY, modalY, accuracy: 2,
                            "Dismissing Collections must preserve the scrolled Library")
         }
-        app.buttons["View Options"].tap()
-        let media = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Media Type'")).firstMatch
-        if media.waitForExistence(timeout: 2) { media.tap() }
+        app.buttons["library-filter"].tap()
         app.buttons["Videos"].firstMatch.tap()
         XCTAssertTrue(app.navigationBars["All Prints · Videos"].waitForExistence(timeout: 5))
         let video = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'clip'"))
@@ -95,10 +93,8 @@ final class LibrarySelectionTests: XCTestCase {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture ' AND label CONTAINS 'picture'")).firstMatch.exists)
         app.chooseLibraryShelf("Favourites")
         XCTAssertTrue(app.navigationBars["Favourites · Videos"].waitForExistence(timeout: 5))
-        app.buttons["View Options"].tap()
-        let mediaAgain = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Media Type'")).firstMatch
-        if mediaAgain.waitForExistence(timeout: 2) { mediaAgain.tap() }
-        app.buttons["All Media"].firstMatch.tap()
+        app.buttons["library-filter"].tap()
+        app.buttons["All Items"].firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Favourites"].waitForExistence(timeout: 5))
     }
 

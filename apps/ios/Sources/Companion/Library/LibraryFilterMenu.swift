@@ -43,11 +43,7 @@ struct LibraryFilterMenu: View {
                         Label("Model Family", systemImage: "circle.hexagongrid")
                     }
                 }
-                Menu {
-                    LibraryMachinePicker()
-                } label: {
-                    Label("Machine", systemImage: "server.rack")
-                }
+                LibraryMachinePicker().pickerStyle(.menu)
             }
             Section {
                 Button("Clear Filters", systemImage: "xmark.circle") { query = LibraryFilter.clearing(query) }

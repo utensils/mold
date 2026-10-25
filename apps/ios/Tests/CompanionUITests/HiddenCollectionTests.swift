@@ -29,13 +29,13 @@ final class HiddenCollectionTests: XCTestCase {
         let normalPrint = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fixture 1,'")).firstMatch
         XCTAssertTrue(hiddenPrint.waitForExistence(timeout: 10))
         XCTAssertTrue(normalPrint.exists)
-        app.buttons["View Options"].firstMatch.tap()
+        app.openLibraryMachineFilter()
         let hostOption = app.buttons["127.0.0.1"].firstMatch
         XCTAssertTrue(hostOption.waitForExistence(timeout: 5), "The fixture machine is offered directly in Library")
         hostOption.tap()
         XCTAssertTrue(hiddenPrint.waitForExistence(timeout: 5))
         XCTAssertTrue(normalPrint.exists)
-        app.buttons["View Options"].firstMatch.tap()
+        app.openLibraryMachineFilter()
         let allMachines = app.buttons["All Machines"].firstMatch
         XCTAssertTrue(allMachines.waitForExistence(timeout: 5))
         allMachines.tap()
@@ -161,5 +161,14 @@ final class HiddenCollectionTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+extension XCUIApplication {
+    /// The Machine choice lives in the Library's Filter button, as a submenu.
+    @MainActor func openLibraryMachineFilter() {
+        buttons["library-filter"].firstMatch.tap()
+        let machine = buttons.matching(NSPredicate(format: "label BEGINSWITH 'Machine'")).firstMatch
+        if machine.waitForExistence(timeout: 5) { machine.tap() }
     }
 }

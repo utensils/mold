@@ -145,14 +145,9 @@ struct LibraryView: View {
     }
 
     private var libraryTitle: String {
-        let kinds = query.tokens.compactMap { token -> PrintKind? in
-            if case let .kind(kind) = token { kind } else { nil }
-        }
-        guard kinds.count == 1,
-              let filter = LibraryMediaFilter.allCases.first(where: { $0.kind == kinds.first }) else {
-            return scope.title(in: library.shelves)
-        }
-        return "\(scope.title(in: library.shelves)) · \(filter.title)"
+        // The Filter button's own words, so the title says what it shows.
+        guard LibraryFilter.isActive(query) else { return scope.title(in: library.shelves) }
+        return "\(scope.title(in: library.shelves)) · \(LibraryFilter.summary(for: query))"
     }
 
     private var machines: [(id: MoldHost.ID, name: String)] { hosts.hosts.map { ($0.id, $0.name) } }
