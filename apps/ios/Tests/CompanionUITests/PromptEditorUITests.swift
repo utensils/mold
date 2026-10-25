@@ -147,6 +147,7 @@ final class PromptEditorUITests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText("Prompt Editor Fixture \(port)")
         let address = app.textFields["machine-address"]

@@ -787,6 +787,7 @@ final class LibraryLongPressTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         if let name {
             let field = app.textFields["machine-name"]
             XCTAssertTrue(field.waitForExistence(timeout: 5))

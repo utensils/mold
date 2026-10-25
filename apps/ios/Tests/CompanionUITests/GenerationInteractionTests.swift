@@ -17,6 +17,7 @@ final class GenerationInteractionTests: XCTestCase {
         if app.buttons["Add a Machine…"].firstMatch.exists {
             app.buttons["Add a Machine…"].firstMatch.tap()
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+            app.chooseRegularConnection()
             let name = app.textFields["machine-name"]
             XCTAssertTrue(name.waitForExistence(timeout: 5))
             name.tap()
@@ -65,6 +66,7 @@ final class GenerationInteractionTests: XCTestCase {
         let enterAddress = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch
         XCTAssertTrue(enterAddress.waitForExistence(timeout: 5))
         enterAddress.tap()
+        app.chooseRegularConnection()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap()

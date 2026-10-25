@@ -133,6 +133,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         app.textFields["machine-name"].tap()
         app.textFields["machine-name"].typeText("Failure Fixture")
         app.textFields["machine-address"].tap()
@@ -233,6 +234,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         app.textFields["machine-name"].tap()
         app.textFields["machine-name"].typeText("Memory Error Fixture")
         app.textFields["machine-address"].tap()
@@ -284,6 +286,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         app.textFields["machine-name"].tap()
         app.textFields["machine-name"].typeText("Unload Fixture")
         app.textFields["machine-address"].tap()
@@ -387,6 +390,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap()
@@ -550,6 +554,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5)); name.tap(); name.typeText(fixtureName)
         let address = app.textFields["machine-address"]
@@ -708,6 +713,7 @@ final class PopulatedGenerationTests: XCTestCase {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         let name = app.textFields["machine-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 5))
         name.tap(); name.typeText("Media Fixture")
@@ -1031,6 +1037,7 @@ extension PopulatedGenerationTests {
         XCTAssertTrue(app.navigateToDestination("Machines", shortcut: "5"))
         app.buttons["Add a Machine"].firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Enter an Address'")).firstMatch.tap()
+        app.chooseRegularConnection()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Connection,'")).firstMatch.tap()
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Regular'")).firstMatch.tap()
         let name = app.textFields["machine-name"]
