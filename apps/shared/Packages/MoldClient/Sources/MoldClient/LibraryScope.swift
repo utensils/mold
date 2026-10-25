@@ -106,3 +106,35 @@ public extension LibraryScope {
         return home.map { .collection(slug: $0.slug) } ?? .all
     }
 }
+
+/// One pending "open this print" from outside the Library (a notification,
+/// Source Media's owner link). It may need a different shelf, and a shelf
+/// change clears the selection; so after asking for the change it WAITS, and
+/// only the target shelf's settled change (`scopeSettled`, after that clear)
+/// selects the print. Every other pass -- the reveal's own observer firing
+/// again, an earlier shelf settling -- waits.
+public struct LibraryRevealSequence: Equatable, Sendable {
+    public enum Action: Equatable, Sendable {
+        case wait
+        case changeScope(LibraryScope)
+        case select(PrintID)
+    }
+
+    public let print: PrintID
+    public private(set) var awaiting: LibraryScope?
+
+    public init(_ print: PrintID) { self.print = print }
+
+    public mutating func step(current: LibraryScope, target: LibraryScope, scopeSettled: Bool) -> Action {
+        if let awaiting {
+            guard scopeSettled, current == awaiting else { return .wait }
+            self.awaiting = nil
+            return .select(print)
+        }
+        guard current == target else {
+            awaiting = target
+            return .changeScope(target)
+        }
+        return .select(print)
+    }
+}

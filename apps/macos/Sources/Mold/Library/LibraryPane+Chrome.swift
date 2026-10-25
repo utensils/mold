@@ -26,7 +26,7 @@ extension LibraryPane {
                 clearSelection(); viewerOrder = showing.visible
                 // A reveal that had to change shelf finishes here, after the
                 // clear above rather than before it.
-                revealIfNeeded()
+                revealIfNeeded(scopeSettled: true)
             }
             .onChange(of: navigation.query) { _, _ in clearSelection(); viewerOrder = showing.visible }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }

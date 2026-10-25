@@ -29,6 +29,9 @@ final class LibraryNavigation {
     /// it right back. Transient on purpose: nothing about a click survives a
     /// relaunch the way `scope` and `edge` do.
     var reveal: PrintID?
+    /// The reveal in progress, once it has asked for a shelf change and is
+    /// waiting for that shelf to settle (`LibraryRevealSequence`).
+    var revealSequence: LibraryRevealSequence?
 
     private static let scopeKey = "libraryScope"
     private static let edgeKey = "libraryEdge"

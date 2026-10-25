@@ -47,3 +47,35 @@ struct LibraryRevealScopeTests {
         #expect(LibraryScope.revealing(print, shelves: shelves) == .collection(slug: "alpha"))
     }
 }
+
+/// Opening a print from outside the Library may need a different shelf, and
+/// changing shelf clears the selection. Only the target shelf's own settled
+/// change may select the print; every other pass waits.
+struct LibraryRevealSequenceTests {
+    private let print = PrintID(host: UUID(), filename: "new.png")
+    private let nsfw = LibraryScope.collection(slug: "nsfw")
+
+    @Test func alreadyOnTheRightShelfSelectsAtOnce() {
+        var reveal = LibraryRevealSequence(print)
+        #expect(reveal.step(current: .all, target: .all, scopeSettled: false) == .select(print))
+    }
+
+    /// The case review caught: the Library already open on Favourites. The
+    /// reveal's own observer must not select before the hidden collection's
+    /// scope change has cleared the selection.
+    @Test func aShelfChangeWaitsForThatShelfToSettle() {
+        var reveal = LibraryRevealSequence(print)
+        #expect(reveal.step(current: .favorites, target: nsfw, scopeSettled: false) == .changeScope(nsfw))
+        #expect(reveal.step(current: nsfw, target: nsfw, scopeSettled: false) == .wait,
+                "the reveal observer runs again before the scope observer clears")
+        #expect(reveal.step(current: .favorites, target: nsfw, scopeSettled: true) == .wait,
+                "an earlier shelf settling is not the target")
+        #expect(reveal.step(current: nsfw, target: nsfw, scopeSettled: true) == .select(print))
+    }
+
+    @Test func anOrdinaryPrintFromAnotherShelfGoesToAllPrintsTheSameWay() {
+        var reveal = LibraryRevealSequence(print)
+        #expect(reveal.step(current: .favorites, target: .all, scopeSettled: false) == .changeScope(.all))
+        #expect(reveal.step(current: .all, target: .all, scopeSettled: true) == .select(print))
+    }
+}

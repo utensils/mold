@@ -59,7 +59,7 @@ struct NotificationActivationTests {
         #expect(completions == 6)
     }
 
-    @Test func aPrintClickLeavesTheCollectionAndPreservesItsHostIdentity() {
+    @Test func aPrintClickNamesThePrintAndPreservesItsHostIdentity() {
         let defaults = UserDefaults(suiteName: "notification-activation-\(UUID())")!
         let navigation = LibraryNavigation(defaults: defaults)
         navigation.scope = .collection(slug: "other")
@@ -68,7 +68,9 @@ struct NotificationActivationTests {
         let printID = PrintID(host: UUID(), filename: "new.png")
         applyNotificationRoute(.openPrint(printID), destination: binding, navigation: navigation)
         #expect(destination == .library)
-        #expect(navigation.scope == .all)
+        // The Library's reveal chooses and changes the shelf itself
+        // (`LibraryRevealSequence`), so the route only names the print.
+        #expect(navigation.scope == .collection(slug: "other"))
         #expect(navigation.reveal == printID)
         applyNotificationRoute(.openQueue, destination: binding, navigation: navigation)
         #expect(destination == .queue)

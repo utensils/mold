@@ -25,7 +25,6 @@ struct DestinationDetail: View {
         } }
         .environment(\.sourceMediaStaged, { destination = .generate })
         .environment(\.sourceMediaOwner, { id in
-            navigation.scope = .all
             navigation.query = LibraryQuery()
             navigation.reveal = id
             destination = .library
