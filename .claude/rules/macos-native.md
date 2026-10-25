@@ -280,6 +280,8 @@ The Photos-style Filter menu's model is MoldClient's `LibraryFilter`: ONE pick (
 
 The Library toolbar's Filter menu is `Library/LibraryFilterMenu.swift` (replacing the media-type menu; Machine keeps its own): the `LibraryFilter.sections` picks as checkmarked Toggles, a Model Family submenu from `LibraryStore.familyCache` (`LibraryFamilyFacetCache`, keyed by row revision and Library/Trash partition), and Clear Filters. Its visible title is `LibraryFilter.summary(for:)`, and its icon fills while `LibraryFilter.isActive`. Family dots in a menu must be `FamilySwatch.menuImage(rgb:)` (a non-template bitmap; SwiftUI menu images are templates and lose their colour). `FamilySwatch.swift` in MoldStyle is the ONLY file allowed to turn a colour value into a colour (`swift-lint.sh color` exempts it, because the values come from the generated table). Info's Family row shows the label plus a `FamilySwatch` from `PrintDetailRow.swatch`.
 
+A notification click reveals its print in All Prints, unless a copy is filed in a hidden collection (All Prints leaves those out): then `LibraryScope.revealing` names that collection and `revealIfNeeded` switches scope first, finishing the reveal from the scope `onChange` so the selection survives the scope change's clear.
+
 Library machine and media toolbar menus keep their current query selection visible,
 even under the toolbar’s icon-only label style. Preserve native selection checkmarks,
 multi-token summaries, bounded long host names and full accessible/help labels.

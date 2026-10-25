@@ -22,7 +22,12 @@ extension LibraryPane {
                 revealIfNeeded()
             }
             .onChange(of: undoManager) { _, manager in library.undo.manager = manager }
-            .onChange(of: navigation.scope) { _, _ in clearSelection(); viewerOrder = showing.visible }
+            .onChange(of: navigation.scope) { _, _ in
+                clearSelection(); viewerOrder = showing.visible
+                // A reveal that had to change shelf finishes here, after the
+                // clear above rather than before it.
+                revealIfNeeded()
+            }
             .onChange(of: navigation.query) { _, _ in clearSelection(); viewerOrder = showing.visible }
             .onChange(of: library.shelves) { _, shelves in navigation.reconcile(with: shelves) }
             .onChange(of: library.rows.value) { _, _ in

@@ -31,7 +31,15 @@ extension LibraryPane {
         guard let named = navigation.reveal else { return }
         // A print that landed on another machine and was saved here too is
         // shown under its This Mac copy; reveal the tile, not a hidden id.
-        let reveal = library.tile(containing: named)?.id ?? named
+        let tile = library.tile(containing: named)
+        // All Prints leaves out hidden collections' members: open the shelf
+        // that shows this one. Changing scope clears the selection, so the
+        // reveal stays pending and the scope change runs this again.
+        if let tile, navigation.scope == .all {
+            let home = LibraryScope.revealing(tile, shelves: library.shelves)
+            if home != .all { navigation.scope = home; return }
+        }
+        let reveal = tile?.id ?? named
         selection = LibraryCursor.Selection(items: [reveal], anchor: reveal, lead: reveal)
         viewing = reveal
         navigation.reveal = nil

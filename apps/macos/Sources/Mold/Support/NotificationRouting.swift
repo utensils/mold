@@ -33,7 +33,9 @@ nonisolated enum NotificationRoute: Equatable {
 /// Applies a route to the shell -- the AppKit-touching half `NotificationRoute
 /// .route` deliberately stays free of. Scope goes to All Prints on purpose: a
 /// notification's print may not be in the collection you were last looking
-/// at, and opening on an empty shelf is worse than losing your place.
+/// at, and opening on an empty shelf is worse than losing your place. A print
+/// in a HIDDEN collection is not in All Prints either; the Library's reveal
+/// moves on to that collection (`LibraryScope.revealing`).
 @MainActor
 func applyNotificationRoute(
     _ route: NotificationRoute, destination: Binding<Destination>, navigation: LibraryNavigation

@@ -88,3 +88,21 @@ public extension LibraryScope {
         return resolve(query, shelves: shelves, hiddenCollectionIDs: hiddenIDs, privacyEvidence: privacyEvidence, privacyLinks: privacyLinks).apply(to: entries).count
     }
 }
+
+public extension LibraryScope {
+    /// The shelf that can show `entry` when something outside the Library
+    /// (a notification) asks to open it: All Prints, unless a copy is filed
+    /// in a HIDDEN collection, which All Prints leaves out by design -- then
+    /// that collection, the first by name when there are several.
+    static func revealing(_ entry: LibraryEntry, shelves: [CollectionShelf]) -> LibraryScope {
+        let hidden = shelves.filter(\.hidden).sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        let home = hidden.first { shelf in
+            entry.everyCopy.contains { copy in
+                shelf.hosts[copy.hostID].map { copy.print.collectionList.contains($0) } ?? false
+            }
+        }
+        return home.map { .collection(slug: $0.slug) } ?? .all
+    }
+}
