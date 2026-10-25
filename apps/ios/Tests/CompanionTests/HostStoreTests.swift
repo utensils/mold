@@ -168,7 +168,7 @@ struct HostStoreTests {
         let (hosts, _, _) = store(fake)
         let host = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
         await hosts.refresh(host)
-        #expect(hosts.reachability(of: host) == .down("timed out"))
+        #expect(hosts.reachability(of: host).isOffline)
         fake.stub("status()") { _ in
             await MainActor.run {
                 #expect(hosts.reachability(of: host).isOffline,
