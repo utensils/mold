@@ -32,8 +32,8 @@ final class ReferenceParityTests: XCTestCase {
         let composer = form(in: app)
         func touchViewport() -> CGRect {
             let bounds = ShellAccessibilityTests.composerViewport(composer, in: app)
-            let queue = app.buttons["generate-queue-status"]
-            // safeAreaInset's fixed Queue panel covers scrolled content even
+            let queue = app.buttons["submit-generation"]
+            // safeAreaInset's fixed Generate panel covers scrolled content even
             // when SwiftUI reports that content as hittable in the AX tree.
             let bottom = queue.exists ? min(bounds.maxY, queue.frame.minY - 8) : bounds.maxY
             return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width,

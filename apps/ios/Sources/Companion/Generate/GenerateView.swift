@@ -37,7 +37,6 @@ struct GenerateView: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 8) {
                         if generate.run == .submitting, let preparing = generate.referencePreparation { Text(preparing).font(.subheadline).accessibilityIdentifier("reference-preparation-status") }
-                        QueueStatusLink()
                         GenerateRow(estimate: estimate, promptEditorPresented: showsPromptEditor)
                     }
                     .padding(16)

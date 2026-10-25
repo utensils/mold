@@ -157,8 +157,8 @@ remain clear of the form-sheet scroll-edge fades. Auto follows the default onlin
 Kind and Machine stay visible above the prompt and stack at xxLarge and above.
 A full-width Generate action remains above the tab bar while the form scrolls,
 with enough bottom travel to lift Options above it. In compact-height landscape
-that action scrolls with the form. The queue-count link opens Queue for live
-progress; results open in Library. The prompt stays in the same view hierarchy
+that action scrolls with the form. Live progress is in the Queue tab (no link
+on Generate); results open in Library. The prompt stays in the same view hierarchy
 through keyboard changes and iPad resizing. Top to bottom:
 
 1. **Prompt:** a bounded `TextField(axis: .vertical)` with up to three lines.
@@ -215,7 +215,7 @@ when model profiles arrive, without resetting authored options.
 
 **While running and after completion.**
 
-The composer and its pinned Generate button remain in place. A fleet queue-count link opens Queue for progress and supported live previews. Results open from Library or completion notifications; Generate does not mount a result canvas. Attachment pickers remain presented through queue updates. Video autoplay/repeat is controlled in Settings and applies only to the selected viewer page.
+The composer and its pinned Generate button remain in place. Progress and supported live previews are in the Queue tab; Generate carries no link to it. Results open from Library or completion notifications; Generate does not mount a result canvas. Attachment pickers remain presented through queue updates. Video autoplay/repeat is controlled in Settings and applies only to the selected viewer page.
 
 **3-D object.** A recipe that ignores the prompt hides the prompt field and explains that it works from a picture. Named-view recipes expose their camera roles.
 
