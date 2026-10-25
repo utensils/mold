@@ -203,6 +203,18 @@ struct HostStoreTests {
         #expect(hosts.silence(of: host) == "Offline")
     }
 
+    @Test func aStaleBackgroundReadCannotGreyOutAReconfiguredMachine() throws {
+        let (hosts, _, _) = store()
+        let old = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
+        hosts.setReachability(.up(try status()), for: old.id)
+        var moved = old
+        moved.baseURL = URL(string: "http://10.0.0.5:7680")!
+        hosts.setHosts([moved])
+        hosts.reportRead(old, doing: "list its downloads", MoldClientError.unreachable("timed out"))
+        #expect(hosts.isUp(moved))
+        #expect(hosts.failures.isEmpty)
+    }
+
     @Test func aRefusalReadsAsNeedsAKeyNotAsDown() async throws {
         let fake = FakeBackend()
         fake.stub("status()", throwing: MoldClientError.unauthorized)

@@ -35,8 +35,11 @@ extension HostStore {
     /// back when it answers. Only a transport failure counts -- the app's own
     /// `.unreachable` words ("the source machine isn't connected") belong
     /// to something a person pressed, and go through `report`.
+    /// A read begun against an older address or key says nothing about the
+    /// machine as it is now: it is dropped, never recorded.
     func reportRead(_ host: MoldHost, doing: String, _ error: Error) {
-        guard case MoldClientError.unreachable = error, self.host(host.id) != nil else {
+        guard self.host(host.id) == host else { return }
+        guard case MoldClientError.unreachable = error else {
             report(host, doing: doing, error)
             return
         }

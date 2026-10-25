@@ -177,8 +177,8 @@ private struct QueueSectionHeader: View {
                 Text("· Paused").accessibilityLabel("queue paused")
             }
         }
+        // Already the grey token; fading it further fails contrast.
         .foregroundStyle(.secondaryText)
-        .opacity(offline ? 0.6 : 1)
         .accessibilityAddTraits(.isHeader)
     }
 }
