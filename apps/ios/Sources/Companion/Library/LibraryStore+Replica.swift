@@ -97,7 +97,7 @@ extension LibraryStore {
         } catch {
             guard epoch == cacheEpoch, hosts.host(host.id) == host, !Task.isCancelled else { return }
             collectionInventoryAvailable.remove(host.id)
-            hosts.report(host, doing: doing, error)
+            hosts.reportRead(host, doing: doing, error)
         }
     }
 

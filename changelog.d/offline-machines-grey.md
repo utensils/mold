@@ -1,0 +1,3 @@
+- iPhone and iPad: an offline machine is greyed out and nothing more. The Queue no longer flickers while a machine is off: a recheck keeps it "Offline" instead of flipping to "Checking…" every 15 seconds, a background read that can't reach it greys it out instead of raising a failure banner, and the Queue shows a greyed "name · Offline" header instead of "Queue unavailable". Machine cards say "Offline since 14:02" with a grey dot; the reason is in the machine's details.
+- A Secure machine whose encrypted connection drops now reads as offline instead of "That action failed. Check the app's logs for details."
+- Mac: an offline machine's dot is grey instead of red, and rechecking it no longer flashes "Checking…".

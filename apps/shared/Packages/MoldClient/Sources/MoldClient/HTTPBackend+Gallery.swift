@@ -105,8 +105,8 @@ public extension HTTPBackend {
         let response: URLResponse
         do {
             (temporary, response) = try await relayDownload(request)
-        } catch let error as URLError {
-            throw TransportFailure.from(error)
+        } catch {
+            throw TransportFailure.from(any: error)
         }
         guard let http = response as? HTTPURLResponse else {
             throw MoldClientError.malformedResponse

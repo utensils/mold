@@ -20,12 +20,12 @@ struct QueueView: View {
                            message: String(localized: "Renders you start appear here. Add a machine to begin.")) {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
+            } else if nothingWaiting, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
-                           message: String(localized: "Some machines could not provide their queues. Check Machines to reconnect, then pull to refresh.")) {
+                           message: String(localized: "A machine answered but couldn't list its queue. Check Machines, then pull to refresh.")) {
                     Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
+            } else if nothingWaiting, queue.offlineMachines.isEmpty {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
             } else {
@@ -62,6 +62,12 @@ struct QueueView: View {
 
     private struct VideoDetailID: Identifiable { let id: String }
 
+    private var nothingWaiting: Bool {
+        queue.isEmpty && generate.sequence.queueJobs.isEmpty && !generate.videoJobs.hasQueueContent
+            && generate.sequence.historyNotice == nil && generate.videoRestarts.pending.isEmpty
+            && generate.videoRestarts.error == nil
+    }
+
     /// The video parents and authored sequences, drawn as ordinary rows.
     private var videoQueue: NativeVideoQueue {
         NativeVideoQueue(sequence: generate.sequence, videos: generate.videoJobs, restarts: generate.videoRestarts,
@@ -95,8 +101,13 @@ struct QueueView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             if !queue.unavailableMachines.isEmpty {
-                Text("Some machine queues are unavailable. Check Machines to reconnect.")
+                Text("Some machine queues are unavailable. Check Machines, then pull to refresh.")
                     .foregroundStyle(.secondaryText)
+            }
+            // Offline machines keep the list (for their greyed headers), so
+            // an empty fleet still says so, quietly.
+            if nothingWaiting {
+                Text("Nothing waiting").foregroundStyle(.secondaryText)
             }
             if let summary = queue.summary {
                 Text(summary)
@@ -122,6 +133,12 @@ struct QueueView: View {
                     }
                 }
             }
+            // Offline is greyed out and nothing more: no rows, no error.
+            // Only for one with no section of its own (retained video rows
+            // already carry the greyed header).
+            ForEach(queue.offlineMachines.filter { queue.groups(for: $0.id).isEmpty && videoQueue.items(on: $0.id).isEmpty }) { host in
+                Section { EmptyView() } header: { QueueSectionHeader(host: host) }
+            }
         }
         .listStyle(.insetGrouped)
         .accessibilityIdentifier("queue-list")
@@ -142,18 +159,25 @@ struct QueueView: View {
     }
 }
 
-/// A machine's name over its rows, and whether it is dispatching.
+/// A machine's name over its rows, and whether it is dispatching -- or, greyed
+/// out on its own, that it is offline.
 private struct QueueSectionHeader: View {
     @Environment(QueueStore.self) private var queue
     let host: MoldHost
 
+    @Environment(HostStore.self) private var hosts
+
     var body: some View {
+        let offline = hosts.reachability(of: host).isOffline
         HStack(spacing: 6) {
             Text(host.name)
-            if queue.isQueuePaused(host.id) {
+            if offline {
+                Text("· Offline")
+            } else if queue.isQueuePaused(host.id) {
                 Text("· Paused").accessibilityLabel("queue paused")
             }
         }
+        // Already the grey token; fading it further fails contrast.
         .foregroundStyle(.secondaryText)
         .accessibilityAddTraits(.isHeader)
     }

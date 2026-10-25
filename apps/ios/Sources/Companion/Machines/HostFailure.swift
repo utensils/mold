@@ -29,6 +29,24 @@ extension HostStore {
         report(host.id, name: host.name, doing: doing, error)
     }
 
+    /// A background read nobody asked for (a queue, a library, downloads).
+    /// A machine it cannot reach is not a failure to explain: it is greyed
+    /// out as offline, its lines go, and the foreground recheck brings it
+    /// back when it answers. Only a transport failure counts -- the app's own
+    /// `.unreachable` words ("the source machine isn't connected") belong
+    /// to something a person pressed, and go through `report`.
+    /// A read begun against an older address or key says nothing about the
+    /// machine as it is now: it is dropped, never recorded.
+    func reportRead(_ host: MoldHost, doing: String, _ error: Error) {
+        guard self.host(host.id) == host else { return }
+        guard case MoldClientError.unreachable = error else {
+            report(host, doing: doing, error)
+            return
+        }
+        clearFailures(for: host.id)
+        recordConnectionFailure(error, on: host.id)
+    }
+
     func dismiss(_ failure: HostFailure) {
         setFailures(failures.filter { $0.id != failure.id })
     }

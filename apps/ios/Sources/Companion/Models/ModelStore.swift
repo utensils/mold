@@ -110,7 +110,7 @@ final class ModelStore {
         do {
             adopt(try await client.downloads(), on: id)
         } catch {
-            hosts.report(host, doing: String(localized: "list its downloads"), error)
+            hosts.reportRead(host, doing: String(localized: "list its downloads"), error)
         }
         if hosts.capabilities[id]?.hasLicenses == true, let list = try? await client.licenses() {
             licences[id] = list

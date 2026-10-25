@@ -351,9 +351,10 @@ and name.
 - "3 queued · 14 installed".
 - The address, in mono.
 
-**A machine that is not answering** stays in place, uses `.secondary`
-foreground, and shows its reason: "Not answering since 14:02 — it may be asleep
-or off the network."
+**A machine that is not answering** stays in place, greyed out: a grey dot,
+`.secondary` name, and "Offline since 14:02". Offline is a non-issue, never an
+error: no red, no banner, and a recheck never flips it to "Checking…". The
+reason is in the machine's detail view only.
 
 **Card context menu:** Open · Check Now · Set as Default · Copy Address · Edit…
 │ Remove….
@@ -590,7 +591,7 @@ foreground, Generate shows a **From Share** card with the same three choices.
 | ---------------------- | ---------------------------------------------------------------------------------------------------- |
 | No machine             | **No machines yet** — Mold makes pictures on a computer you own. Add one to begin.                   |
 | Generate, no machine   | **Add a machine to start generating** [Add a Machine…]                                               |
-| Machine not answering  | Not answering since 14:02 — it may be asleep or off the network.                                     |
+| Machine not answering  | Offline since 14:02 (grey; the reason only in the machine's detail view)                             |
 | Machine wants a key    | This machine is there but wants an API key. [Add Key…]                                               |
 | Checking               | Checking…                                                                                            |
 | Held, missing model    | Needs FLUX.2 [klein] on workstation before it can start. [Pull] [Retry]                              |
@@ -686,7 +687,7 @@ overlay:
 | 15  | iPad landscape: sidebar and Library               | Large, dark       |
 | 16  | Live Activity, Dynamic Island, widgets            | Light and dark    |
 
-Offline Generate and Queue explain unavailable data and direct the person to Machines. A saved draft waits for its model profile rather than adopting the first responding machine's defaults; explicit kind/model choice cancels that restoration. Exports fail as one selection if a source machine has been removed, preserving each file's media kind.
+Offline machines are greyed out everywhere: Queue draws a greyed "name · Offline" header and nothing more, and an unreachable request greys the machine out instead of raising a failure banner. Queue says "unavailable" only for an answering machine that refused its queue. A saved draft waits for its model profile rather than adopting the first responding machine's defaults; explicit kind/model choice cancels that restoration. Exports fail as one selection if a source machine has been removed, preserving each file's media kind.
 
 ### Queue details and prompt history
 

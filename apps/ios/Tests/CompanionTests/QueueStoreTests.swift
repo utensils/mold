@@ -247,14 +247,35 @@ struct QueueStoreTests {
         #expect(queue.isEmpty)
         #expect(queue.unavailableMachines.isEmpty)
         hosts.setReachability(.down("Offline"), for: host.id)
-        #expect(queue.unavailableMachines.map(\.id) == [host.id])
+        #expect(queue.unavailableMachines.isEmpty, "offline is greyed out, not an unavailable queue")
+        #expect(queue.offlineMachines.map(\.id) == [host.id])
+        hosts.setReachability(.checking, for: host.id)
+        #expect(queue.offlineMachines.isEmpty)
+        hosts.setReachability(.needsKey, for: host.id)
+        #expect(queue.unavailableMachines.map(\.id) == [host.id], "a missing key is not an empty queue")
+        #expect(queue.offlineMachines.isEmpty)
     }
 
-    @Test func failedQueueReadInvalidatesAnEarlierEmptyAnswer() async throws {
+    @Test func anUnreachableQueueReadGreysTheMachineOutWithoutAnError() async throws {
         let (queue, hosts, fake) = try await Self.setUp()
+        hosts.stopWatching()
         fake.stub("queue()") { _ in throw MoldClientError.unreachable("Offline") }
         await queue.reload()
+        #expect(queue.unavailableMachines.isEmpty)
+        #expect(queue.offlineMachines.map(\.id) == hosts.hosts.map(\.id))
+        #expect(queue.isEmpty)
+        #expect(hosts.failures.isEmpty)
+    }
+
+    @Test func aRefusedQueueReadIsUnavailableUntilItAnswers() async throws {
+        let (queue, hosts, fake) = try await Self.setUp()
+        fake.stub("queue()") { _ in throw MoldClientError.http(status: 500, code: nil, message: "boom") }
+        await queue.reload()
         #expect(queue.unavailableMachines.map(\.id) == hosts.hosts.map(\.id))
+        #expect(queue.offlineMachines.isEmpty)
+        fake.stub("queue()", returning: try Self.decode(QueueListing.self, #"{"entries":[]}"#))
+        await queue.reload()
+        #expect(queue.unavailableMachines.isEmpty)
     }
 
     @Test func theBadgeCountsRenderingAndHeldJobs() async throws {

@@ -60,7 +60,7 @@ extension HTTPBackend {
         do {
             let (stream, response) = try await self.response(request)
             return (try await stream.collected(upTo: 64 * 1024 * 1024), response)
-        } catch let error as URLError { throw TransportFailure.from(error) }
+        } catch { throw TransportFailure.from(any: error) }
     }
 
     func upload(_ request: URLRequest, fromFile file: URL) async throws -> Data {
@@ -69,6 +69,6 @@ extension HTTPBackend {
             let data = try await stream.collected(upTo: 64 * 1024 * 1024)
             try HTTPRefusal.check(response, data)
             return data
-        } catch let error as URLError { throw TransportFailure.from(error) }
+        } catch { throw TransportFailure.from(any: error) }
     }
 }

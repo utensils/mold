@@ -4,7 +4,7 @@ import SwiftUI
 /// One machine, the way the Mac's fleet card says it (DESIGN.md §5.4): dot,
 /// name and Default; "Ready · 0.31.0" and the hardware; video memory; what is
 /// waiting and installed; the address. A figure nothing reported is simply
-/// not drawn. A machine that is not answering keeps its place and says why.
+/// not drawn. A machine that is not answering keeps its place, greyed out.
 struct MachineCard: View {
     @Environment(HostStore.self) private var hosts
     @Environment(\.dynamicTypeSize) private var size
@@ -38,7 +38,9 @@ struct MachineCard: View {
         return layout {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 StatusDot(reachability: state)
+                // Offline is greyed out, never alarming.
                 Text(host.name).font(.headline)
+                    .foregroundStyle(state.isOffline ? Color.secondaryText : Color.primary)
             }
             if !stacked { Spacer(minLength: 0) }
             if hosts.defaultMachine == host.id {

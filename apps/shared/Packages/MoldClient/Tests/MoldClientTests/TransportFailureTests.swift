@@ -23,3 +23,26 @@ import Testing
     }
     #expect(!reason.isEmpty)
 }
+
+// A Secure machine's requests ride a WebSocket. A dropped socket throws a
+// POSIX `NSError`, not a `URLError`: it must still read as the machine being
+// unreachable (greyed out), never as "That action failed" in a banner.
+@Test func aDroppedSecureSocketMeansUnreachable() {
+    for error: any Error in [POSIXError(.ENOTCONN), NSError(domain: NSPOSIXErrorDomain, code: 61),
+                             SecureConnectionError.closed, URLError(.notConnectedToInternet)] {
+        guard case MoldClientError.unreachable = TransportFailure.from(any: error) else {
+            Issue.record("expected .unreachable for \(error)")
+            continue
+        }
+    }
+}
+
+@Test func repliesAndOwnErrorsPassThroughUntouched() {
+    #expect(TransportFailure.from(any: CancellationError()) is CancellationError)
+    #expect(TransportFailure.from(any: URLError(.cancelled)) is CancellationError)
+    guard case MoldClientError.unauthorized = TransportFailure.from(any: MoldClientError.unauthorized) else {
+        Issue.record("a refusal must stay a refusal"); return
+    }
+    #expect(TransportFailure.from(any: SecureConnectionError.authenticationFailed) as? SecureConnectionError == .authenticationFailed)
+    #expect(TransportFailure.from(any: CocoaError(.fileReadNoSuchFile)) is CocoaError)
+}

@@ -7,15 +7,15 @@ import SwiftUI
 /// used to each carry their own switch, which is how the same machine could
 /// say "Needs an API key" in one list and show a bare red dot in another.
 extension HostStore.Reachability {
-    /// `.green`/`.red` here are status semantics, not brand color -- the same
-    /// meaning the system uses in its own connection indicators.
+    /// `.green` here is status semantics, not brand color -- the same meaning
+    /// the system uses in its own connection indicators. Offline is greyed
+    /// out, not red: a machine that is switched off is not something to fix.
     var tint: Color {
         switch self {
-        case .unknown, .checking: .secondary
+        case .unknown, .checking, .down: .secondary
         case .up: .green
-        // Amber, not red: the machine is fine, the credential is missing.
+        // Amber: the machine is fine, the credential is missing.
         case .needsKey: .orange
-        case .down: .red
         }
     }
 

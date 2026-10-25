@@ -15,6 +15,10 @@ final class QueueStore {
     /// Each running row's latest step and denoise preview, by job id.
     private(set) var progress: [String: JobProgress] = [:]
     private var blockedReasons: [MoldHost.ID: [String: String]] = [:]
+    /// Answering machines whose last queue read failed. Not every machine
+    /// without a listing: an offline one is greyed out, and one not yet read
+    /// is loading -- neither is "unavailable".
+    private(set) var listFailed: Set<MoldHost.ID> = []
     private var cancelReceipts: [MoldHost.ID: [String: QueueCancellationDisposition]] = [:]
 
     func stall(for entry: QueueEntry) -> StallDiagnostic? {
@@ -151,6 +155,7 @@ final class QueueStore {
         await withTaskGroup(of: Void.self) { group in
             for host in hosts.upHosts { group.addTask { await self.poll(host.id) } }
         }
+        listFailed.formIntersection(hosts.upHosts.map(\.id))
         for id in Set(listings.keys).subtracting(hosts.hosts.map(\.id)) {
             listings[id] = nil; children[id] = nil; gate[id] = nil
             blockedReasons[id] = nil; cancelReceipts[id] = nil
@@ -159,7 +164,7 @@ final class QueueStore {
     }
 
     func poll(_ id: MoldHost.ID) async {
-        guard let host = hosts.host(id), hosts.isUp(host) else { listings[id] = nil; return }
+        guard let host = hosts.host(id), hosts.isUp(host) else { listings[id] = nil; listFailed.remove(id); return }
         let instance = hosts.instanceID(of: id)
         let current = { !Task.isCancelled && self.hosts.host(id) == host
             && self.hosts.isUp(host) && self.hosts.instanceID(of: id) == instance }
@@ -169,6 +174,7 @@ final class QueueStore {
             guard current() else { return }
             let entries = snapshot.merged.filter(\.state.isLive)
             listings[id] = entries
+            listFailed.remove(id)
             blockedReasons[id] = Dictionary((snapshot.plan?.workItems ?? []).compactMap { item in
                 item.blockedDeviceReason.map { (item.workId, $0) }
             }, uniquingKeysWith: { _, latest in latest })
@@ -188,7 +194,9 @@ final class QueueStore {
         } catch {
             guard current() else { return }
             listings[id] = nil
-            hosts.report(host, doing: String(localized: "list its queue"), error)
+            listFailed.insert(id)
+            // An unreachable machine is greyed out by `reportRead`, not listed here.
+            hosts.reportRead(host, doing: String(localized: "list its queue"), error)
         }
     }
 
@@ -289,9 +297,22 @@ final class QueueStore {
         listings.values.joined().filter(\.state.isLive).count
     }
 
-    /// An unanswered queue cannot establish that nothing is waiting.
+    /// Machines that answer but whose queue can't be read: a refused read, or
+    /// a missing key. An offline machine is not here: offline is greyed out
+    /// (`offlineMachines`), never an error.
     var unavailableMachines: [MoldHost] {
-        hosts.hosts.filter { !hosts.isUp($0) || listings[$0.id] == nil }
+        hosts.hosts.filter { host in
+            switch hosts.reachability(of: host) {
+            case .needsKey: true
+            case .up: listFailed.contains(host.id)
+            case .unknown, .checking, .down: false
+            }
+        }
+    }
+
+    /// Machines not answering, drawn as a greyed header and nothing more.
+    var offlineMachines: [MoldHost] {
+        hosts.hosts.filter { hosts.reachability(of: $0).isOffline }
     }
 
     var isEmpty: Bool { listings.values.allSatisfy(\.isEmpty) }

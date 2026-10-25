@@ -63,6 +63,10 @@ struct MachineDetailView: View {
                 Text(hosts.silence(of: host) ?? state.sentence ?? String(localized: "Not checked yet"))
                     .fixedSize(horizontal: false, vertical: true)
             } icon: { StatusDot(reachability: state) }
+            // The why lives here, one tap in -- never on the card or the queue.
+            if case let .down(reason) = state {
+                Text(reason).foregroundStyle(.secondaryText).fixedSize(horizontal: false, vertical: true)
+            }
             if case let .up(status) = state {
                 if let depth = status.queueDepth {
                     AdaptiveRow { Text("Waiting") } value: { Text("\(depth)").monospacedDigit() }
