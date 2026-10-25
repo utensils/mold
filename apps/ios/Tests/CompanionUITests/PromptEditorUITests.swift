@@ -117,7 +117,7 @@ final class PromptEditorUITests: XCTestCase {
     @MainActor private func openEditor(in app: XCUIApplication) -> Bool {
         let opener = app.buttons["prompt-editor-open"]
         guard opener.waitForExistence(timeout: 10) else { XCTFail("Edit prompt must exist"); return false }
-        let queue = app.buttons["generate-queue-status"]
+        let queue = app.buttons["submit-generation"]
         let origin = app.coordinate(withNormalizedOffset: .zero)
         for _ in 0..<6 where !opener.isHittable || opener.frame.maxY >= queue.frame.minY {
             let start = origin.withOffset(CGVector(dx: app.frame.maxX - 8, dy: queue.frame.minY - 24))

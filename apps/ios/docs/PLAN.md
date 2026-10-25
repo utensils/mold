@@ -217,7 +217,7 @@ Review the artifact with James before M1 code lands. Iterating on the mockups is
 - Trailing: a Machine menu (dot plus name; Auto follows the default machine).
 - Kind switch (Still picture / Short clip / 3-D object): a menu on iPhone, segmented on iPad.
 
-**Progress and results.** Generate stays a scrolling composer. Its queue-count link opens Queue for progress; Library displays completed media.
+**Progress and results.** Generate stays a scrolling composer. Progress is in the Queue tab; Library displays completed media.
 
 **Composer.** A glass panel attached with `.safeAreaBar(edge: .bottom)`. It contains:
 
