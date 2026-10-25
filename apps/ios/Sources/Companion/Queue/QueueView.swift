@@ -20,10 +20,10 @@ struct QueueView: View {
                            message: String(localized: "Renders you start appear here. Add a machine to begin.")) {
                     Button("Add a Machine…") { router.addMachine() }.prominentAction()
                 }
-            } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil, !queue.unavailableMachines.isEmpty {
+            } else if nothingWaiting, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
                            message: String(localized: "A machine answered but couldn't list its queue. Pull to refresh."))
-            } else if queue.isEmpty, generate.sequence.queueJobs.isEmpty, !generate.videoJobs.hasQueueContent, generate.sequence.historyNotice == nil, generate.videoRestarts.pending.isEmpty, generate.videoRestarts.error == nil {
+            } else if nothingWaiting, queue.offlineMachines.isEmpty {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
             } else {
@@ -60,6 +60,12 @@ struct QueueView: View {
 
     private struct VideoDetailID: Identifiable { let id: String }
 
+    private var nothingWaiting: Bool {
+        queue.isEmpty && generate.sequence.queueJobs.isEmpty && !generate.videoJobs.hasQueueContent
+            && generate.sequence.historyNotice == nil && generate.videoRestarts.pending.isEmpty
+            && generate.videoRestarts.error == nil
+    }
+
     /// The video parents and authored sequences, drawn as ordinary rows.
     private var videoQueue: NativeVideoQueue {
         NativeVideoQueue(sequence: generate.sequence, videos: generate.videoJobs, restarts: generate.videoRestarts,
@@ -95,6 +101,11 @@ struct QueueView: View {
             if !queue.unavailableMachines.isEmpty {
                 Text("Some machine queues are unavailable. Pull to refresh.")
                     .foregroundStyle(.secondaryText)
+            }
+            // Offline machines keep the list (for their greyed headers), so
+            // an empty fleet still says so, quietly.
+            if nothingWaiting {
+                Text("Nothing waiting").foregroundStyle(.secondaryText)
             }
             if let summary = queue.summary {
                 Text(summary)
