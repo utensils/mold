@@ -189,12 +189,15 @@ struct HostStoreTests {
         #expect(HostStore.Reachability.checking.isOffline == false)
     }
 
-    @Test func anUnreachableMachineIsGreyedOutInsteadOfReported() throws {
+    @Test func anUnreachableBackgroundReadGreysTheMachineOutInsteadOfReporting() throws {
         let (hosts, _, _) = store()
         let host = try hosts.add(name: "a", address: "10.0.0.4", apiKey: nil, makeDefault: false)
         hosts.report(host, doing: "list its tags", MoldClientError.http(status: 500, code: nil, message: "boom"))
         #expect(hosts.failures.count == 1)
-        hosts.report(host, doing: "list its queue", MoldClientError.unreachable("timed out"))
+        hosts.report(host, doing: "send that picture", MoldClientError.unreachable("The source machine isn't connected."))
+        #expect(hosts.failures.count == 2, "an action someone pressed still says why")
+        #expect(!hosts.reachability(of: host).isOffline, "the app's own .unreachable words never mark a machine offline")
+        hosts.reportRead(host, doing: "list its queue", MoldClientError.unreachable("timed out"))
         #expect(hosts.failures.isEmpty, "offline is not a failure to explain")
         #expect(hosts.reachability(of: host).isOffline)
         #expect(hosts.silence(of: host) == "Offline")

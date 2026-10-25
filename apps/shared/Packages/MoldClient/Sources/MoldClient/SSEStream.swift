@@ -25,12 +25,9 @@ public struct SSEStream: AsyncSequence, Sendable {
                     return nil
                 }
                 return event
-            } catch let error as URLError {
-                done = true
-                throw TransportFailure.from(error)
             } catch {
                 done = true
-                throw error
+                throw TransportFailure.from(any: error)
             }
         }
 

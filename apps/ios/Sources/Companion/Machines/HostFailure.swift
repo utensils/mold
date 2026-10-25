@@ -16,15 +16,8 @@ struct HostFailure: Identifiable, Equatable {
 
 extension HostStore {
     /// Records a failure. The same machine failing the same way replaces its
-    /// earlier line rather than stacking a second. A machine that cannot be
-    /// reached is not a failure to explain: it is greyed out as offline, its
-    /// lines go, and the foreground recheck brings it back when it answers.
+    /// earlier line rather than stacking a second.
     func report(_ host: MoldHost.ID?, name: String?, doing: String, _ error: Error) {
-        if let host, case MoldClientError.unreachable = error, self.host(host) != nil {
-            clearFailures(for: host)
-            recordConnectionFailure(error, on: host)
-            return
-        }
         let who = name ?? "A machine"
         let text = "\(who) couldn't \(doing): \(error.reason) \(error.advice ?? "")"
             .trimmingCharacters(in: .whitespaces)
@@ -34,6 +27,21 @@ extension HostStore {
 
     func report(_ host: MoldHost, doing: String, _ error: Error) {
         report(host.id, name: host.name, doing: doing, error)
+    }
+
+    /// A background read nobody asked for (a queue, a library, downloads).
+    /// A machine it cannot reach is not a failure to explain: it is greyed
+    /// out as offline, its lines go, and the foreground recheck brings it
+    /// back when it answers. Only a transport failure counts -- the app's own
+    /// `.unreachable` words ("the source machine isn't connected") belong
+    /// to something a person pressed, and go through `report`.
+    func reportRead(_ host: MoldHost, doing: String, _ error: Error) {
+        guard case MoldClientError.unreachable = error, self.host(host.id) != nil else {
+            report(host, doing: doing, error)
+            return
+        }
+        clearFailures(for: host.id)
+        recordConnectionFailure(error, on: host.id)
     }
 
     func dismiss(_ failure: HostFailure) {

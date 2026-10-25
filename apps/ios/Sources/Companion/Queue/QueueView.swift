@@ -22,7 +22,9 @@ struct QueueView: View {
                 }
             } else if nothingWaiting, !queue.unavailableMachines.isEmpty {
                 EmptyState(title: String(localized: "Queue unavailable"), symbol: Destination.queue.symbol,
-                           message: String(localized: "A machine answered but couldn't list its queue. Pull to refresh."))
+                           message: String(localized: "A machine answered but couldn't list its queue. Check Machines, then pull to refresh.")) {
+                    Button("Check Machines") { router.selection = .go(.machines) }.prominentAction()
+                }
             } else if nothingWaiting, queue.offlineMachines.isEmpty {
                 EmptyState(title: String(localized: "Nothing waiting"), symbol: Destination.queue.symbol,
                            message: String(localized: "Renders you start appear here, on every machine."))
@@ -99,7 +101,7 @@ struct QueueView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             if !queue.unavailableMachines.isEmpty {
-                Text("Some machine queues are unavailable. Pull to refresh.")
+                Text("Some machine queues are unavailable. Check Machines, then pull to refresh.")
                     .foregroundStyle(.secondaryText)
             }
             // Offline machines keep the list (for their greyed headers), so
@@ -132,7 +134,9 @@ struct QueueView: View {
                 }
             }
             // Offline is greyed out and nothing more: no rows, no error.
-            ForEach(queue.offlineMachines) { host in
+            // Only for one with no section of its own (retained video rows
+            // already carry the greyed header).
+            ForEach(queue.offlineMachines.filter { queue.groups(for: $0.id).isEmpty && videoQueue.items(on: $0.id).isEmpty }) { host in
                 Section { EmptyView() } header: { QueueSectionHeader(host: host) }
             }
         }

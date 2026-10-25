@@ -195,8 +195,8 @@ final class QueueStore {
             guard current() else { return }
             listings[id] = nil
             listFailed.insert(id)
-            // An unreachable machine is greyed out by `report`, not listed here.
-            hosts.report(host, doing: String(localized: "list its queue"), error)
+            // An unreachable machine is greyed out by `reportRead`, not listed here.
+            hosts.reportRead(host, doing: String(localized: "list its queue"), error)
         }
     }
 
@@ -297,10 +297,17 @@ final class QueueStore {
         listings.values.joined().filter(\.state.isLive).count
     }
 
-    /// Answering machines that refused their queue. An offline machine is
-    /// not here: offline is greyed out (`offlineMachines`), never an error.
+    /// Machines that answer but whose queue can't be read: a refused read, or
+    /// a missing key. An offline machine is not here: offline is greyed out
+    /// (`offlineMachines`), never an error.
     var unavailableMachines: [MoldHost] {
-        hosts.upHosts.filter { listFailed.contains($0.id) }
+        hosts.hosts.filter { host in
+            switch hosts.reachability(of: host) {
+            case .needsKey: true
+            case .up: listFailed.contains(host.id)
+            case .unknown, .checking, .down: false
+            }
+        }
     }
 
     /// Machines not answering, drawn as a greyed header and nothing more.

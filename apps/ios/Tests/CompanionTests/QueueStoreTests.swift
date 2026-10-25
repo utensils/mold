@@ -251,6 +251,9 @@ struct QueueStoreTests {
         #expect(queue.offlineMachines.map(\.id) == [host.id])
         hosts.setReachability(.checking, for: host.id)
         #expect(queue.offlineMachines.isEmpty)
+        hosts.setReachability(.needsKey, for: host.id)
+        #expect(queue.unavailableMachines.map(\.id) == [host.id], "a missing key is not an empty queue")
+        #expect(queue.offlineMachines.isEmpty)
     }
 
     @Test func anUnreachableQueueReadGreysTheMachineOutWithoutAnError() async throws {

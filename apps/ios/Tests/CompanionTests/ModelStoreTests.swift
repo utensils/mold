@@ -151,7 +151,7 @@ struct ModelStoreTests {
 
     @Test func unloadRefusalIsVisibleAndClearsInFlightState() async throws {
         let (models, _, hosts, fake) = try await setUp()
-        fake.stub("unloadModel(model:gpu:)") { _ in throw MoldClientError.http(status: 503, code: nil, message: "Server is busy") }
+        fake.stub("unloadModel(model:gpu:)") { _ in throw MoldClientError.unreachable("Server is busy") }
         await models.unloadAll(on: hosts.hosts[0].id)
         #expect(hosts.failures.contains { $0.doing.contains("unload") })
         #expect(models.changing.isEmpty)
