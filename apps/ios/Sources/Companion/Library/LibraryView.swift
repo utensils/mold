@@ -145,14 +145,9 @@ struct LibraryView: View {
     }
 
     private var libraryTitle: String {
-        let kinds = query.tokens.compactMap { token -> PrintKind? in
-            if case let .kind(kind) = token { kind } else { nil }
-        }
-        guard kinds.count == 1,
-              let filter = LibraryMediaFilter.allCases.first(where: { $0.kind == kinds.first }) else {
-            return scope.title(in: library.shelves)
-        }
-        return "\(scope.title(in: library.shelves)) · \(filter.title)"
+        // The Filter button's own words, so the title says what it shows.
+        guard LibraryFilter.isActive(query) else { return scope.title(in: library.shelves) }
+        return "\(scope.title(in: library.shelves)) · \(LibraryFilter.summary(for: query))"
     }
 
     private var machines: [(id: MoldHost.ID, name: String)] { hosts.hosts.map { ($0.id, $0.name) } }
@@ -213,15 +208,16 @@ struct LibraryView: View {
             }
         }
         ToolbarItem(placement: .topBarTrailing) {
+            LibraryFilterMenu(query: $query, families: library.familyCache.facets(
+                in: scope.isTrash ? library.trashPool : library.pool, revision: library.revision,
+                partition: scope.isTrash ? .trash : .all))
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 if !library.shelves.isEmpty {
                     Button("Manage Collections…", systemImage: "rectangle.stack") { managingCollections = true }
                     Divider()
                 }
-                LibraryMachinePicker()
-                Divider()
-                LibraryMediaPicker(query: $query)
-                Divider()
                 Picker("Sort By", selection: $sort) {
                     ForEach(LibrarySort.allCases, id: \.self) { Text($0.title).tag($0) }
                 }

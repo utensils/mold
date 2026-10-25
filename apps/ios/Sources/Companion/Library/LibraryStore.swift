@@ -48,6 +48,8 @@ final class LibraryStore {
     /// then: a pull that changed nothing leaves it alone. `LibraryShowingCache`
     /// keys on it.
     var revision = 0
+    /// The Filter menu's Model Family list, derived once per revision.
+    @ObservationIgnored let familyCache = LibraryFamilyFacetCache()
     private(set) var isLoading = false
     /// Machines whose prints are showing from this device's saved copy
     /// because they are not answering right now.

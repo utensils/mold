@@ -1,4 +1,5 @@
 import MoldClient
+import MoldStyle
 import SwiftUI
 
 /// Info (DESIGN.md §5.2): the print's title (editable, blank clears), its
@@ -95,7 +96,12 @@ private struct DetailRow: View {
                 }
             } else {
                 AdaptiveRow { Text(row.label) } value: {
-                    Text(row.value).multilineTextAlignment(.trailing).textSelection(.enabled)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        if let swatch = row.swatch {
+                            FamilySwatch(rgb: swatch).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                        }
+                        Text(row.value).multilineTextAlignment(.trailing).textSelection(.enabled)
+                    }
                 }
             }
         }

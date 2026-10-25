@@ -1,6 +1,8 @@
 import SwiftUI
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
 #endif
 
 // The ONE place a family colour becomes a colour: the values are the
@@ -57,5 +59,30 @@ public extension FamilySwatch {
     }
 
     @MainActor private static var menuImages: [UInt32: NSImage] = [:]
+}
+#endif
+
+#if os(iOS)
+public extension FamilySwatch {
+    /// The dot as a menu image, drawn `.alwaysOriginal`: a menu renders
+    /// images as templates, which would paint every family dot the text
+    /// colour. One image per colour.
+    @MainActor static func menuImage(rgb: UInt32) -> UIImage {
+        if let cached = menuImages[rgb] { return cached }
+        let rect = CGRect(x: 0, y: 0, width: 12, height: 12)
+        let image = UIGraphicsImageRenderer(size: rect.size).image { _ in
+            let dot = UIBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5))
+            UIColor(red: CGFloat((rgb >> 16) & 0xFF) / 255, green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                    blue: CGFloat(rgb & 0xFF) / 255, alpha: 1).setFill()
+            dot.fill()
+            UIColor.label.withAlphaComponent(0.15).setStroke()
+            dot.lineWidth = 0.5
+            dot.stroke()
+        }.withRenderingMode(.alwaysOriginal)
+        menuImages[rgb] = image
+        return image
+    }
+
+    @MainActor private static var menuImages: [UInt32: UIImage] = [:]
 }
 #endif
