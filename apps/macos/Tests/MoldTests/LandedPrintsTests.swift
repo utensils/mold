@@ -66,6 +66,20 @@ struct LandedPrintsTests {
         #expect(landed.recent.isEmpty)
     }
 
+    /// One clip of a Duration video is published so its parent can keep the
+    /// bytes, then trashed: never a finished print, so never a notification.
+    @Test func aSequenceStageDoesNotCountAsARender() async {
+        let host = machine()
+        let backend = fake(for: host)
+        let hosts = HostStore(hosts: [host]) { _ in backend }
+        let landed = LandedPrints(hosts: hosts, defaults: scratchDefaults())
+        await connect(host, hosts: hosts, backend: backend)
+        backend.emit(.gallery(.added(filename: "stage.mp4", row: nil, internal: true)))
+        backend.emit(.gallery(.added(filename: "video.mp4", row: nil)))
+        await settle { landed.count == 1 }
+        #expect(landed.recent.map(\.filename) == ["video.mp4"])
+    }
+
     @Test func theSameFilenameTwiceCountsOnce() async {
         let workstation = machine()
         let backend = fake(for: workstation)

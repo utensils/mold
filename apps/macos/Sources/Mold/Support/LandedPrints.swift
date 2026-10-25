@@ -76,8 +76,10 @@ final class LandedPrints {
     }
 
     private func apply(_ event: MoldEvent, from host: MoldHost.ID) {
-        guard case let .gallery(.added(filename, _, imported)) = event,
-              !imported else { return }
+        // An import is a copy, and an internal arrival is one clip of a
+        // sequence its parent will trash: neither is a finished print.
+        guard case let .gallery(.added(filename, _, imported, `internal`)) = event,
+              !imported, !`internal` else { return }
         guard !isActive, enabled else { return }
         guard !recent.contains(where: { $0.host == host && $0.filename == filename }) else { return }
         let landing = Landing(host: host, filename: filename, at: Date())

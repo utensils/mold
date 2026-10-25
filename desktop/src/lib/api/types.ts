@@ -547,7 +547,14 @@ export type ServerEvent =
   | { type: "job_ended"; id: string }
   | { type: "job_state_committed"; id: string }
   | { type: "generation_states_committed" }
-  | { type: "gallery_added"; filename: string; image?: GalleryImage | null; imported?: boolean }
+  | {
+      type: "gallery_added";
+      filename: string;
+      image?: GalleryImage | null;
+      imported?: boolean;
+      /** One clip of a sequence, published then trashed by its parent. */
+      internal?: boolean;
+    }
   | { type: "gallery_removed"; filename: string }
   | GalleryUpdatedEvent<GalleryImage>
   | GalleryTrashedEvent

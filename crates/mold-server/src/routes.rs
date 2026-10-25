@@ -9934,6 +9934,7 @@ async fn import_gallery_file(
                 filename: filename_for_task.clone(),
                 image,
                 imported: true,
+                internal: false,
             });
         }
         transaction.rollback_unpublished().map_err(|error| {
@@ -10024,6 +10025,7 @@ async fn import_gallery_file(
                 filename: filename.clone(),
                 image,
                 imported: true,
+                internal: false,
             });
             (filename, true)
         }

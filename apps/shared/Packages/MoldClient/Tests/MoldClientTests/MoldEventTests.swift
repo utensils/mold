@@ -32,7 +32,7 @@ import Testing
             {"type":"gallery_added","filename":"a.png","image":{"filename":"a.png",\
             "metadata":{"prompt":"owls"},"timestamp":1000,"favorite":true}}
             """
-        guard case let .gallery(.added(filename, row, _)) = MoldEvent(name: "event", data: data)
+        guard case let .gallery(.added(filename, row, _, _)) = MoldEvent(name: "event", data: data)
         else { Issue.record("not a gallery add"); return }
         #expect(filename == "a.png")
         // Present means insert without asking again; absent means go and read.
@@ -43,6 +43,16 @@ import Testing
         let event = MoldEvent(name: "event", data:
             #"{"type":"gallery_added","filename":"copy.png","imported":true}"#)
         #expect(event == .gallery(.added(filename: "copy.png", row: nil, imported: true)))
+    }
+
+    /// One clip of a Duration video, published only so its parent can keep
+    /// the bytes and then trashed: work in progress, never a finished print.
+    @Test func aSequenceStageArrivalIsMarkedInternal() {
+        let event = MoldEvent(name: "event", data:
+            #"{"type":"gallery_added","filename":"stage.mp4","internal":true}"#)
+        #expect(event == .gallery(.added(filename: "stage.mp4", row: nil, internal: true)))
+        let older = MoldEvent(name: "event", data: #"{"type":"gallery_added","filename":"a.png"}"#)
+        #expect(older == .gallery(.added(filename: "a.png", row: nil)))
     }
 
     @Test func theOtherGalleryVerbsDecode() {

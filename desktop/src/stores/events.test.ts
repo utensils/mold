@@ -574,6 +574,15 @@ describe("fleet-wide event streams", () => {
     // The gallery store holds the PRIMARY's bucket; a remote print reaches it
     // through the merged fetch, never through another machine's frame.
     expect(applyAdded).toHaveBeenCalledTimes(2);
+    // One clip of a Duration video: published so its parent can keep the
+    // bytes, then trashed. The bucket still files it (its trash frame
+    // follows), but it is work in progress, never a landed print.
+    primary!.onEvent?.(
+      "message",
+      JSON.stringify({ type: "gallery_added", filename: "stage.mp4", internal: true }),
+    );
+    expect(noteLanded).not.toHaveBeenCalled();
+    expect(applyAdded).toHaveBeenCalledTimes(3);
     events.unsubscribe();
   });
 

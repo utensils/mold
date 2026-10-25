@@ -31,7 +31,11 @@ public enum MoldEvent: Hashable, Sendable {
     public enum Gallery: Hashable, Sendable {
         /// `row` present means insert without asking again; absent means the
         /// metadata DB did not record it and the caller must go and read.
-        case added(filename: String, row: GalleryPrint?, imported: Bool = false)
+        /// `imported`: a copy brought in, not a render. `internal`: one clip of
+        /// a sequence, published so its parent can keep the bytes and then
+        /// trashed -- work in progress, never a finished print. Both are
+        /// skipped by anything that announces or counts arrivals.
+        case added(filename: String, row: GalleryPrint?, imported: Bool = false, internal: Bool = false)
         case updated(filename: String, row: GalleryPrint?)
         case restored(filename: String, row: GalleryPrint?)
         case removed(filename: String)
@@ -59,7 +63,8 @@ public enum MoldEvent: Hashable, Sendable {
         guard let frame = try? MoldJSON.decoder.decode(Frame.self, from: bytes) else { return nil }
         switch frame.type {
         case "gallery_added": self = .gallery(.added(filename: frame.name, row: frame.image,
-                                                       imported: frame.imported ?? false))
+                                                       imported: frame.imported ?? false,
+                                                       internal: frame.internal ?? false))
         case "gallery_updated": self = .gallery(.updated(filename: frame.name, row: frame.image))
         case "gallery_restored": self = .gallery(.restored(filename: frame.name, row: frame.image))
         case "gallery_removed": self = .gallery(.removed(filename: frame.name))
@@ -97,6 +102,7 @@ public enum MoldEvent: Hashable, Sendable {
         let filename: String?
         let image: GalleryPrint?
         let imported: Bool?
+        let `internal`: Bool?
         /// `job_queued`/`job_started`/`job_ended`/`job_state_committed` all
         /// name the job as `id`; `Frame.id` would collide with `Identifiable`
         /// conventions elsewhere, so it is read out under its own name.

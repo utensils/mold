@@ -75,7 +75,7 @@ final class GalleryLive {
         // the one case that remains.
         guard !echo.isEcho(change, on: host,
                            pending: store.mutations.outbox.chain(for: host)) else { return }
-        if case let .added(_, _, imported) = change, imported,
+        if case let .added(_, _, imported, _) = change, imported,
            host == (store.syncDestinationHost ?? MoldEngine.localHostID), store.localSaveSuppressImports { return }
         store.syncSession.noteRemoteChange(in: store)
         if store.followsFeed(host) {
@@ -100,7 +100,7 @@ final class GalleryLive {
             } else {
                 Task { await relists.run(host) { await relist(host, in: store) } }
             }
-        case let .added(_, row, imported):
+        case let .added(_, row, imported, _):
             // The bulk-save task performs one final local refresh. Redrawing
             // the full grid for every imported picture makes a large save
             // quadratic, even though the event still reaches other clients.
@@ -133,7 +133,7 @@ final class GalleryLive {
             // through `reconcileBulk`, when it is done -- a pull per frame of a
             // 1,000-print trash would be 1,000 catch-ups racing that read.
             if store.bulkTargets.contains(PrintID(host: host, filename: filename)) { return }
-        case let .added(_, _, imported):
+        case let .added(_, _, imported, _):
             if imported && host == (store.syncDestinationHost ?? MoldEngine.localHostID) && store.localSaveSuppressImports { return }
         case .collectionsChanged:
             Task { await store.reloadCollections() }
