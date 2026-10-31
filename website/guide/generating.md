@@ -692,8 +692,8 @@ such as `/generate` and `/catalog` render Page Not Found:
 - img2img works via upload or the From Gallery picker; installed models are
   grouped by family in the picker and frames are clamped to 8n+1 automatically.
 - Library's print viewer keeps media bound to its owning host, restores the
-  saved model family on **Reuse settings** (a print made scene by scene by an
-  older build restores a plain clip built from its first scene's prompt), and
+  saved model family on **Reuse settings**, including all recorded stages and
+  retained inputs for an authored sequence, and
   shows the recorded steps,
   guidance, scheduler, LoRAs, prompts, file details, and copyable prompt/seed.
   **Upscale...** returns the print to Create with the installed default

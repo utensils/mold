@@ -1,0 +1,1 @@
+- **Updated release documentation.** Align website, app guides and agent instructions with Duration scenes, full sequence settings reuse, native Library filters and Queue recovery. Add checks against retired authoring guidance.

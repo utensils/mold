@@ -193,7 +193,9 @@ Every download, with requirements, is on the
 notarized, self-updating through Sparkle, with mold's own Metal engine built
 in, and it talks to any `mold serve` on your network too. Generate, a merged
 multi-machine Library, Queue, Models and Machines, all in one native window.
-Library’s native machine and media filter menus keep their current selections visible.
+Both native apps offer a Library **Filter** menu for favourites, media type,
+collection membership, source media, tags, orientation and model family, with
+family colours and Clear Filters. Machine filters keep their current selection visible.
 Both native apps keep neutral queue placeholders for jobs without source images;
 Mac restores fully local source attachments without stale archive warnings.
 Queue jobs open into grouped details and live previews; Discover starts with manifest models.
@@ -319,9 +321,10 @@ black borders, `lanczos-resize` stretches.
 mold run flux-dev:q4 "a lighthouse at dusk" --image wide.png --fit crop-fill --width 1024 --height 1024
 ```
 
-For video, pick a **Length** up to one generation (MiniMax H3: 14.4 s, rendered
-as one clip). For anything longer, turn on **Longer video** (native apps) or
-**Define scenes** (web and desktop) and give each scene, at most one generation
+For video, pick a length up to one generation using **Duration** on web/Tauri
+or **Length** in native apps. The selected host reports the exact limit
+(MiniMax H3: about 14 seconds as one clip). For anything longer, turn on
+**Longer video** (native apps) or **Define scenes** (web and desktop) and give each scene, at most one generation
 long, its own prompt, so no action repeats. The length summary shows the
 selected model's single-render limit and clip count. Library **Extend
 video** adds another prompt and duration, publishing the original plus extension

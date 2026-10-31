@@ -190,14 +190,13 @@ the phone keep Create / Library / Models until their own redesign.
 - **Short clip** (inside New image): video is a setting, not a place. Switch
   the view toolbar's control to **Short clip** (File → New Clip and the ⌘K
   palette's **Make a short clip** land there too) and Create keeps the shape it
-  already had — describe the clip, pick a clip style, drag the **Length** chip
-  on the composer, press Generate. The chip reads `97f · 4.0s` and snaps to the
-  same frame grid the inspector's Clip card slider offers, because the two are
-  one control shown twice. Ask for more than one render's worth and Mold splits
-  the work into clips on the machine, carries the motion across each seam, and
-  stitches them into one video — you get one clip and one entry in My images,
-  and the progress line names the part it is on. **Make** is an ordinary batch
-  count, so you can ask for four clips at once wherever the style allows it.
+  already had — describe the clip, pick a clip style and choose **Duration**
+  on an updated host. **Define scenes** adds ordered scene prompts and lengths;
+  the host reports its single-generation limit and planned clip count before
+  rendering one Library movie. Continuation-capable recipes carry context;
+  independent-clip recipes use blended joins. Older hosts retain frame-based
+  clip controls and the compact authored clip editor. **Make** remains the
+  ordinary batch count wherever the style allows it.
 
   The picker shows clip styles from every connected machine (choosing Short
   clip auto-picks one and remembers the style you last used there; switching
@@ -225,9 +224,8 @@ the phone keep Create / Library / Models until their own redesign.
   badges on fresh prints, a two-pane lightbox, and a History column holding
   Runs and Prompts. **Space** opens
   Quick Look, ←/→ navigate, and **Use these settings** jumps back to New image
-  with every parameter restored. A print made scene by scene on an older build
-  keeps its per-scene provenance, and **Use these settings** restores a plain
-  clip built from its first scene's prompt. All merges every connected host without repeating
+  with its recorded settings restored. Authored sequences restore all ordered
+  stages and retained inputs; unavailable historical settings are disclosed. All merges every connected host without repeating
   matching saved prints, prefers the copy on **This device**, and labels every
   host where a print is available; source filters retain each host's full
   gallery. Still images offer full-resolution **Copy image** from tile and

@@ -2620,9 +2620,13 @@ when known. The top-level `prompt` of a multi-clip row holds every distinct
 clip prompt joined one per line, so gallery search matches any clip. The CLI's
 local chain saves write the same `chain` block without a `chain_job_id`.
 
-The apps read this block as provenance only — scene-by-scene authoring is
-retired there, so **Reuse settings** on a stitched print restores a plain
-one-shot built from the first stage's prompt rather than reopening a timeline.
+**Use settings** restores authored sequences as editable ordered stages, with
+their recorded prompts, effective seeds, joins, adapters and retained inputs.
+Duration prints instead restore `video_job.authoring`: requested duration,
+optional scenes and exact seed. Extended prints restore the added-footage
+settings into a fresh movie and disclose that the original is not attached.
+Missing historical settings or inputs are disclosed; clients never infer a
+one-prompt movie from the newline-joined top-level `prompt`.
 `chain_job_id` still names the durable job an API client can amend or retake.
 
 ## Image Output
