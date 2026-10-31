@@ -1,2 +1,0 @@
-- `mold server status --host NAME` now reads the saved host's own origin instead of treating the name as a hostname (`http://NAME:7680`).
-- `mold upscale --local` (and the local fallback when the server is down) downloads a missing upscaler on this machine instead of asking the selected host to pull it, and stops after one failed pull instead of retrying.

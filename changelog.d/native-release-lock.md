@@ -1,1 +1,0 @@
-- **Native Mac release builds.** Synchronize the standalone engine lockfile with the server's temporary-file dependency so locked shipping builds resolve correctly.

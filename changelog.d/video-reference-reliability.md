@@ -1,4 +1,0 @@
-- Keep video duration selections valid when recipe bounds or frame rate change, start encrypted clips with longer audio tracks reliably, and preserve the decoded final video frame through playback end, scrub, replay and Repeat on native apps.
-- Prepare fresh H3 reference video imports on capable hosts with bounded conversion, exact original/canonical receipts and finalized request authority across native, Studio, CLI and Discord clients.
-- Report real LTX decoder work and cooperative cancellation, retain device ownership during stalls, and settle interrupted cancellation during queue recovery. Reuse bounded decoder RoPE tables without changing existing arithmetic.
-- Refuse unreviewed H3 configuration aliases and caller-selected adapter identities before admission while preserving reviewed manifest artifact loading.

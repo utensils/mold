@@ -1,1 +1,0 @@
-- **iOS keyboard dismissal.** Done closes the active clip prompt keyboard after scrolling while retaining edits and ordinary prompt behavior.

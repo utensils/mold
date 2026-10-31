@@ -1,1 +1,0 @@
-- **`mold jobs list`/`show` and video progress use the shared queue wording.** Duration videos read "Rendering clip 2 of 3 · 40 s video · 3 clips" or "Done · 14 s video" instead of "Running, 0/1 clips", matching every app.

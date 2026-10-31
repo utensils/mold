@@ -1,3 +1,0 @@
-- **Library copy and sync parity.** Choose copy/sync destinations, preserve hidden-copy privacy through Trash, and reconcile copied organization while respecting destination edits.
-- **Reusable source media.** Source identifiers, original-media actions and host-scoped CLI input addresses make retained media usable across supported clients.
-- **Library interactions.** Add attachment endpoints and filename copying, separate collection management from print menus, and improve native Delete shortcuts and dismissible activity layout.
