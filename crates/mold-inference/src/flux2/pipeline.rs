@@ -1155,12 +1155,7 @@ impl Flux2Engine {
                         dtype: DType,
                         dev: &Device,
                     ) -> candle_core::Result<Tensor> {
-                        let t = self.st.load(name, dev)?;
-                        if t.dtype() != dtype {
-                            t.to_dtype(dtype)
-                        } else {
-                            Ok(t)
-                        }
+                        crate::weight_loader::load_stored_tensor(&self.st, name, dtype, dev)
                     }
                     fn get_unchecked(
                         &self,
@@ -1168,12 +1163,7 @@ impl Flux2Engine {
                         dtype: DType,
                         dev: &Device,
                     ) -> candle_core::Result<Tensor> {
-                        let t = self.st.load(name, dev)?;
-                        if t.dtype() != dtype {
-                            t.to_dtype(dtype)
-                        } else {
-                            Ok(t)
-                        }
+                        crate::weight_loader::load_stored_tensor(&self.st, name, dtype, dev)
                     }
                     fn contains_tensor(&self, name: &str) -> bool {
                         self.st.get(name).is_ok()

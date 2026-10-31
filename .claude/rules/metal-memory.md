@@ -6,6 +6,9 @@ paths:
   - "studio/components/DevicePanel.vue"
   - "website/guide/metal-memory.md"
   - "docs/metal-memory-policy-*.md"
+  - "crates/mold-inference/src/weight_loader.rs"
+  - "crates/mold-server/src/memory_preflight.rs"
+  - "crates/mold-server/src/gpu_worker.rs"
 ---
 
 # macOS Metal memory policy
@@ -26,3 +29,19 @@ this machine; status is read-only, set/reset require explicit root invocation.
 user path. Shared DevicePanel reads optional host telemetry; remote clients have
 no kernel mutation control. See `website/guide/metal-memory.md` and the reviewed
 `docs/metal-memory-policy-plan.md` for contracts and validation limits.
+
+Metal computes in F32, so a stored F16 or BF16 weight widens on load. That goes
+through `weight_loader::load_stored_tensor`, which reads and casts on the CPU and
+uploads once at exact size; any new Metal weight backend must call it too. Never
+restore upload-then-cast: candle's pool rounds the cast output up to the next
+power of two and keeps the upload until the next queue wait, which took a 12.3 GB
+Z-Image checkpoint to 89.7 GiB. Only lossless widening (`widening_is_lossless`)
+leaves the device kernel; narrowing casts keep it, because their rounding can move
+pixels. A failed render must still sweep. A failed command buffer surfaces from
+the wait that collects it, and that wait returns before the pool sweep, so the
+worker calls `release_pooled_metal_memory` after every generation that returns,
+and that function retries the wait once. Without this, admission reads zero
+headroom and idle reclaim finds nothing to evict, because the requested model is
+exempt. Z-Image and FLUX.2 admission charge dense half-precision transformers at
+their widened size (`metal_transformer_widening_bytes`) and charge nothing extra
+under block offload (`resident_transformer_widening_bytes`).

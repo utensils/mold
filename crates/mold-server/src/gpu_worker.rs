@@ -4649,6 +4649,13 @@ fn process_job_with_sink(
         {
             certify_wan_context_after_render(worker, &model_name);
         }
+        // A render that failed mid-flight dropped its models without a sweep,
+        // leaving them allocated in candle's pool. Nothing else would release
+        // them: admission reads the allocation as zero headroom, and the idle
+        // reclaim has no engine to evict because the requested one is exempt.
+        if worker.gpu.backend == mold_core::GpuBackend::Metal {
+            device::release_pooled_metal_memory(worker.gpu.ordinal);
+        }
     }
 
     // Clear active generation.

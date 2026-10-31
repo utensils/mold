@@ -187,7 +187,8 @@ fn large_flux2_bf16_should_auto_offload(
                 paths,
                 mold_inference::LoadStrategy::Sequential,
             )
-            .saturating_add(activation_bytes);
+            .saturating_add(activation_bytes)
+            .saturating_add(metal_transformer_widening_bytes(paths, hint));
             resident_peak > available.saturating_mul(9) / 10
         })
 }
@@ -661,7 +662,12 @@ fn preflight_memory_guard_with_available_and_policy_for_request(
         qwen_quantized,
         policy.gemma_competes,
         streamed_text_encoder_device_charge(model_name, paths),
-    );
+    )
+    .saturating_add(resident_transformer_widening_bytes(
+        paths,
+        hint,
+        flux_offload,
+    ));
     // Add the per-request activation budget on top of the file-size peak.
     // The 2 GB `MEMORY_BUDGET_HEADROOM` already inside `estimate_peak_memory`
     // is a generic "kernels + small state" constant that doesn't scale; the
@@ -735,6 +741,58 @@ fn base_peak_memory_for_paths(
         mold_inference::LoadStrategy::Sequential,
         encoder_override,
     )
+}
+
+/// Device bytes a dense half-precision transformer adds beyond its file size where
+/// the engine computes in F32 (`device::gpu_dtype` on Metal).
+///
+/// The generic estimate prices weights at their file size. Z-Image and FLUX.2 hold
+/// them at twice that on Metal, so admission priced a 25 GB render at 14.75 GB and
+/// let it start beside whatever else was already using the GPU. Scoped to the two
+/// families measured so far: the others have their own residency paths. A header
+/// can never claim more than the file could widen to.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn metal_transformer_widening_bytes(paths: &ModelPaths, hint: Option<ActivationHint>) -> u64 {
+    if !hint.is_some_and(|h| {
+        matches!(
+            h.family,
+            ActivationFamily::ZImageDit | ActivationFamily::Flux2Dit
+        )
+    }) {
+        return 0;
+    }
+    let files = if paths.transformer_shards.is_empty() {
+        std::slice::from_ref(&paths.transformer)
+    } else {
+        paths.transformer_shards.as_slice()
+    };
+    files
+        .iter()
+        .filter_map(|file| {
+            let widened = mold_inference::device::safetensors_bytes_widened_to_f32(file)?;
+            let stored = std::fs::metadata(file).ok()?.len();
+            Some(widened.min(stored.saturating_mul(2)).saturating_sub(stored))
+        })
+        .fold(0, u64::saturating_add)
+}
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn metal_transformer_widening_bytes(_paths: &ModelPaths, _hint: Option<ActivationHint>) -> u64 {
+    0
+}
+
+/// [`metal_transformer_widening_bytes`] for a plan's device charge: block offload
+/// streams the transformer through a bounded workspace instead of holding it.
+fn resident_transformer_widening_bytes(
+    paths: &ModelPaths,
+    hint: Option<ActivationHint>,
+    block_offload: bool,
+) -> u64 {
+    if block_offload {
+        0
+    } else {
+        metal_transformer_widening_bytes(paths, hint)
+    }
 }
 
 /// The `MEMORY_BUDGET_HEADROOM` baked into `estimate_peak_memory`, removed
@@ -2019,7 +2077,8 @@ pub(crate) fn select_server_load_strategy_for_budget(
     // The fp8 widen holds two bytes per parameter where the file-length
     // estimate charges one, and this is a LOAD-STRATEGY decision — the whole
     // point of which is whether the eager set co-resides.
-    let widen = flux2_fp8_widen_extra_bytes(paths, hint, Some(available_bytes));
+    let widen = flux2_fp8_widen_extra_bytes(paths, hint, Some(available_bytes))
+        .saturating_add(metal_transformer_widening_bytes(paths, hint));
     let eager_peak =
         mold_inference::device::estimate_peak_memory(paths, mold_inference::LoadStrategy::Eager)
             .saturating_add(activation)
@@ -2459,7 +2518,12 @@ pub(crate) fn estimate_generation_memory_for_request_with_loras(
                 qwen_quantized,
                 gemma_competes,
                 streamed_encoder_charge,
-            );
+            )
+            .saturating_add(resident_transformer_widening_bytes(
+                paths,
+                hint,
+                block_offload,
+            ));
             let wan = hint.is_some_and(|h| h.family == ActivationFamily::WanVideo);
             if wan {
                 // Block offload (#776 item 3) can park trailing transformer
@@ -2644,7 +2708,12 @@ pub(crate) fn estimate_generation_memory_for_request_with_loras(
             streamed_encoder_charge,
         )
         .saturating_add(co_residency_activation)
-        .saturating_add(fp8_widen_bytes),
+        .saturating_add(fp8_widen_bytes)
+        .saturating_add(resident_transformer_widening_bytes(
+            paths,
+            hint,
+            block_offload,
+        )),
     };
     let under_memory_pressure = available_memory_bytes
         .is_some_and(|available| eager_peak > available.saturating_mul(9) / 10);
@@ -3278,6 +3347,88 @@ mod fail_closed_tests {
             dtype_bytes: 2,
             family,
         }
+    }
+
+    /// A BF16 safetensors file of `stored` tensor bytes, sparse so tests can use
+    /// realistic sizes without writing them.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn sparse_bf16_checkpoint(
+        dir: &std::path::Path,
+        name: &str,
+        stored: u64,
+    ) -> std::path::PathBuf {
+        use std::io::Write;
+        let file = dir.join(name);
+        let elements = stored / 2;
+        let header = format!(
+            r#"{{"w":{{"dtype":"BF16","shape":[{elements}],"data_offsets":[0,{stored}]}}}}"#
+        );
+        let mut out = std::fs::File::create(&file).unwrap();
+        out.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+        out.write_all(header.as_bytes()).unwrap();
+        out.set_len(8 + header.len() as u64 + stored).unwrap();
+        file
+    }
+
+    /// Admission priced a 12.3 GB Z-Image checkpoint at its file size while the
+    /// engine held it in F32, so a render needing 25 GB started with 15 GB free.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn metal_prices_a_resident_transformer_at_its_f32_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = sparse_bf16_checkpoint(dir.path(), "model.safetensors", 4096);
+        let on_disk = std::fs::metadata(&file).unwrap().len();
+        let paths = paths(file.to_str().unwrap());
+        let widening = |family, offload| {
+            resident_transformer_widening_bytes(&paths, Some(hint(family)), offload)
+        };
+
+        for family in [ActivationFamily::ZImageDit, ActivationFamily::Flux2Dit] {
+            assert_eq!(widening(family, false), 8192 - on_disk);
+            assert_eq!(widening(family, true), 0, "offload streams the transformer");
+        }
+        assert_eq!(widening(ActivationFamily::FluxDit, false), 0);
+    }
+
+    /// A header may not claim more than its own file could widen to.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn a_lying_header_cannot_inflate_the_estimate() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lying.safetensors");
+        let header = br#"{"w":{"dtype":"BF16","shape":[1],"data_offsets":[0,9000000000000]}}"#;
+        let mut contents = (header.len() as u64).to_le_bytes().to_vec();
+        contents.extend_from_slice(header);
+        contents.extend_from_slice(&[0u8; 4096]);
+        std::fs::write(&file, &contents).unwrap();
+        let paths = paths(file.to_str().unwrap());
+
+        assert_eq!(
+            metal_transformer_widening_bytes(&paths, Some(hint(ActivationFamily::ZImageDit))),
+            contents.len() as u64
+        );
+    }
+
+    /// Eager keeps the transformer and encoder together, so choosing it from stored
+    /// sizes starts a render the widened weights cannot share memory with.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn metal_selects_the_load_strategy_from_widened_weights() {
+        let dir = tempfile::tempdir().unwrap();
+        let gb = 1_000_000_000u64;
+        let transformer = sparse_bf16_checkpoint(dir.path(), "model.safetensors", 10 * gb);
+        let encoder = sparse_bf16_checkpoint(dir.path(), "encoder.safetensors", 5 * gb);
+        let mut paths = paths(transformer.to_str().unwrap());
+        paths.text_encoder_files = vec![encoder];
+        let hint = hint(ActivationFamily::Flux2Dit);
+        // Stored eager 17 GB fits and widened eager 27 GB does not; widened
+        // sequential 22 GB does, all beside the same activation budget.
+        let available = (24 * gb + hint.budget_bytes()) * 10 / 9;
+
+        assert_eq!(
+            select_server_load_strategy_for_budget(&paths, Some(available), Some(hint)),
+            mold_inference::LoadStrategy::Sequential
+        );
     }
 
     fn paths(transformer: &str) -> ModelPaths {
