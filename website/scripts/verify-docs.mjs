@@ -106,6 +106,66 @@ for (const relPath of ['guide/index.md', 'models/index.md']) {
   }
 }
 
+// A release must not publish retired video/reuse instructions beside the
+// current Duration flow. Include app and agent docs, not only website pages.
+const videoDocs = [
+  'README.md',
+  'website/guide/video.md',
+  'website/guide/generating.md',
+  'website/guide/desktop.md',
+  'website/guide/iphone.md',
+  'website/guide/companion.md',
+  'website/guide/macos.md',
+  'website/api/index.md',
+  'apps/mobile/README.md',
+  'apps/macos/README.md',
+  'apps/ios/README.md',
+  'desktop/docs/feature-parity.md',
+  'crates/mold-cli/src/skill/template.md',
+  '.claude/rules/ios-native.md',
+  '.claude/rules/macos-native.md',
+]
+const retiredVideoInstructions = [
+  /scene authoring is\s+intentionally absent/iu,
+  /scene-by-scene authoring is\s+retired/iu,
+  /(?:plain|one-shot)[^.]*built from (?:its|the) first (?:scene|stage)'s prompt/iu,
+  /sequence settings reuse restores the first stage's/iu,
+  /reusing sequence settings restores the first stage's/iu,
+]
+for (const relPath of videoDocs) {
+  const source = readFileSync(join(repoRoot, relPath), 'utf8')
+  for (const instruction of retiredVideoInstructions) {
+    if (instruction.test(source)) {
+      fail(
+        `${relPath} still describes retired video authoring or settings reuse`
+      )
+    }
+  }
+}
+for (const relPath of [
+  'website/guide/companion.md',
+  'website/guide/macos.md',
+  'apps/ios/README.md',
+  'apps/macos/README.md',
+]) {
+  const source = readFileSync(join(repoRoot, relPath), 'utf8')
+  if (
+    /\*\*Media Type\*\* (?:offers|shows)|View Options includes a Machine picker/u.test(
+      source
+    )
+  ) {
+    fail(`${relPath} must describe the current Library Filter menu`)
+  }
+}
+for (const relPath of ['guide/macos.md', 'guide/companion.md']) {
+  const source = readRel(relPath)
+  for (const label of ['**Length**', '**Longer video**', '**Filter**']) {
+    if (!source.includes(label)) {
+      fail(`${relPath} must describe the native ${label} control`)
+    }
+  }
+}
+
 const expectedPackageDescription =
   'CLI-native local AI image and video generation for people, scripts, and agents'
 for (const relPath of ['Cargo.toml', 'crates/mold-cli/Cargo.toml']) {

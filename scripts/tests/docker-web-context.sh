@@ -18,6 +18,12 @@ for workspace in json.loads((root / "package.json").read_text())["workspaces"]:
     required = f"COPY {manifest} {manifest}"
     if required not in docker[:install]:
         sys.exit(f"FAIL: Docker web-builder must copy {manifest} before bun install")
+# The manifest-first Rust build still compiles real build scripts. Their
+# sibling modules must be present before the dependency-cache compilation.
+stub_build = next(i for i, line in enumerate(docker) if line.startswith("RUN cargo build"))
+helper = "crates/mold-core/build_git_watch.rs"
+if f"COPY {helper} {helper}" not in docker[:stub_build]:
+    sys.exit(f"FAIL: Docker dependency layer must copy {helper} before cargo build")
 # Both Nix frontend derivations run the same root frozen workspace install.
 flake = (root / "flake.nix").read_text()
 for package in ("mold-web", "mold-desktop-web"):

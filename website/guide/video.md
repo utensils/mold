@@ -343,8 +343,8 @@ only past the trained 2048px span; `off` past that span is refused. See
 
 Direct a video scene by scene with a TOML script. Each prompt becomes a stage; each boundary has a `transition` (`smooth`, `cut`, or `fade`).
 
-::: tip Add clips in the apps
-In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+::: tip Scenes in the apps
+On updated machines, use **Duration** with optional **Define scenes** in browser/Tauri apps, or **Length** with **Longer video** in native macOS/iOS. Each scene has its own prompt and length; the host validates the plan before generation. Older hosts and restored authored sequences keep the compact clip editor. Library **Continue video** makes a separate linked MP4 from the latest completed authored take on its original machine; **Extend video** instead publishes the original plus added footage as one new movie.
 :::
 
 ### Canonical form
@@ -484,13 +484,14 @@ mold run --script ref-chain.toml --host HOST --output ref-chain.mp4
 
 ### Longer clips in the apps
 
-In browser and Tauri apps, choose **Add clip** in Short clip, enter ordered prompts and lengths, then **Check length** and **Make video**. Native macOS and iOS use **Add another clip** and **Generate video**, with validation performed automatically before submission. Move or remove rows without opening a separate editor. Library **Continue video** makes the next separate linked MP4 from the latest completed authored take on its original machine. Ordinary one-prompt generation and Reuse settings remain available.
+On updated machines, use **Duration** with optional **Define scenes** in browser/Tauri apps, or **Length** with **Longer video** in native macOS/iOS. Each scene has its own prompt and length; the host validates the plan before generation. Older hosts and restored authored sequences keep the compact clip editor. Library **Continue video** makes a separate linked MP4 from the latest completed authored take on its original machine; **Extend video** instead publishes the original plus added footage as one new movie.
 
 Smooth is the default join. The selected model determines whether it carries motion or makes independent clips. Each part has bounded clips and memory; continue completed parts without a lifetime part limit. A continued part is a separate video. Unsupported source combinations are explained before submission.
 
-Clips made by an older build's sequence composer are still in your library with
-their per-scene provenance intact. **Use these settings again** on one of them
-restores a plain one-shot clip built from the first scene's prompt.
+Clips made by an older build's sequence composer retain their per-scene
+provenance. **Use settings** restores the recorded ordered stages, effective
+seeds, joins and inputs into an editable draft. Missing historical settings or
+unavailable required media are disclosed before generation.
 
 ### Continue beyond 16 stages
 

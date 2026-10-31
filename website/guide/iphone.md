@@ -340,9 +340,9 @@ and Mold's wording never promises recoverability there.
 Reusing settings switches to the print's host and restores the model when it is
 installed there. If the original model is unavailable, Mold clearly identifies
 the compatible fallback and removes non-portable adapter/component choices. On a
-print made scene by scene by an older build, **Use as prompt** restores a plain
-one-shot clip built from the first scene's prompt; the per-scene provenance
-stays on the print.
+print made scene by scene, **Use settings** restores the recorded ordered
+stages, exact seeds and retained inputs into an editable draft. Missing
+historical settings or unavailable inputs are disclosed.
 
 Authenticated hosts issue a short-lived read-only media ticket for the selected
 file. The app never puts a long-lived API key in a video URL or buffers an
@@ -512,8 +512,7 @@ Saved machines appear before Add a machine, which contains pairing, nearby
 discovery and manual address entry. The connection controls start expanded on
 first setup. This foundation retains the existing Images and Styles workflows;
 further visual refinements and physical-device acceptance remain tracked in
-[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
-intentionally absent.
+[issue #1628](https://github.com/utensils/mold/issues/1628). Updated hosts support Duration and optional scenes, as described below.
 
 Queue rows show the owning machine’s sealed conditioning images across models. Job Details shows every ordered reference separately with its role, including identity photos, named views, masks, control images and boundary frames. Audio/video references are listed by kind; unavailable previews are disclosed. Inputs remain separate from live denoise previews and are fetched through authenticated routes, including work submitted from another device. Older servers retain their singular source preview.
 
@@ -529,3 +528,18 @@ When the selected model advertises duration prediction, **Predict duration** let
 the server choose a 1–20 second LTX 2.5 clip from the prompt. Turn it off to choose
 an explicit length. Native iOS and macOS expose the same choice as web and Tauri;
 unsupported or unavailable models keep explicit duration controls.
+
+## Duration videos and scenes
+
+On updated machines, Short clip uses one prompt and **Duration**, with optional
+**Define scenes** for ordered prompts and lengths. The server reports its
+single-generation limit and planned clip count. Library **Extend video** creates
+a new movie containing the original plus added footage, leaving the original
+in place. **Use settings** restores the requested duration, optional scenes,
+exact seed and retained inputs into an editable draft. Extended prints restore
+the added-footage settings and disclose that the original is not attached.
+
+Queue offers progress, Stop, Resume and recovery actions supported by the
+captured machine. After a lost reply, check the known attempt before submitting
+again. See [Video generation](./video#longer-videos) for joins and recovery.
+The native iOS 26 app has its own [Companion guide](./companion).

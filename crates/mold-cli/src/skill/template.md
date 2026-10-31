@@ -100,7 +100,8 @@ auto` to preserve useful alpha and remove opaque backgrounds, `on` to
   `--duration N`; longer, write one scene of at most that length per part in a
   `--scenes FILE.toml` so no prompt repeats. Both publish one MP4.
   Extend a Library movie with `--extend-library PRINT.mp4 --duration 10`.
-  Apps offer **Duration**, optional **Define scenes**, and Library **Extend video**.
+  Web/Tauri apps offer **Duration** and optional **Define scenes**; native apps
+  use **Length** and **Longer video**. Library **Extend video** adds footage.
   Discord offers `/video make` and `/video extend`. Keep the printed video UUID;
   inspect it before retrying after a disconnect. Longer videos require an updated
   server, including MiniMax H3. Model-guide timing and `max_runtime_seconds`

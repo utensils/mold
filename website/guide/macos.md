@@ -125,11 +125,11 @@ version as `MOLD_BUILD_VERSION` to Rust. This keeps the version reported by
 This Mac and `/api/status` aligned with About Mold Studio on Nightly; ordinary
 Rust builds use the workspace package version.
 
-In Library, **Media Type** filters the current shelf to All Media, Photos,
-Videos or 3D while keeping search and machine filters. The machine and media
-menus show the current selection beside their icons, with native menu checkmarks.
-Multiple search-token selections show a machine count or “Multiple Media Types”;
-long machine names keep their full name in the tooltip. Multi-select with
+In Library, **Filter** offers Favourites, Photos, Videos, 3D, collection
+membership, Made from a Source, tags and orientation, plus a Model Family
+submenu with family colours. Combine one main filter with a family; Clear
+Filters resets both. The button shows the current choices. Machine and search
+filters remain available, and long machine names retain their full tooltip. Multi-select with
 Command-click or Shift-click without recentering tiles already in view.
 Arrow-key navigation still reveals offscreen selections.
 
@@ -156,7 +156,7 @@ A movie download alone is an output export, not a full Library backup. Missing
 legacy inputs are disclosed; a declared but incomplete video archive is a copy
 failure until repaired.
 
-**Save All to This Mac** copies retained inputs with every supported output type, independently of model family. The destination owns the source, identity, mask/control, edit/typed references, audio/video, keyframes, continuation and chain stage media, so reuse does not need the original machine. Incomplete source transfers are reported as failures. Reusing sequence settings restores the first stage's source; later stages remain in the copied archive. Rebuilding the complete authored sequence remains a separate workflow.
+**Save All to This Mac** copies retained inputs with every supported output type, independently of model family. The destination owns the source, identity, mask/control, edit/typed references, audio/video, keyframes, continuation and chain stage media, so reuse does not need the original machine. Incomplete source transfers are reported as failures. Use settings restores every recorded sequence stage and its retained inputs into a fresh editable draft. Missing historical settings or unavailable inputs are disclosed.
 
 ## Queue, discovery and video preferences
 
@@ -236,3 +236,28 @@ Queue rows keep a neutral image placeholder when a job has no source image, matc
 the native iOS queue. Successfully restored local input files remain usable after
 prompt edits and relaunch without an obsolete archive warning. Unresolved remote
 references and missing snapshots still require recovery.
+
+## Video length, scenes and recovery
+
+On updated machines, choose one prompt and the **Length** slider. Its initial
+value follows the selected recipe; native duration controls use tenths of a
+second up to one generation. **Automatic from prompt** lets supported models
+choose the length instead. Turn on **Longer video** for ordered scene prompts
+with a Length slider per scene and **Add scene**. Each scene is capped at the
+host's always-one-clip limit; plan warnings explain repeated actions and scenes
+shorter than the minimum generation. See [Video generation](./video#longer-videos)
+for model-specific joins, CLI examples and extending a saved movie.
+
+Library **Extend video** preserves the original and publishes the original plus
+added footage as a new movie. **Use settings** creates a fresh editable draft:
+Duration prints restore their original duration/scenes and exact seed; extended
+prints restore the added-footage settings and disclose that the original movie
+is not attached. Authored sequences restore every recorded stage and input.
+
+Videos appear as ordinary rows in their machine's Queue section, with Waiting,
+Rendering clip and Joining clips progress. Stop retains accepted Duration work
+for explicit Resume. Start again and Send use a new attempt with the destination's
+current recipe when offered. Completed and stopped videos leave the native Queue
+automatically; failed or interrupted work stays available for recovery. Saved
+movies remain in Library. An uncertain submission must be checked before making
+another attempt; reconnecting never resumes paused work automatically.

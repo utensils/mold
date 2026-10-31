@@ -73,3 +73,8 @@ Native CI splits media exports into delivery, video accessibility and mesh acces
   packages, including the remote-only mobile shell's Secure transport crates.
   Keep external resolutions unchanged and verify the generated lock with Cargo
   under `--locked`; fixture coverage must include path dependencies in each root.
+
+The Docker manifest-first dependency layer compiles real build scripts: copy
+`mold-core/build_git_watch.rs` beside `build.rs` before its first Cargo build,
+just as inference/server build-support modules are retained. The Docker context
+contract guards this helper; copying the full crates tree later is too late.

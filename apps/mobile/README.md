@@ -350,10 +350,9 @@ overlay register calls top acts on either.
   followed by a single **Export as STL** (or **Export turntable…**) button —
   and it never lists the stored GLB, which a browser fetches directly. A `.glb` tile carries the
   same ◈ mesh badge as video and audio prints; the iPhone Library has no kind
-  filter, so the badge is how a mesh is told apart. On a print made scene by
-  scene by an older build, **Use as prompt** restores a plain one-shot clip
-  built from the first scene's prompt; the per-scene provenance stays on the
-  print.
+  filter, so the badge is how a mesh is told apart. On an authored sequence, **Use settings** restores the recorded ordered
+  stages, exact seeds and retained inputs into an editable draft; missing
+  historical settings or unavailable inputs are disclosed.
   Painted GLBs also show one save action per material map. Each downloads the
   exact PNG embedded in the stored print and writes it to the same browsable
   Mold folder; ZIP export packages OBJ, MTL, base color, metallic-roughness, and
@@ -972,8 +971,7 @@ Saved machines appear above the Add-a-machine sheet, which contains pairing,
 nearby discovery and manual address entry and opens only when asked for. My images searches filenames, titles, prompts, styles, tags, and
 collection names across the loaded library, including prints beyond the visible
 thumbnail window. Native and physical-device acceptance remain tracked in
-[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
-intentionally absent.
+[issue #1628](https://github.com/utensils/mold/issues/1628). Updated hosts support Duration and optional scenes in the existing Create flow.
 
 ## Remote access
 

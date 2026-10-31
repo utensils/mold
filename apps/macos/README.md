@@ -675,11 +675,12 @@ Queue rows reserve a preview square even when a job has no source image. A neutr
 image outline marks that empty slot; loading and unavailable previews have separate
 accessible descriptions. The iOS queue uses the same placeholder.
 
-Library’s native toolbar menus keep the selected machine and media type visible
-beside their icons. **Media Type** shows All Media, Photos, Videos or 3D within
-the current shelf, preserving search and machine filters. Multiple search-token
-selections read “Multiple Media Types” or a machine count; long machine names
-truncate with their full name in the tooltip. Menu checkmarks follow the query. Clicking or
+Library’s **Filter** toolbar menu offers Favourites, Photos, Videos, 3D,
+collection membership, Made from a Source, tags and orientation. Combine one
+main filter with the Model Family submenu, whose choices have family colour
+dots. Clear Filters resets both. The button names the applied choices; machine
+and search filters stay available. Print Info names the family and shows its
+colour. Long machine names keep their full tooltip. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.
 
@@ -746,9 +747,9 @@ finished image or video still counts as copied (or already here). Sync reports
 those unavailable original inputs separately, including on repeated Sync All,
 without treating the saved output as a failed copy. Original inputs remain
 unavailable for settings reuse unless they are reattached. Copies with retained
-inputs can be reused without the original machine. Sequence settings reuse restores the first stage's
-source; the other stages remain downloadable from the retained archive. This
-single-render action does not reconstruct a complete authored sequence.
+inputs can be reused without the original machine. Sequence settings reuse restores all recorded ordered stages, exact seeds,
+joins, adapters and retained inputs into a fresh editable draft. Missing
+historical settings and unavailable inputs are disclosed.
 
 Local sync reuses its staged output for embedded-recipe verification instead of downloading it twice. Borrowed files remain caller-owned and must match the source offer’s digest and size before corroboration.
 
@@ -1081,7 +1082,7 @@ Queue toolbar actions carry explicit pause/resume and empty-queue icons in both 
 
 ## Multi-clip video
 
-On updated machines advertising duration video jobs, use one prompt and **Duration**. The initial value follows the selected recipe; a chosen length survives model changes and a cold launch. The server reports the single-generation limit and number of clips joined into one movie. **Define scenes** optionally adds separate prompts. Generate prepares ordinary source media, typed references and batch variations, then creates one durable Queue parent per movie. Queue offers the server’s progress, Stop, Resume, deletion of recovery data and paged recovery. An unanswered submission remains a known attempt to check before making another.
+On updated machines advertising duration video jobs, use one prompt and the **Length** slider. The initial value follows the selected recipe; a chosen length survives model changes and a cold launch. The server reports the single-generation limit and number of clips joined into one movie. **Longer video** adds separate scene prompts and Length sliders, each capped at the always-one-clip limit. Generate prepares ordinary source media, typed references and batch variations, then creates one durable Queue parent per movie. Queue offers the server’s progress, Stop, Resume, deletion of recovery data and paged recovery. An unanswered submission remains a known attempt to check before making another.
 
 Library **Extend Video…** opens the original recipe and adds duration to its ending, producing a longer movie while keeping the original. The original machine and source identity stay pinned; original typed references are shown and inherited unless replaced. Historical opening and closing images are cleared. For continuous extension, the original ending supplies the first frame; a newly attached opening image remains visible and must be removed before generating. Older machines retain the existing single-generation controls, while saved authored-sequence drafts keep their separate-part **Continue video** behavior.
 

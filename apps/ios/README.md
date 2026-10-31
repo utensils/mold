@@ -370,7 +370,10 @@ Use Settings on a completed Duration video restores its original single prompt, 
 Older authored videos reopen all recorded clips, lengths, joins, effective seeds, adapters and per-clip inputs. Clip options show saved overrides and offer **Use global inputs and controls** before replacing them. Historical per-clip negative prompts were not recorded; only the recorded first value can be restored, and the editor explains this limitation. Explicit older automatic one-shot videos restore one prompt and saved-length duration only when their recorded recipe proves a uniform automatic split; the editor states that current joins may differ. Incomplete or unrepresentable automatic recipes, linked incoming carry, and unsupported conditioning controls are refused before changing the current draft. Private per-clip media is not stored in preferences: after a cold launch, reopen Use Settings on the original video to restore those inputs before generating.
 
 
-The Library's View Options includes a Machine picker. All Machines shows the
+The Library's **Filter** menu includes the Machine picker, Favourites, media
+type, collection membership, Made from a Source, tags, orientation and Model
+Family with colour dots. Clear Filters resets the selection. Print Info names
+the family and shows its colour. All Machines shows the
 shared library; choosing one machine shows and edits only its copies. Collection
 counts follow that scope. A collection confirmed absent on that machine is marked
 “Not on machine”; an unavailable inventory is marked “Unavailable”, rather than

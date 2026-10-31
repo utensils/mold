@@ -352,9 +352,10 @@ through `chain_job_id`.
 - Desktop layout parity: the Create settings inspector is left-edge resizable from 280–480 px with pointer or keyboard controls. A committed width persists through app settings, double-click resets it, and the default is the shell anatomy's own `--mold-shell-inspector-w` (300 px, from `desktop/src/lib/panelResize.ts`). Its simplified essentials are the default; the Advanced toggle extends capability-gated, always-open icon sections below them in the same scrolling inspector without an overlay or canvas dimming. Web uses the same section headers and icons.
 - Settings parity: web and desktop mount the same `studio/components/settings/` kit (`SettingsShell` search + jump nav, `SettingRow`, the controls, `ConfigSettingRow`, `PerStyleDefaultsRow`, `ThemePicker`) over the one schema in `studio/lib/settingsSchema.ts`. The surfaces differ in two declared ways: the sections a shell declares (`surfaces` — Saving pictures & clips is desktop-only; the desktop's Machines body is this device + Mold home, the web's is this server + its GPUs) and the shell's layout — desktop is `layout="scroll"` + `scroll="content"` (every section open on the pane's own scroller, the nav a scroll-spy, bodies mounted as they approach), web is `layout="pane"` (the nav opens one section at a time, `?section=` written back on every pick, a search stacks the matches, no scroll-spy). Below 900px either nav folds into a chip strip.
 
-Desktop parity: Create has no Sequence path. Short clip is one prompt and one
-length; a length past the checkpoint's single-pass clip size is chained and
-stitched by the host and reported as one print. The opening image is a
+Desktop parity: Create has no separate Sequence route. On an updated host,
+Short clip uses Duration with optional Define scenes and publishes one movie.
+The legacy frame-based controls and compact authored editor remain for older
+hosts and restored sequences. The opening image is a
 primary-form well (source strength and fit beside it), sitting in the same slot
 the one-shot source well occupies and cleared by the same header ↺ Reset, while
 Advanced keeps the negative prompt and camera motion.
@@ -485,8 +486,7 @@ Saved machines appear before Add a machine, which contains pairing, nearby
 discovery and manual address entry. The connection controls start expanded on
 first setup. This foundation retains the existing Images and Styles workflows;
 further visual refinements and physical-device acceptance remain tracked in
-[issue #1628](https://github.com/utensils/mold/issues/1628). Scene authoring is
-intentionally absent.
+[issue #1628](https://github.com/utensils/mold/issues/1628). Updated hosts support Duration and optional scenes in the existing Create flow.
 
 Before importing a source-bearing copy, clients check destination readiness. Windows local destinations currently cannot receive retained inputs, so those copies are refused before creating a local library output. Source-free copies remain supported, and Windows clients can recall retained sources from a supported remote machine.
 
