@@ -19,6 +19,24 @@ silently substitute all installed RAM. If this optional kernel key is absent,
 a valid Metal recommendation can still supply a budget. CPU and CUDA behavior
 is unchanged.
 
+## Other GPU apps share this budget
+
+Metal's working-set recommendation covers the whole Mac, and every GPU app draws
+on it. Mold's allocation figures do not include other applications, so a large
+render beside another GPU app, such as LM Studio with a model loaded, can take
+the machine's total over the budget. Metal then reports
+`kIOGPUCommandBufferCallbackErrorOutOfMemory` to whichever app is submitting work
+at that moment. That can be Mold or the other app.
+
+Mold's own use stays close to what the model needs. Metal computes in 32-bit
+floats, so a half-precision checkpoint takes about twice its file size once
+loaded: a 12.3 GB Z-Image checkpoint peaks at about 25 GiB. Other models can peak
+above that size; FLUX.2 Klein 9B reached about 53 GiB on a 128 GiB Mac.
+
+If either app reports this error, close the other app or unload its model, then
+render again. Mold releases its memory after a failed render, so you do not need
+to toggle the device first.
+
 ## Inspect this machine
 
 ```bash

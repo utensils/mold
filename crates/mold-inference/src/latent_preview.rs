@@ -163,6 +163,9 @@ const WAN22_BIAS: [f32; 3] = [0.0317, -0.0878, -0.1388];
 
 type UnpackFn = Box<dyn Fn(&Tensor) -> anyhow::Result<Tensor> + Send + Sync>;
 
+/// How Metal reports a command buffer that could not make its memory resident.
+const METAL_COMMAND_BUFFER_OOM: &str = "kIOGPUCommandBufferCallbackErrorOutOfMemory";
+
 pub struct LatentPreviewer {
     factors: &'static [[f32; 3]],
     bias: [f32; 3],
@@ -174,6 +177,8 @@ pub struct LatentPreviewer {
     /// [`MIN_INTERVAL`] in production; tests shrink it to observe every step.
     min_interval: Duration,
     enabled: bool,
+    /// The GPU failure a preview readback ran into, for the denoise loop to act on.
+    device_failure: Mutex<Option<String>>,
 }
 
 fn preview_enabled() -> bool {
@@ -194,6 +199,7 @@ impl LatentPreviewer {
                     .map_err(Into::into)
             }),
             last_emit: Mutex::new(None),
+            device_failure: Mutex::new(None),
             min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
@@ -208,6 +214,7 @@ impl LatentPreviewer {
                 crate::flux2::sampling::unpack(t, height, width).map_err(Into::into)
             }),
             last_emit: Mutex::new(None),
+            device_failure: Mutex::new(None),
             min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
@@ -227,6 +234,7 @@ impl LatentPreviewer {
                 }
             }),
             last_emit: Mutex::new(None),
+            device_failure: Mutex::new(None),
             min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         }
@@ -258,6 +266,7 @@ impl LatentPreviewer {
                 }
             }),
             last_emit: Mutex::new(None),
+            device_failure: Mutex::new(None),
             min_interval: MIN_INTERVAL,
             enabled: preview_enabled(),
         })
@@ -311,8 +320,29 @@ impl LatentPreviewer {
                 step,
                 total,
             }),
-            Err(e) => tracing::warn!("skipping denoise preview: {e:#}"),
+            Err(e) => {
+                tracing::warn!("skipping denoise preview: {e:#}");
+                let message = format!("{e:#}");
+                if message.contains(METAL_COMMAND_BUFFER_OOM) {
+                    *self.device_failure.lock().expect("preview failure mutex") = Some(message);
+                }
+            }
         }
+    }
+
+    /// The failed Metal command buffer a preview readback found, if any.
+    ///
+    /// Candle reports a failed command buffer from every later readback, so the
+    /// first failure means no step after it computes anything. A denoise loop asks
+    /// here after each preview to stop instead of spending the rest of the render
+    /// on work the GPU already refused. Any other preview error, such as a CUDA
+    /// allocation failing for the preview's own conversion, says nothing about the
+    /// render, which goes on without that preview.
+    pub fn take_device_failure(&self) -> Option<String> {
+        self.device_failure
+            .lock()
+            .expect("preview failure mutex")
+            .take()
     }
 
     /// Project the latent to a latent-resolution RGB PNG.
@@ -375,6 +405,7 @@ mod tests {
             bias: FLUX1_BIAS,
             to_spatial: Box::new(|t| Ok(t.clone())),
             last_emit: Mutex::new(None),
+            device_failure: Mutex::new(None),
             min_interval: MIN_INTERVAL,
             enabled: true,
         }
@@ -391,6 +422,37 @@ mod tests {
         // All-zero latent = bias only → (bias+1)/2*255 per channel.
         let px = decoded.to_rgb8().get_pixel(0, 0).0;
         assert_eq!(px[0], (((FLUX1_BIAS[0] + 1.0) / 2.0) * 255.0) as u8);
+    }
+
+    #[test]
+    fn a_gpu_out_of_memory_reaches_the_denoise_loop_and_nothing_else_does() {
+        let (reporter, _log) = capturing_reporter();
+        let latent = Tensor::zeros((1, 16, 4, 6), DType::F32, &Device::Cpu).unwrap();
+
+        let mut previewer = spatial_previewer();
+        previewer.min_interval = Duration::ZERO;
+        previewer.to_spatial = Box::new(|_| {
+            anyhow::bail!(
+                "Metal error Command buffer had following error: Insufficient Memory \
+                 (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+            )
+        });
+        assert!(previewer.take_device_failure().is_none());
+        previewer.maybe_emit(&reporter, &latent, 1, 10);
+        assert!(previewer
+            .take_device_failure()
+            .is_some_and(|failure| failure.contains("Insufficient Memory")));
+        assert!(previewer.take_device_failure().is_none(), "reported once");
+
+        // A preview that merely could not render stays a skipped preview, even
+        // when its own allocation ran out on a card that can finish the render.
+        for message in ["latent has the wrong shape", "CUDA_ERROR_OUT_OF_MEMORY"] {
+            let mut previewer = spatial_previewer();
+            previewer.min_interval = Duration::ZERO;
+            previewer.to_spatial = Box::new(move |_| anyhow::bail!("{message}"));
+            previewer.maybe_emit(&reporter, &latent, 1, 10);
+            assert!(previewer.take_device_failure().is_none(), "{message}");
+        }
     }
 
     #[test]

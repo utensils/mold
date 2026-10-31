@@ -585,6 +585,23 @@ where
     Ok(created)
 }
 
+pub use crate::weight_loader::safetensors_bytes_widened_to_f32;
+
+/// Wait on the queue, once more if the first wait only reports an earlier failure.
+///
+/// A failed command buffer surfaces from the wait that collects it, and that wait
+/// returns before candle's pool sweep. The failure has already been delivered to
+/// the render that caused it, so a sweep that stops there would strand everything
+/// the render was holding.
+fn synchronize_past_a_reported_failure(
+    mut synchronize: impl FnMut() -> candle_core::Result<()>,
+) -> candle_core::Result<()> {
+    synchronize().or_else(|error| {
+        tracing::debug!(%error, "retrying the queue wait past a reported GPU failure");
+        synchronize()
+    })
+}
+
 /// Return pooled Metal buffers for `ordinal` to the OS.
 ///
 /// candle's `MetalDevice` owns a caching allocator: a freed buffer stays in
@@ -616,7 +633,7 @@ pub fn release_pooled_metal_memory(ordinal: usize) {
     let Some(device) = device else {
         return;
     };
-    if let Err(error) = device.synchronize() {
+    if let Err(error) = synchronize_past_a_reported_failure(|| device.synchronize()) {
         tracing::warn!(
             ordinal,
             %error,
@@ -8224,6 +8241,40 @@ mod tests {
         // Metal GPU, or for an ordinal this process never touched, has nothing
         // to return and must not allocate one to find that out.
         release_pooled_metal_memory(usize::MAX);
+    }
+
+    /// `Commands::flush_and_wait` reports a failed buffer once and returns before
+    /// the sweep, so one wait after a Metal OOM frees nothing: everything that
+    /// render held stays allocated and admission reads zero headroom.
+    #[test]
+    fn a_reported_gpu_failure_does_not_stop_the_sweep() {
+        let mut answers = vec![Ok(()), Err(candle_core::Error::Msg("oom".into()))];
+        let mut calls = 0;
+        synchronize_past_a_reported_failure(|| {
+            calls += 1;
+            answers.pop().unwrap()
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+
+        let mut calls = 0;
+        synchronize_past_a_reported_failure(|| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "a healthy queue needs one wait");
+
+        let mut calls = 0;
+        synchronize_past_a_reported_failure(|| {
+            calls += 1;
+            Err(candle_core::Error::Msg("still broken".into()))
+        })
+        .unwrap_err();
+        assert_eq!(
+            calls, 2,
+            "a repeating failure is reported, not retried forever"
+        );
     }
 
     #[test]
