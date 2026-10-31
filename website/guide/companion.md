@@ -97,7 +97,8 @@ keeps its original filename and file type.
   details with every full machine name and a pinned Done action, including at large text sizes. Navigation tabs return when details close.
   Decorative machine badges fit their tiles; full names remain in accessibility
   labels and Info.
-  **Media Type** offers All Media, Photos, Videos and 3D within any shelf.
+  **Filter** offers media type, favourites, collection membership, source media,
+  tags, orientation, model family and machine choices within any shelf.
   Tap **Select**, then tap tiles or sweep sideways across them. Starting on
   a selected tile deselects the range; reverse to shorten it, or hold near
   an edge to scroll. Vertical swipes still scroll in Select mode. Tap **Add to Collection** in the selection bar to choose a collection, or **New Collection…** to name and create one with the selected prints. The same action appears under **More** and a print’s context menu. Actions remain available while capability inventory is unknown; an explicit machine refusal disables organization. Search

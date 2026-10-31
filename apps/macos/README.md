@@ -675,11 +675,12 @@ Queue rows reserve a preview square even when a job has no source image. A neutr
 image outline marks that empty slot; loading and unavailable previews have separate
 accessible descriptions. The iOS queue uses the same placeholder.
 
-Library’s native toolbar menus keep the selected machine and media type visible
-beside their icons. **Media Type** shows All Media, Photos, Videos or 3D within
-the current shelf, preserving search and machine filters. Multiple search-token
-selections read “Multiple Media Types” or a machine count; long machine names
-truncate with their full name in the tooltip. Menu checkmarks follow the query. Clicking or
+Library’s **Filter** toolbar menu offers Favourites, Photos, Videos, 3D,
+collection membership, Made from a Source, tags and orientation. Combine one
+main filter with the Model Family submenu, whose choices have family colour
+dots. Clear Filters resets both. The button names the applied choices; machine
+and search filters stay available. Print Info names the family and shows its
+colour. Long machine names keep their full tooltip. Clicking or
 Command/Shift-clicking a visible tile keeps the viewport in place;
 keyboard navigation still reveals tiles outside the viewport.
 

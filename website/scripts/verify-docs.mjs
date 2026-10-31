@@ -142,6 +142,21 @@ for (const relPath of videoDocs) {
     }
   }
 }
+for (const relPath of [
+  'website/guide/companion.md',
+  'website/guide/macos.md',
+  'apps/ios/README.md',
+  'apps/macos/README.md',
+]) {
+  const source = readFileSync(join(repoRoot, relPath), 'utf8')
+  if (
+    /\*\*Media Type\*\* (?:offers|shows)|View Options includes a Machine picker/u.test(
+      source
+    )
+  ) {
+    fail(`${relPath} must describe the current Library Filter menu`)
+  }
+}
 for (const relPath of ['guide/macos.md', 'guide/companion.md']) {
   const source = readRel(relPath)
   for (const label of ['**Length**', '**Longer video**', '**Filter**']) {
