@@ -529,35 +529,17 @@ the server choose a 1–20 second LTX 2.5 clip from the prompt. Turn it off to c
 an explicit length. Native iOS and macOS expose the same choice as web and Tauri;
 unsupported or unavailable models keep explicit duration controls.
 
-## Video length, scenes and recovery
+## Duration videos and scenes
 
-On updated machines, choose one prompt and the **Length** slider. Its initial
-value follows the selected recipe; native duration controls use tenths of a
-second up to one generation. **Automatic from prompt** lets supported models
-choose the length instead. Turn on **Longer video** for ordered scene prompts
-with a Length slider per scene and **Add scene**. Each scene is capped at the
-host's always-one-clip limit; plan warnings explain repeated actions and scenes
-shorter than the minimum generation. See [Video generation](./video#longer-videos)
-for model-specific joins, CLI examples and extending a saved movie.
+On updated machines, Short clip uses one prompt and **Duration**, with optional
+**Define scenes** for ordered prompts and lengths. The server reports its
+single-generation limit and planned clip count. Library **Extend video** creates
+a new movie containing the original plus added footage, leaving the original
+in place. **Use settings** restores the requested duration, optional scenes,
+exact seed and retained inputs into an editable draft. Extended prints restore
+the added-footage settings and disclose that the original is not attached.
 
-Library **Extend video** preserves the original and publishes the original plus
-added footage as a new movie. **Use settings** creates a fresh editable draft:
-Duration prints restore their original duration/scenes and exact seed; extended
-prints restore the added-footage settings and disclose that the original movie
-is not attached. Authored sequences restore every recorded stage and input.
-
-Videos appear as ordinary rows in their machine's Queue section, with Waiting,
-Rendering clip and Joining clips progress. Stop retains accepted Duration work
-for explicit Resume. Start again and Send use a new attempt with the destination's
-current recipe when offered. Completed and stopped videos leave the native Queue
-automatically; failed or interrupted work stays available for recovery. Saved
-movies remain in Library. An uncertain submission must be checked before making
-another attempt; reconnecting never resumes paused work automatically.
-
-## Library filters
-
-The **Filter** button offers Favourites, media type, collection membership,
-Made from a Source, tags and orientation, a Model Family submenu with colour
-dots, and Machine selection. Clear Filters resets the selection. Print Info
-shows the model family and its colour. Leaving a print viewer restores the
-Library tab bar; Generate uses the separate Queue tab for job progress.
+Queue offers progress, Stop, Resume and recovery actions supported by the
+captured machine. After a lost reply, check the known attempt before submitting
+again. See [Video generation](./video#longer-videos) for joins and recovery.
+The native iOS 26 app has its own [Companion guide](./companion).

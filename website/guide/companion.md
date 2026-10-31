@@ -339,3 +339,36 @@ Native macOS and iOS keep Source Media in its own Library section, with all live
 Native storage preferences include Unlimited. On iOS, viewed original images and complete videos are saved locally for offline viewing, original sharing and saving. The first video open downloads its complete file before playback; finite storage limits may evict older media. Remote generation and format conversion still require a connected machine. Native macOS nightly performance diagnostics record bounded timing and responsiveness events without prompts, filenames or credentials.
 
 Native Source Media uses tight Library-style rows that preserve each original’s aspect ratio, with badges inside the image. Resizing and ordinary sync edits retain warm thumbnails. Source changes and Refresh revalidate inventories without timer-driven reloads; temporary thumbnail failures retry without scrolling.
+
+## Video length, scenes and recovery
+
+On updated machines, choose one prompt and the **Length** slider. Its initial
+value follows the selected recipe; native duration controls use tenths of a
+second up to one generation. **Automatic from prompt** lets supported models
+choose the length instead. Turn on **Longer video** for ordered scene prompts
+with a Length slider per scene and **Add scene**. Each scene is capped at the
+host's always-one-clip limit; plan warnings explain repeated actions and scenes
+shorter than the minimum generation. See [Video generation](./video#longer-videos)
+for model-specific joins, CLI examples and extending a saved movie.
+
+Library **Extend video** preserves the original and publishes the original plus
+added footage as a new movie. **Use settings** creates a fresh editable draft:
+Duration prints restore their original duration/scenes and exact seed; extended
+prints restore the added-footage settings and disclose that the original movie
+is not attached. Authored sequences restore every recorded stage and input.
+
+Videos appear as ordinary rows in their machine's Queue section, with Waiting,
+Rendering clip and Joining clips progress. Stop retains accepted Duration work
+for explicit Resume. Start again and Send use a new attempt with the destination's
+current recipe when offered. Completed and stopped videos leave the native Queue
+automatically; failed or interrupted work stays available for recovery. Saved
+movies remain in Library. An uncertain submission must be checked before making
+another attempt; reconnecting never resumes paused work automatically.
+
+## Library filters
+
+The **Filter** button offers Favourites, media type, collection membership,
+Made from a Source, tags and orientation, a Model Family submenu with colour
+dots, and Machine selection. Clear Filters resets the selection. Print Info
+shows the model family and its colour. Leaving a print viewer restores the
+Library tab bar; Generate uses the separate Queue tab for job progress.

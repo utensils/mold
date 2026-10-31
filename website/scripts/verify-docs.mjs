@@ -114,6 +114,7 @@ const videoDocs = [
   'website/guide/generating.md',
   'website/guide/desktop.md',
   'website/guide/iphone.md',
+  'website/guide/companion.md',
   'website/guide/macos.md',
   'website/api/index.md',
   'apps/mobile/README.md',
@@ -141,7 +142,7 @@ for (const relPath of videoDocs) {
     }
   }
 }
-for (const relPath of ['guide/macos.md', 'guide/iphone.md']) {
+for (const relPath of ['guide/macos.md', 'guide/companion.md']) {
   const source = readRel(relPath)
   for (const label of ['**Length**', '**Longer video**', '**Filter**']) {
     if (!source.includes(label)) {
