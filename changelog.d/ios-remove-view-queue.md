@@ -1,1 +1,0 @@
-- iPhone and iPad: Generate no longer shows a "View Queue" link above the Generate button; the Queue tab is one tap away.

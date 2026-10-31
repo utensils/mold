@@ -1,2 +1,0 @@
-- **Updated release documentation.** Align website, app guides and agent instructions with Duration scenes, full sequence settings reuse, native Library filters and Queue recovery. Add checks against retired authoring guidance.
-- **Container release builds.** Include the core build-script helper in Docker’s dependency-cache layer so every CUDA image can compile.
