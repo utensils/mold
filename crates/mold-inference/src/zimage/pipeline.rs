@@ -84,12 +84,7 @@ impl ZImageSafetensorsBackend {
 
     fn load_cast(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
         let stored_name = self.stored_name(name);
-        let tensor = self.st.load(stored_name.as_ref(), dev)?;
-        if tensor.dtype() != dtype {
-            tensor.to_dtype(dtype)
-        } else {
-            Ok(tensor)
-        }
+        crate::weight_loader::load_stored_tensor(&self.st, stored_name.as_ref(), dtype, dev)
     }
 
     fn load_tensor(
@@ -121,7 +116,12 @@ impl ZImageSafetensorsBackend {
         dtype: DType,
         dev: &Device,
     ) -> candle_core::Result<Tensor> {
-        let qkv = self.load_cast(source_name, dtype, dev)?;
+        let stored_name = self.stored_name(source_name);
+        let staging = DType::try_from(self.st.get(stored_name.as_ref())?.dtype()).map_or_else(
+            |_| dev.clone(),
+            |stored| crate::weight_loader::weight_staging_device(stored, dtype, dev),
+        );
+        let qkv = self.st.load(stored_name.as_ref(), &staging)?;
         let rows = qkv.dim(0)?;
         let split_rows = expected_shape
             .and_then(|shape| shape.dims().first().copied())
@@ -131,8 +131,15 @@ impl ZImageSafetensorsBackend {
                 "invalid fused QKV shape for {source_name}: rows={rows}, split_rows={split_rows}"
             )));
         }
-        qkv.narrow(0, component * split_rows, split_rows)?
-            .contiguous()
+        // `contiguous()` is a shallow clone of a dim-0 narrow, which would leave
+        // each of Q, K and V holding its own whole fused tensor.
+        let component_rows = qkv.narrow(0, component * split_rows, split_rows)?;
+        let owned = if component_rows.dtype() == dtype {
+            component_rows.force_contiguous()?
+        } else {
+            component_rows.to_dtype(dtype)?
+        };
+        owned.to_device(dev)
     }
 }
 
@@ -1256,6 +1263,9 @@ impl ZImageEngine {
             )?;
 
             drop(text_encoder);
+            // Metal keeps a dropped model in its buffer pool until something waits
+            // on the queue, and the transformer would load on top of it.
+            te_device.synchronize()?;
             self.base.progress.info("Freed Qwen3 text encoder");
             tracing::info!("Qwen3 text encoder dropped (sequential mode)");
 
@@ -1473,6 +1483,9 @@ impl ZImageEngine {
                         previewer.maybe_emit(&self.base.progress, &x0_est, step + 1, num_steps)
                     }
                     Err(e) => tracing::warn!("skipping denoise preview: {e}"),
+                }
+                if let Some(failure) = previewer.take_device_failure() {
+                    bail!("{failure}");
                 }
             }
         }
@@ -1912,6 +1925,9 @@ impl ZImageEngine {
                         Ok(x0_est) => previewer.maybe_emit(progress, &x0_est, step + 1, num_steps),
                         Err(e) => tracing::warn!("skipping denoise preview: {e}"),
                     }
+                    if let Some(failure) = previewer.take_device_failure() {
+                        bail!("{failure}");
+                    }
                 }
             }
         }
@@ -2255,6 +2271,58 @@ mod tests {
         assert_eq!(k_norm.to_vec1::<f32>().unwrap(), vec![9.0]);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `candle` answers `contiguous()` with a shallow clone for a dim-0 `narrow`,
+    /// because that view already is contiguous. Q, K and V each kept their own
+    /// load of the whole fused tensor alive: three full buffers per attention
+    /// block, 25 GiB across a Z-Image transformer, to hold 5.6 GiB of weights.
+    #[test]
+    fn fused_qkv_components_own_only_their_own_rows() {
+        use candle_nn::var_builder::SimpleBackend;
+        use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fused.safetensors");
+        let bytes = half::bf16::from_f32(2.0).to_le_bytes();
+        let qkv: Vec<u8> = (0..3).flat_map(|_| bytes).collect();
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            format!("{ZIMAGE_SINGLE_FILE_PREFIX}layers.0.attention.qkv.weight"),
+            TensorView::new(SafeDtype::BF16, vec![3, 1], qkv.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&[path.as_path()]) }
+            .unwrap();
+        let backend = ZImageSafetensorsBackend::new(st);
+
+        for dtype in [DType::BF16, DType::F32] {
+            let k = backend
+                .get(
+                    Shape::from((1, 1)),
+                    "layers.0.attention.to_k.weight",
+                    candle_nn::Init::Const(0.0),
+                    dtype,
+                    &Device::Cpu,
+                )
+                .unwrap();
+            assert_eq!(
+                k.to_dtype(DType::F32).unwrap().to_vec2::<f32>().unwrap(),
+                vec![vec![2.0]]
+            );
+            let (storage, layout) = k.storage_and_layout();
+            assert_eq!(
+                layout.start_offset(),
+                0,
+                "{dtype:?} still views the fused row"
+            );
+            let elements = match &*storage {
+                candle_core::Storage::Cpu(candle_core::CpuStorage::BF16(v)) => v.len(),
+                candle_core::Storage::Cpu(candle_core::CpuStorage::F32(v)) => v.len(),
+                _ => panic!("unexpected storage"),
+            };
+            assert_eq!(elements, 1, "{dtype:?} pins the whole fused tensor");
+        }
     }
 
     /// z-image-turbo:bf16 regression: the official Tongyi checkpoint stores

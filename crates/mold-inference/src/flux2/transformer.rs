@@ -2495,6 +2495,9 @@ impl Flux2TransformerWrapper {
                         }
                         Err(e) => tracing::warn!("skipping denoise preview: {e}"),
                     }
+                    if let Some(failure) = previewer.take_device_failure() {
+                        anyhow::bail!("{failure}");
+                    }
                 }
             }
         }

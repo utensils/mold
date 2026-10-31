@@ -244,6 +244,42 @@ impl SingleFileBackend {
         t.to_dtype(dtype)
     }
 
+    /// Where to read `diffusers_key` before casting it for `dev`. See
+    /// [`crate::weight_loader::weight_staging_device`]. NVFP4 sidecars and unknown
+    /// keys keep their own placement and error paths.
+    fn staging_device(&self, diffusers_key: &str, dtype: DType, dev: &Device) -> Device {
+        let source_key = match self.entries.get(diffusers_key) {
+            Some(BackendEntry::Direct { source_key })
+            | Some(BackendEntry::Slice { source_key, .. })
+            | Some(BackendEntry::SwapHalves { source_key, .. }) => source_key,
+            _ => return dev.clone(),
+        };
+        self.st
+            .get(source_key)
+            .ok()
+            .and_then(|view| DType::try_from(view.dtype()).ok())
+            .map_or_else(
+                || dev.clone(),
+                |stored| crate::weight_loader::weight_staging_device(stored, dtype, dev),
+            )
+    }
+
+    /// [`Self::cast`], then the one exactly sized upload from a staged read.
+    fn cast_onto(
+        &self,
+        t: Tensor,
+        dtype: DType,
+        staging: &Device,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let t = self.cast(t, dtype)?;
+        if staging.same_device(dev) {
+            Ok(t)
+        } else {
+            t.to_device(dev)
+        }
+    }
+
     /// Direct-only entries from a `BTreeMap<diffusers, a1111>` slice — used by
     /// the UNet, VAE, and SD1.5 / SDXL CLIP-L factories.
     fn direct_entries(remap_slice: &BTreeMap<String, String>) -> BTreeMap<String, BackendEntry> {
@@ -1118,7 +1154,8 @@ impl SimpleBackend for SingleFileBackend {
         dtype: DType,
         dev: &Device,
     ) -> candle_core::Result<Tensor> {
-        let t = self.lookup(name, dev)?;
+        let staging = self.staging_device(name, dtype, dev);
+        let t = self.lookup(name, &staging)?;
         if t.shape() != &s {
             return Err(candle_core::Error::UnexpectedShape {
                 msg: format!("single-file backend: shape mismatch for {name}"),
@@ -1127,12 +1164,13 @@ impl SimpleBackend for SingleFileBackend {
             }
             .bt());
         }
-        self.cast(t, dtype)
+        self.cast_onto(t, dtype, &staging, dev)
     }
 
     fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
-        let t = self.lookup(name, dev)?;
-        self.cast(t, dtype)
+        let staging = self.staging_device(name, dtype, dev);
+        let t = self.lookup(name, &staging)?;
+        self.cast_onto(t, dtype, &staging, dev)
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
@@ -1149,6 +1187,68 @@ mod tests {
     use safetensors::tensor::{serialize_to_file, Dtype as SafeDtype, TensorView};
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// Flux.2 finetunes ship F16 single files and fused attention slices. Widening
+    /// on the device held 33.8 GiB of weights in far more than that.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn metal_widened_entries_occupy_exactly_their_own_bytes() {
+        let device = crate::device::metal_device(0).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single.safetensors");
+        let direct: Vec<u8> = (0..3000u16)
+            .flat_map(|v| half::f16::from_f32(f32::from(v)).to_le_bytes())
+            .collect();
+        let fused: Vec<u8> = (0..9000u16)
+            .flat_map(|v| half::f16::from_f32(f32::from(v)).to_le_bytes())
+            .collect();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "direct".to_string(),
+            TensorView::new(SafeDtype::F16, vec![3000], direct.as_slice()).unwrap(),
+        );
+        tensors.insert(
+            "fused".to_string(),
+            TensorView::new(SafeDtype::F16, vec![9000], fused.as_slice()).unwrap(),
+        );
+        serialize_to_file(&tensors, &None, &path).unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "direct".to_string(),
+            BackendEntry::Direct {
+                source_key: "direct".to_string(),
+            },
+        );
+        entries.insert(
+            "sliced".to_string(),
+            BackendEntry::Slice {
+                source_key: "fused".to_string(),
+                axis: 0,
+                component: 1,
+                num_components: 3,
+            },
+        );
+        let backend = SingleFileBackend::from_entries(&path, entries).unwrap();
+
+        for name in ["direct", "sliced"] {
+            let t = backend.get_unchecked(name, DType::F32, &device).unwrap();
+            assert_eq!(t.dtype(), DType::F32);
+            {
+                let (storage, layout) = t.storage_and_layout();
+                assert_eq!(layout.start_offset(), 0);
+                let candle_core::Storage::Metal(metal) = &*storage else {
+                    panic!("expected Metal storage");
+                };
+                assert_eq!(metal.buffer().length(), 12_000, "{name}");
+            }
+            let values = t.to_device(&Device::Cpu).unwrap().to_vec1::<f32>().unwrap();
+            let start = if name == "sliced" { 3000u16 } else { 0 };
+            let expected: Vec<f32> = (start..start + 3000)
+                .map(|v| half::f16::from_f32(f32::from(v)).to_f32())
+                .collect();
+            assert_eq!(values, expected, "{name}");
+        }
+    }
 
     /// Build a synthetic safetensors with caller-supplied (key, shape, F32 data) tensors.
     /// Like `write_synthetic` but accepts owned `String` keys (for dynamically
